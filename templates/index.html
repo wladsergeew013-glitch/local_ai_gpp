@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPP Local AI Hub</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <img src="/static/logo.svg" alt="ГПП Лого" class="logo" />
+    <div>
+      <h1>GPP Local AI Hub</h1>
+      <p>Локальный движок и хаб моделей: LLM, embeddings, классический ML.</p>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card">
+      <h2>Загрузка модели</h2>
+      <form id="upload-form">
+        <label>Название модели</label>
+        <input name="model_name" required />
+
+        <label>Тип модели</label>
+        <select name="model_type" required>
+          <option value="LLM">LLM</option>
+          <option value="Embedding">Embedding</option>
+          <option value="ClassicalML">Classical ML</option>
+          <option value="Other">Другое</option>
+        </select>
+
+        <label>Файл модели (с диска/сервера)</label>
+        <input type="file" name="model_file" required />
+
+        <button type="submit">Загрузить и сохранить</button>
+      </form>
+      <p id="upload-result"></p>
+    </section>
+
+    <section class="card">
+      <h2>Список моделей</h2>
+      <ul id="models-list">
+        {% for model in models %}
+          <li>
+            <strong>{{ model.name }}</strong> ({{ model.type }}) — {{ model.status }}
+            <button onclick="startModel('{{ model.id }}')">Запустить</button>
+          </li>
+        {% else %}
+          <li>Модели пока не загружены.</li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>Зона тренировки (заготовка)</h2>
+      <form id="train-form">
+        <label>ID модели</label>
+        <input name="model_id" required />
+        <label>Путь к датасету</label>
+        <input name="dataset_path" placeholder="/data/train.csv" required />
+        <button type="submit">Поставить тренировку в очередь</button>
+      </form>
+      <p id="train-result"></p>
+    </section>
+  </main>
+
+  <script>
+    const uploadForm = document.getElementById('upload-form');
+    const uploadResult = document.getElementById('upload-result');
+    const trainForm = document.getElementById('train-form');
+    const trainResult = document.getElementById('train-result');
+
+    uploadForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(uploadForm);
+      const response = await fetch('/api/models/upload', { method: 'POST', body: formData });
+      const data = await response.json();
+      uploadResult.textContent = response.ok ? `Сохранено: ${data.id}` : `Ошибка: ${data.detail}`;
+      if (response.ok) window.location.reload();
+    });
+
+    async function startModel(modelId) {
+      const response = await fetch(`/api/models/${encodeURIComponent(modelId)}/start`, { method: 'POST' });
+      const data = await response.json();
+      alert(response.ok ? `Запущена: ${data.name}` : `Ошибка: ${data.detail}`);
+      if (response.ok) window.location.reload();
+    }
+
+    trainForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(trainForm);
+      const response = await fetch('/api/train', { method: 'POST', body: formData });
+      const data = await response.json();
+      trainResult.textContent = response.ok ? `${data.status}: ${data.message}` : `Ошибка: ${data.detail}`;
+    });
+  </script>
+</body>
+</html>
