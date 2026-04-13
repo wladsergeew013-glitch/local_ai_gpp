@@ -18,6 +18,8 @@ APP_DIR = Path(__file__).parent
 PROJECT_ROOT = APP_DIR.parent.parent
 MODELS_DIR = PROJECT_ROOT / "models_storage"
 META_FILE = MODELS_DIR / "models.json"
+BRANDING_DIR = MODELS_DIR / "branding"
+DEFAULT_LOGO_URL = "/static/logo.svg"
 
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 if not META_FILE.exists():
@@ -25,6 +27,7 @@ if not META_FILE.exists():
 
 app = FastAPI(title="GPP Local AI Hub", version="0.3.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
+app.mount("/user-assets", StaticFiles(directory=MODELS_DIR), name="user-assets")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 MODEL_RUNTIMES: dict[str, Any] = {}
@@ -90,6 +93,15 @@ def _find_model_or_404(model_id: str) -> tuple[list[dict[str, Any]], dict[str, A
     raise HTTPException(status_code=404, detail="Model not found")
 
 
+def _get_logo_url() -> str:
+    if not BRANDING_DIR.exists():
+        return DEFAULT_LOGO_URL
+    for logo in BRANDING_DIR.iterdir():
+        if logo.is_file():
+            return f"/user-assets/branding/{logo.name}?v={int(logo.stat().st_mtime)}"
+    return DEFAULT_LOGO_URL
+
+
 def _load_llama_runtime(model: dict[str, Any], n_ctx: int = 4096) -> Any:
     if model["id"] in MODEL_RUNTIMES:
         return MODEL_RUNTIMES[model["id"]]
@@ -116,7 +128,38 @@ def _load_llama_runtime(model: dict[str, Any], n_ctx: int = 4096) -> Any:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("index.html", {"request": request, "models": _load_models()})
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "models": _load_models(),
+            "logo_url": _get_logo_url(),
+        },
+    )
+
+
+@app.get("/api/branding")
+def get_branding() -> JSONResponse:
+    return JSONResponse({"logo_url": _get_logo_url()})
+
+
+@app.post("/api/branding/logo")
+async def upload_logo(logo_file: UploadFile = File(...)) -> JSONResponse:
+    incoming_filename = logo_file.filename or "logo.png"
+    ext = Path(incoming_filename).suffix.lower()
+    if ext not in {".svg", ".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(status_code=400, detail="Поддерживаются только SVG/PNG/JPG/JPEG/WEBP")
+
+    BRANDING_DIR.mkdir(parents=True, exist_ok=True)
+    for file in BRANDING_DIR.iterdir():
+        if file.is_file():
+            file.unlink()
+
+    logo_path = BRANDING_DIR / f"logo{ext}"
+    with logo_path.open("wb") as f:
+        shutil.copyfileobj(logo_file.file, f)
+
+    return JSONResponse({"logo_url": _get_logo_url()})
 
 
 @app.get("/api/models")

@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="topbar">
-    <img src="/static/logo.svg" alt="ГПП Лого" class="logo" />
+    <img src="{{ logo_url }}" alt="ГПП Лого" class="logo" id="brand-logo" />
     <div>
       <h1>GPP Local AI Hub</h1>
       <p>Локальный движок и хаб моделей: LLM, embeddings, классический ML.</p>
@@ -77,6 +77,16 @@
               <li>Модели пока не загружены.</li>
             {% endfor %}
           </ul>
+        </section>
+
+        <section class="card">
+          <h2>Брендинг</h2>
+          <form id="logo-form">
+            <label>Логотип (SVG/PNG/JPG/WEBP)</label>
+            <input type="file" name="logo_file" accept=".svg,.png,.jpg,.jpeg,.webp" required />
+            <button type="submit">Загрузить логотип</button>
+          </form>
+          <p id="logo-result"></p>
         </section>
       </div>
     </section>

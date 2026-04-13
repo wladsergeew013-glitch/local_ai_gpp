@@ -77,10 +77,18 @@ docker run --rm -p 8000:8000 local-ai-gpp
 run_local_ai_gpp.bat
 ```
 
+Если запускаете через PowerShell и у вас была ошибка вида  
+`"\"D:\repo\local_ai_gpp\run_local_ai_gpp.bat\"" не является ...`,  
+запускайте **без экранированных кавычек**, например:
+
+```powershell
+cd D:\repo\local_ai_gpp
+.\run_local_ai_gpp.bat
+```
+
 Скрипт автоматически:
 - перейдёт в директорию проекта (чтобы `docker build` всегда получал корректный PATH),
 - соберёт TypeScript фронтенд (если установлен `npm`),
 - соберёт Docker-образ,
 - запустит контейнер с пробросом `8000:8000`,
 - смонтирует локальную папку `models_storage` в контейнер (`/app/models_storage`).
-
