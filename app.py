@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,44 @@ class ChatRequest(BaseModel):
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
 
+
+
+
+def _sanitize_segment(value: str, field_name: str, *, allow_dot: bool = True) -> str:
+    candidate = value.strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+
+    if any(sep in candidate for sep in ("/", "\\", os.sep)):
+        raise HTTPException(status_code=400, detail=f"{field_name} must not contain path separators")
+
+    if candidate in {".", ".."} or ".." in candidate:
+        raise HTTPException(status_code=400, detail=f"{field_name} must not contain relative path segments")
+
+    pattern = r"^[A-Za-z0-9._ -]+$" if allow_dot else r"^[A-Za-z0-9_ -]+$"
+    if not re.match(pattern, candidate):
+        raise HTTPException(status_code=400, detail=f"{field_name} contains unsupported characters")
+
+    return candidate
+
+
+def _resolve_model_file_path(model_name: str, filename: str) -> tuple[str, str, Path]:
+    safe_model_name = _sanitize_segment(model_name, "model_name", allow_dot=False)
+    # Validate raw user-supplied filename first to reject path traversal attempts.
+    _sanitize_segment(filename, "model_file.filename")
+    safe_filename = _sanitize_segment(Path(filename).name, "model_file.filename")
+
+    model_folder = (MODELS_DIR / safe_model_name).resolve()
+    model_folder.mkdir(parents=True, exist_ok=True)
+
+    model_path = (model_folder / safe_filename).resolve()
+    if model_path.parent != model_folder:
+        raise HTTPException(status_code=400, detail="Invalid model path")
+
+    if MODELS_DIR.resolve() not in model_path.parents:
+        raise HTTPException(status_code=400, detail="Resolved model path escapes storage directory")
+
+    return safe_model_name, safe_filename, model_path
 
 def _load_models() -> list[dict[str, Any]]:
     return json.loads(META_FILE.read_text(encoding="utf-8"))
@@ -97,18 +136,16 @@ async def upload_model(
     model_type: str = Form(...),
     model_file: UploadFile = File(...),
 ) -> JSONResponse:
-    safe_name = model_file.filename or "uploaded_model.bin"
-    model_folder = MODELS_DIR / model_name
-    model_folder.mkdir(parents=True, exist_ok=True)
-    model_path = model_folder / safe_name
+    incoming_filename = model_file.filename or "uploaded_model.bin"
+    safe_model_name, safe_name, model_path = _resolve_model_file_path(model_name, incoming_filename)
 
     with model_path.open("wb") as f:
         shutil.copyfileobj(model_file.file, f)
 
     models = _load_models()
     record = {
-        "id": f"{model_name}:{safe_name}",
-        "name": model_name,
+        "id": f"{safe_model_name}:{safe_name}",
+        "name": safe_model_name,
         "type": model_type,
         "filename": safe_name,
         "path": str(model_path),

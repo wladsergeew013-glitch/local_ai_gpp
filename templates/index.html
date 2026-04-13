@@ -162,13 +162,21 @@
     });
 
     const chatWindow = document.getElementById('chat-window');
+
+    function appendChatMessage(roleClass, label, text) {
+      const msg = document.createElement('div');
+      msg.className = `msg ${roleClass}`;
+      msg.textContent = `${label}: ${text}`;
+      chatWindow.appendChild(msg);
+    }
+
     document.getElementById('chat-send').addEventListener('click', async () => {
       const modelId = document.getElementById('chat-model-id').value.trim();
       const systemPrompt = document.getElementById('chat-system').value;
       const message = document.getElementById('chat-input').value.trim();
       if (!modelId || !message) return;
 
-      chatWindow.innerHTML += `<div class="msg user">Вы: ${message}</div>`;
+      appendChatMessage('user', 'Вы', message);
       document.getElementById('chat-input').value = '';
 
       const response = await fetch('/api/chat', {
@@ -177,7 +185,7 @@
         body: JSON.stringify({ model_id: modelId, system_prompt: systemPrompt, message })
       });
       const data = await response.json();
-      chatWindow.innerHTML += `<div class="msg bot">AI: ${response.ok ? data.answer : data.detail}</div>`;
+      appendChatMessage('bot', 'AI', response.ok ? data.answer : data.detail);
       chatWindow.scrollTop = chatWindow.scrollHeight;
     });
   </script>
