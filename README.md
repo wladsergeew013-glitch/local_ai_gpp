@@ -1,24 +1,70 @@
-# local_ai_gpp
+# Local AI GPP Hub
 
-Корпоративный локальный AI Hub в стиле синий/белый.
+Локальный AI Hub на FastAPI с разделённой структурой **backend/frontend**, поддержкой загрузки моделей, чата и базовой зоны тренировки.
 
-## Функции
-- Вкладки интерфейса: **Модели / Чат / Тренировка**.
-- Загрузка модели с локального диска и сохранение в `models_storage/`.
-- Регистрация модели по абсолютному пути на сервере.
-- Полноценный запуск LLM (GGUF) через `llama-cpp-python`.
-- Чат с локально загруженной LLM.
-- Зона тренировки оставлена как расширяемый placeholder.
+## Требования
+- **Python 3.11** (рекомендуется `3.11.x`)
+- (опционально) Node.js 20+ для сборки TypeScript
 
-## Запуск
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --reload
+## Что доступно
+- Загрузка модели с диска/сервера через веб-интерфейс.
+- Сохранение модели в `models_storage/`.
+- Запуск модели (статус `running`, как точка интеграции рантайма).
+- Зона тренировки (placeholder endpoint для подключения пайплайна обучения).
+- Поддержка типов: LLM, Embedding, Classical ML, Other.
+
+## Структура проекта
+
+```text
+.
+├── backend/
+│   └── app/
+│       ├── main.py              # FastAPI backend
+│       ├── templates/
+│       │   └── index.html       # HTML шаблон
+│       └── static/
+│           ├── styles.css
+│           ├── logo.svg
+│           └── app.js           # собранный frontend JS
+├── frontend/
+│   ├── src/
+│   │   └── app.ts              # frontend на TypeScript
+│   ├── package.json
+│   └── tsconfig.json
+├── models_storage/             # создаётся автоматически
+├── requirements.txt
+├── Dockerfile
+└── app.py                      # совместимость (экспорт app)
 ```
 
-Откройте: `http://127.0.0.1:8000`
+## Быстрый старт (venv)
 
-## Примечание по LLM
-Для полноценного запуска используйте GGUF-модель и запустите её кнопкой **Запустить** на вкладке "Модели", затем общайтесь на вкладке "Чат".
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn backend.app.main:app --reload
+```
+
+Открыть: `http://127.0.0.1:8000`
+
+> Также поддерживается совместимый entrypoint: `uvicorn app:app --reload`.
+
+## Сборка TypeScript фронтенда
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+После сборки обновится `backend/app/static/app.js`.
+
+## Docker
+
+```bash
+docker build -t local-ai-gpp .
+docker run --rm -p 8000:8000 local-ai-gpp
+```
+
+Открыть: `http://127.0.0.1:8000`

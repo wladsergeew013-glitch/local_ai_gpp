@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPP Local AI Hub</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <img src="/static/logo.svg" alt="ГПП Лого" class="logo" />
+    <div>
+      <h1>GPP Local AI Hub</h1>
+      <p>Локальный движок и хаб моделей: LLM, embeddings, классический ML.</p>
+    </div>
+  </header>
+
+  <main class="page">
+    <nav class="tabs">
+      <button class="tab active" data-tab="models">Модели</button>
+      <button class="tab" data-tab="chat">Чат</button>
+      <button class="tab" data-tab="train">Тренировка</button>
+    </nav>
+
+    <section id="models" class="tab-content active">
+      <div class="grid">
+        <section class="card">
+          <h2>Загрузка файла модели</h2>
+          <form id="upload-form">
+            <label>Название модели</label>
+            <input name="model_name" required />
+            <label>Тип модели</label>
+            <select name="model_type" required>
+              <option value="LLM">LLM</option>
+              <option value="Embedding">Embedding</option>
+              <option value="ClassicalML">Classical ML</option>
+              <option value="Other">Другое</option>
+            </select>
+            <label>Файл модели (с диска/сервера)</label>
+            <input type="file" name="model_file" required />
+            <button type="submit">Загрузить и сохранить</button>
+          </form>
+          <p id="upload-result"></p>
+        </section>
+
+        <section class="card">
+          <h2>Подключить модель по пути сервера</h2>
+          <form id="path-form">
+            <label>Название модели</label>
+            <input name="model_name" required />
+            <label>Тип модели</label>
+            <select name="model_type" required>
+              <option value="LLM">LLM</option>
+              <option value="Embedding">Embedding</option>
+              <option value="ClassicalML">Classical ML</option>
+              <option value="Other">Другое</option>
+            </select>
+            <label>Абсолютный путь до файла модели</label>
+            <input name="model_path" placeholder="/models/mistral-7b-instruct.gguf" required />
+            <button type="submit">Добавить путь</button>
+          </form>
+          <p id="path-result"></p>
+        </section>
+
+        <section class="card">
+          <h2>Список моделей</h2>
+          <ul id="models-list">
+            {% for model in models %}
+              <li>
+                <div>
+                  <strong>{{ model.name }}</strong> ({{ model.type }}) — {{ model.status }}
+                  <div class="sub">{{ model.filename }}</div>
+                </div>
+                <button onclick="startModel('{{ model.id }}')">Запустить</button>
+              </li>
+            {% else %}
+              <li>Модели пока не загружены.</li>
+            {% endfor %}
+          </ul>
+        </section>
+      </div>
+    </section>
+
+    <section id="chat" class="tab-content">
+      <section class="card chat-card">
+        <h2>Чат с локальной LLM</h2>
+        <label>ID модели (LLM)</label>
+        <input id="chat-model-id" placeholder="my-model:model.gguf" />
+        <label>System prompt (опционально)</label>
+        <textarea id="chat-system" rows="2" placeholder="Ты корпоративный помощник..."></textarea>
+        <div id="chat-window" class="chat-window"></div>
+        <div class="chat-row">
+          <input id="chat-input" placeholder="Введите сообщение..." />
+          <button id="chat-send">Отправить</button>
+        </div>
+      </section>
+    </section>
+
+    <section id="train" class="tab-content">
+      <section class="card">
+        <h2>Зона тренировки (заготовка)</h2>
+        <form id="train-form">
+          <label>ID модели</label>
+          <input name="model_id" required />
+          <label>Путь к датасету</label>
+          <input name="dataset_path" placeholder="/data/train.csv" required />
+          <button type="submit">Поставить тренировку в очередь</button>
+        </form>
+        <p id="train-result"></p>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
