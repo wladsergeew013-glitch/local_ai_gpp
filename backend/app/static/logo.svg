@@ -1,0 +1,6 @@
+<svg width="240" height="240" viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="GPP">
+  <rect width="240" height="240" rx="24" fill="white"/>
+  <path d="M52 150C52 104 87 72 129 72C160 72 185 89 196 115H166C157 99 143 92 128 92C101 92 82 113 82 150C82 187 101 208 128 208C144 208 157 201 166 185H196C185 211 160 228 129 228C87 228 52 196 52 150Z" fill="#005bbb"/>
+  <text x="48" y="142" font-size="36" font-family="Arial, sans-serif" font-weight="700" fill="#005bbb">GPP</text>
+  <text x="48" y="176" font-size="20" font-family="Arial, sans-serif" fill="#005bbb">Local AI Hub</text>
+</svg>
