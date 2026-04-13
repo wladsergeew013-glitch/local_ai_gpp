@@ -2,8 +2,13 @@
 setlocal enabledelayedexpansion
 
 REM Re-open script in persistent cmd window so output is never lost on close.
-if /i not "%~1"=="--persist" (
-    start "Local AI GPP" cmd /k "call \"%~f0\" --persist"
+REM Accept --persist in any argument position to avoid relaunch loops.
+set "PERSIST_MODE=0"
+for %%A in (%*) do (
+    if /i "%%~A"=="--persist" set "PERSIST_MODE=1"
+)
+if "%PERSIST_MODE%"=="0" (
+    start "Local AI GPP" cmd /k "call \"%~f0\" --persist %*"
     exit /b
 )
 
