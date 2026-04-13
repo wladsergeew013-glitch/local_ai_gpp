@@ -15,60 +15,117 @@
     </div>
   </header>
 
-  <main class="grid">
-    <section class="card">
-      <h2>Загрузка модели</h2>
-      <form id="upload-form">
-        <label>Название модели</label>
-        <input name="model_name" required />
+  <main class="page">
+    <nav class="tabs">
+      <button class="tab active" data-tab="models">Модели</button>
+      <button class="tab" data-tab="chat">Чат</button>
+      <button class="tab" data-tab="train">Тренировка</button>
+    </nav>
 
-        <label>Тип модели</label>
-        <select name="model_type" required>
-          <option value="LLM">LLM</option>
-          <option value="Embedding">Embedding</option>
-          <option value="ClassicalML">Classical ML</option>
-          <option value="Other">Другое</option>
-        </select>
+    <section id="models" class="tab-content active">
+      <div class="grid">
+        <section class="card">
+          <h2>Загрузка файла модели</h2>
+          <form id="upload-form">
+            <label>Название модели</label>
+            <input name="model_name" required />
+            <label>Тип модели</label>
+            <select name="model_type" required>
+              <option value="LLM">LLM</option>
+              <option value="Embedding">Embedding</option>
+              <option value="ClassicalML">Classical ML</option>
+              <option value="Other">Другое</option>
+            </select>
+            <label>Файл модели (с диска/сервера)</label>
+            <input type="file" name="model_file" required />
+            <button type="submit">Загрузить и сохранить</button>
+          </form>
+          <p id="upload-result"></p>
+        </section>
 
-        <label>Файл модели (с диска/сервера)</label>
-        <input type="file" name="model_file" required />
+        <section class="card">
+          <h2>Подключить модель по пути сервера</h2>
+          <form id="path-form">
+            <label>Название модели</label>
+            <input name="model_name" required />
+            <label>Тип модели</label>
+            <select name="model_type" required>
+              <option value="LLM">LLM</option>
+              <option value="Embedding">Embedding</option>
+              <option value="ClassicalML">Classical ML</option>
+              <option value="Other">Другое</option>
+            </select>
+            <label>Абсолютный путь до файла модели</label>
+            <input name="model_path" placeholder="/models/mistral-7b-instruct.gguf" required />
+            <button type="submit">Добавить путь</button>
+          </form>
+          <p id="path-result"></p>
+        </section>
 
-        <button type="submit">Загрузить и сохранить</button>
-      </form>
-      <p id="upload-result"></p>
+        <section class="card">
+          <h2>Список моделей</h2>
+          <ul id="models-list">
+            {% for model in models %}
+              <li>
+                <div>
+                  <strong>{{ model.name }}</strong> ({{ model.type }}) — {{ model.status }}
+                  <div class="sub">{{ model.filename }}</div>
+                </div>
+                <button onclick="startModel('{{ model.id }}')">Запустить</button>
+              </li>
+            {% else %}
+              <li>Модели пока не загружены.</li>
+            {% endfor %}
+          </ul>
+        </section>
+      </div>
     </section>
 
-    <section class="card">
-      <h2>Список моделей</h2>
-      <ul id="models-list">
-        {% for model in models %}
-          <li>
-            <strong>{{ model.name }}</strong> ({{ model.type }}) — {{ model.status }}
-            <button onclick="startModel('{{ model.id }}')">Запустить</button>
-          </li>
-        {% else %}
-          <li>Модели пока не загружены.</li>
-        {% endfor %}
-      </ul>
+    <section id="chat" class="tab-content">
+      <section class="card chat-card">
+        <h2>Чат с локальной LLM</h2>
+        <label>ID модели (LLM)</label>
+        <input id="chat-model-id" placeholder="my-model:model.gguf" />
+        <label>System prompt (опционально)</label>
+        <textarea id="chat-system" rows="2" placeholder="Ты корпоративный помощник..."></textarea>
+        <div id="chat-window" class="chat-window"></div>
+        <div class="chat-row">
+          <input id="chat-input" placeholder="Введите сообщение..." />
+          <button id="chat-send">Отправить</button>
+        </div>
+      </section>
     </section>
 
-    <section class="card">
-      <h2>Зона тренировки (заготовка)</h2>
-      <form id="train-form">
-        <label>ID модели</label>
-        <input name="model_id" required />
-        <label>Путь к датасету</label>
-        <input name="dataset_path" placeholder="/data/train.csv" required />
-        <button type="submit">Поставить тренировку в очередь</button>
-      </form>
-      <p id="train-result"></p>
+    <section id="train" class="tab-content">
+      <section class="card">
+        <h2>Зона тренировки (заготовка)</h2>
+        <form id="train-form">
+          <label>ID модели</label>
+          <input name="model_id" required />
+          <label>Путь к датасету</label>
+          <input name="dataset_path" placeholder="/data/train.csv" required />
+          <button type="submit">Поставить тренировку в очередь</button>
+        </form>
+        <p id="train-result"></p>
+      </section>
     </section>
   </main>
 
   <script>
+    const tabs = document.querySelectorAll('.tab');
+    const contents = document.querySelectorAll('.tab-content');
+    tabs.forEach(tab => tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      contents.forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(tab.dataset.tab).classList.add('active');
+    }));
+
     const uploadForm = document.getElementById('upload-form');
-    const uploadResult = document.getElementById('upload-result');
+    const pathForm = document.getElementById('path-form');
     const trainForm = document.getElementById('train-form');
+    const uploadResult = document.getElementById('upload-result');
+    const pathResult = document.getElementById('path-result');
     const trainResult = document.getElementById('train-result');
 
     uploadForm.addEventListener('submit', async (e) => {
@@ -77,6 +134,15 @@
       const response = await fetch('/api/models/upload', { method: 'POST', body: formData });
       const data = await response.json();
       uploadResult.textContent = response.ok ? `Сохранено: ${data.id}` : `Ошибка: ${data.detail}`;
+      if (response.ok) window.location.reload();
+    });
+
+    pathForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(pathForm);
+      const response = await fetch('/api/models/register-path', { method: 'POST', body: formData });
+      const data = await response.json();
+      pathResult.textContent = response.ok ? `Добавлено: ${data.id}` : `Ошибка: ${data.detail}`;
       if (response.ok) window.location.reload();
     });
 
@@ -93,6 +159,34 @@
       const response = await fetch('/api/train', { method: 'POST', body: formData });
       const data = await response.json();
       trainResult.textContent = response.ok ? `${data.status}: ${data.message}` : `Ошибка: ${data.detail}`;
+    });
+
+    const chatWindow = document.getElementById('chat-window');
+
+    function appendChatMessage(roleClass, label, text) {
+      const msg = document.createElement('div');
+      msg.className = `msg ${roleClass}`;
+      msg.textContent = `${label}: ${text}`;
+      chatWindow.appendChild(msg);
+    }
+
+    document.getElementById('chat-send').addEventListener('click', async () => {
+      const modelId = document.getElementById('chat-model-id').value.trim();
+      const systemPrompt = document.getElementById('chat-system').value;
+      const message = document.getElementById('chat-input').value.trim();
+      if (!modelId || !message) return;
+
+      appendChatMessage('user', 'Вы', message);
+      document.getElementById('chat-input').value = '';
+
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: modelId, system_prompt: systemPrompt, message })
+      });
+      const data = await response.json();
+      appendChatMessage('bot', 'AI', response.ok ? data.answer : data.detail);
+      chatWindow.scrollTop = chatWindow.scrollHeight;
     });
   </script>
 </body>
