@@ -1,6 +1,12 @@
 @echo off
 setlocal enabledelayedexpansion
 
+REM Re-open script in persistent cmd window so output is never lost on close.
+if /i not "%~1"=="--persist" (
+    start "Local AI GPP" cmd /k "\"%~f0\" --persist"
+    exit /b
+)
+
 REM Always run from the repository root where this script is located.
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
@@ -22,6 +28,22 @@ echo Repo: %SCRIPT_DIR%
 echo Logs: this window + docker logs %CONTAINER_NAME%
 echo ============================================
 echo.
+
+where docker >nul 2>&1
+if errorlevel 1 (
+    echo Docker CLI not found in PATH.
+    echo Install Docker Desktop and ensure "docker" works in CMD.
+    set "RUN_EXIT_CODE=1"
+    goto :finalize
+)
+
+docker info >nul 2>&1
+if errorlevel 1 (
+    echo Docker daemon is not running or not reachable.
+    echo Start Docker Desktop, wait until it is fully started, then rerun this script.
+    set "RUN_EXIT_CODE=1"
+    goto :finalize
+)
 
 echo [1/4] Building frontend (TypeScript)...
 where npm >nul 2>&1
@@ -75,7 +97,7 @@ if not "%RUN_EXIT_CODE%"=="0" (
     docker logs %CONTAINER_NAME%
 )
 echo.
-echo Press any key to close this window...
-pause >nul
+echo Script finished. This window will stay open for diagnostics.
+echo You can rerun logs manually with: docker logs %CONTAINER_NAME%
 
 endlocal & exit /b %RUN_EXIT_CODE%
