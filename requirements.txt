@@ -1,0 +1,10 @@
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+fastapi==0.116.1
+uvicorn==0.35.0
+python-multipart==0.0.20
+httpx==0.28.1
+llama-cpp-python==0.3.19
+pyinstaller
+pywebview
+pystray
+Pillow

@@ -1,0 +1,19 @@
+@"
+.git
+.gitignore
+**/__pycache__
+**/.pytest_cache
+**/.DS_Store
+**/node_modules
+**/dist
+**/.venv
+**/.pydeps
+**/tools/out
+logs
+dist
+build
+plugin
+models_storage/**/*.gguf
+models_storage/**/*.bin
+models_storage/**/*.safetensors
+"@ | Set-Content -Encoding UTF8 .dockerignore

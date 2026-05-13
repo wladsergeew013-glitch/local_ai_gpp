@@ -1,0 +1,89 @@
+{
+  "branding": {
+    "title": "Агент ГПП",
+    "subtitle": "Локальный движок LLM моделей.",
+    "logo_url": "",
+    "logo_width": 250,
+    "logo_height": 150,
+    "logo_radius": 20,
+    "logo_padding": 10,
+    "logo_fit": "contain"
+  },
+  "theme": {
+    "accent": "#2f6fed",
+    "hero_text": "#ffffff",
+    "chrome_start": "#145aa0",
+    "chrome_end": "#0b3f78",
+    "chrome_text": "#ffffff",
+    "background_start": "#f6f7fb",
+    "background_end": "#e8ecf4",
+    "panel": "#ffffff",
+    "panel_alt": "#f2f4f7",
+    "border": "#d0d5dd",
+    "text": "#101828",
+    "muted": "#667085",
+    "user_bubble": "#dbeafe",
+    "assistant_bubble": "#ffffff",
+    "success": "#168a4a",
+    "warning": "#c27803",
+    "danger": "#c2413b"
+  },
+  "layout": {
+    "app_max_width": 1920,
+    "card_radius": 8,
+    "hero_compact": false,
+    "left_panel_width": 250,
+    "center_panel_min_width": 440,
+    "right_panel_width": 620
+  },
+  "runtime": {
+    "n_ctx": 4096,
+    "n_batch": 512,
+    "n_threads": 8,
+    "n_threads_batch": 0,
+    "n_gpu_layers": 0,
+    "main_gpu": 0,
+    "split_mode": "layer",
+    "tensor_split": "",
+    "temperature": 0.2,
+    "max_tokens": 2000,
+    "top_k": 40,
+    "top_p": 0.95,
+    "min_p": 0.05,
+    "repeat_penalty": 1.1,
+    "seed": -1,
+    "offload_kqv": true,
+    "flash_attn": false,
+    "op_offload": true,
+    "swa_full": false,
+    "use_mmap": true,
+    "use_mlock": false,
+    "verbose_runtime": false,
+    "gpu_fallback_to_cpu": true,
+    "warm_policy": "unload_after_idle",
+    "idle_unload_sec": 1800,
+    "preload_on_start": false
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "public_base_url": "http://127.0.0.1:8000",
+    "openai_compat_enabled": true,
+    "openai_compat_path": "/v1/chat/completions",
+    "cors_origins": [
+      "http://127.0.0.1:5173",
+      "http://localhost:5173",
+      "http://127.0.0.1:8080",
+      "http://localhost:8080"
+    ],
+    "api_key": ""
+  },
+  "hub": {
+    "enabled": false,
+    "base_url": "",
+    "models_endpoint": "/models",
+    "pull_endpoint": "/models/pull",
+    "token": "",
+    "timeout_sec": 30
+  }
+}

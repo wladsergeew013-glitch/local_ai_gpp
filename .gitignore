@@ -1,0 +1,63 @@
+@"
+# Python
+.venv/
+backend/.venv/
+backend/.pydeps/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.log
+frontend/*.tsbuildinfo
+frontend/tsconfig*.tsbuildinfo
+
+# Build outputs
+dist/
+build/
+*.spec
+
+# Logs / temp
+logs/
+tools/out/
+tools/**/out/
+*.log
+*.tmp
+*.bak
+*.backup*
+*.v*_backup_*
+
+# Local runtime data
+assistant_state/
+models_storage/**/*.gguf
+models_storage/**/*.bin
+models_storage/**/*.safetensors
+models_storage/**/worker_runtime/
+models_storage/**/cache/
+
+# Keep model registry/settings/branding, but not heavy models
+!models_storage/models.json
+!models_storage/settings.json
+!models_storage/branding/
+!models_storage/branding/**
+!models_storage/branding/icons/
+!models_storage/branding/icons/**
+
+# NanoCAD plugin is separate, do not publish with main app
+plugin/
+
+# IDE / OS
+.vscode/
+.idea/
+.vs/
+.DS_Store
+Thumbs.db
+"@ | Set-Content -Encoding UTF8 .gitignore
+# Old patch payloads / duplicated assets
+tools/assets/
+tools/overlay_assistant_payload_*/
+tools/mini_assistant_payload_*/
+tools/native_assistant_payload_*/

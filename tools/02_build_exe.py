@@ -1,0 +1,357 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "tools"
+OUT = TOOLS / "out"
+LOG = OUT / "build_exe.log"
+DOWNLOADS = OUT / "downloads"
+PY_EMBED_VERSION = os.environ.get("LOCAL_AI_GPP_EMBED_PYTHON_VERSION", "3.12.10")
+PY_EMBED_ZIP = f"python-{PY_EMBED_VERSION}-embed-amd64.zip"
+PY_EMBED_URL = f"https://www.python.org/ftp/python/{PY_EMBED_VERSION}/{PY_EMBED_ZIP}"
+GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+CPU_VERSION = os.environ.get("LLAMA_CPP_CPU_VERSION", "0.3.19")
+CUDA_VERSION = os.environ.get("LLAMA_CPP_CUDA_VERSION", "0.3.4")
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8", errors="replace") as handle:
+        handle.write(message + "\n")
+
+
+def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+    rendered = " ".join(f'"{item}"' if " " in item else item for item in command)
+    log("[RUN] " + rendered)
+    with LOG.open("a", encoding="utf-8", errors="replace") as handle:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise SystemExit(completed.returncode)
+
+
+def is_bad_python(path: str) -> bool:
+    lowered = path.lower().replace("/", "\\")
+    bad_tokens = [
+        "\\windowsapps\\",
+        "\\codex-runtimes\\",
+        "\\backend\\.venv\\",
+        "\\dist\\worker_runtime\\",
+    ]
+    return any(token in lowered for token in bad_tokens)
+
+
+def probe_python(command: list[str]) -> str:
+    result = subprocess.run(
+        command + ["-c", "import sys; print(getattr(sys, '_base_executable', sys.executable)); print(sys.executable); print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) < 3:
+        return ""
+    base_exe, exe, version = lines[-3], lines[-2], lines[-1]
+    chosen = base_exe if base_exe and Path(base_exe).exists() else exe
+    if not Path(chosen).exists() or is_bad_python(chosen):
+        return ""
+    if version not in {"3.10", "3.11", "3.12", "3.13"}:
+        return ""
+    return chosen
+
+
+def find_base_python() -> str:
+    candidates: list[list[str]] = [["py", "-3.12"], ["py", "-3.13"], ["py", "-3.11"], ["py", "-3"], ["python"]]
+    base_from_current = getattr(sys, "_base_executable", "") or sys.executable
+    if base_from_current and Path(base_from_current).exists() and not is_bad_python(base_from_current):
+        try:
+            result = subprocess.run(
+                [base_from_current, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip() in {"3.10", "3.11", "3.12", "3.13"}:
+                return str(Path(base_from_current))
+        except Exception:
+            pass
+    for command in candidates:
+        try:
+            found = probe_python(command)
+        except FileNotFoundError:
+            found = ""
+        if found:
+            return found
+    raise SystemExit("[ERROR] Normal Python 3.12/3.13 was not found. Install python.org Python and rerun build.")
+
+
+def ensure_backend_venv(base_python: str) -> Path:
+    venv_dir = ROOT / "backend" / ".venv"
+    venv_py = venv_dir / "Scripts" / "python.exe"
+    cfg = venv_dir / "pyvenv.cfg"
+    if cfg.exists():
+        text = cfg.read_text(encoding="utf-8", errors="replace").lower()
+        if "codex-runtimes" in text or "windowsapps" in text:
+            log("[WARN] backend .venv points to a non-portable/bad Python. Recreating it.")
+            shutil.rmtree(venv_dir, ignore_errors=True)
+    if not venv_py.exists():
+        log("[INFO] Creating backend .venv")
+        run([base_python, "-m", "venv", str(venv_dir)])
+    if not venv_py.exists():
+        raise SystemExit(f"[ERROR] backend venv python was not created: {venv_py}")
+    run([str(venv_py), "-m", "pip", "install", "--upgrade", "pip"])
+    root_req = ROOT / "requirements.txt"
+    if root_req.exists():
+        run([str(venv_py), "-m", "pip", "install", "-r", str(root_req)])
+    else:
+        run([str(venv_py), "-m", "pip", "install", "pyinstaller", "pywebview", "pystray", "Pillow"])
+    # Build process needs PyInstaller/pywebview even if requirements.txt was edited.
+    run([str(venv_py), "-m", "pip", "install", "pyinstaller", "pywebview", "pystray", "Pillow"])
+    return venv_py
+
+
+def build_frontend() -> None:
+    frontend = ROOT / "frontend"
+    if not (frontend / "package.json").exists():
+        raise SystemExit("[ERROR] frontend/package.json not found")
+    if not (frontend / "node_modules").exists():
+        run(["npm.cmd", "install"], cwd=frontend)
+    env = os.environ.copy()
+    env["VITE_API_BASE"] = "."
+    env["NO_PROXY"] = "localhost,127.0.0.1,::1,[::1],*.localhost"
+    env["no_proxy"] = env["NO_PROXY"]
+    run(["npm.cmd", "run", "build"], cwd=frontend, env=env)
+    if not (frontend / "dist" / "index.html").exists():
+        raise SystemExit("[ERROR] frontend/dist/index.html was not created")
+
+
+def build_pyinstaller(venv_py: Path) -> None:
+    launcher = TOOLS / "exe_launcher.py"
+    if not launcher.exists():
+        raise SystemExit("[ERROR] tools/exe_launcher.py not found. Apply proxy bypass v34/v35 package first.")
+    dist_exe = ROOT / "dist" / "LocalAIGPP.exe"
+    if dist_exe.exists():
+        try:
+            dist_exe.unlink()
+        except PermissionError as exc:
+            raise SystemExit("[ERROR] Cannot replace dist/LocalAIGPP.exe. Close LocalAIGPP.exe from tray/Task Manager and rebuild.") from exc
+    build_dir = OUT / "pyinstaller_build"
+    spec_dir = OUT / "pyinstaller_spec"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["NO_PROXY"] = "localhost,127.0.0.1,::1,[::1],*.localhost"
+    env["no_proxy"] = env["NO_PROXY"]
+    env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--no-proxy-server --proxy-bypass-list=<-loopback>;localhost;127.0.0.1;::1;[::1]"
+    cmd = [
+        str(venv_py), "-m", "PyInstaller",
+        "--noconfirm", "--clean", "--onefile", "--windowed",
+        "--name", "LocalAIGPP",
+        "--distpath", str(ROOT / "dist"),
+        "--workpath", str(build_dir),
+        "--specpath", str(spec_dir),
+        "--paths", str(ROOT),
+        "--add-data", f"{ROOT / 'frontend' / 'dist'};frontend_dist",
+        "--collect-all", "webview",
+        "--collect-all", "pystray",
+        "--collect-all", "PIL",
+        "--collect-submodules", "backend",
+        "--collect-submodules", "uvicorn",
+        "--exclude-module", "llama_cpp",
+        "--exclude-module", "llama_cpp.llama_cpp",
+        "--exclude-module", "llama_cpp.llama",
+        "--exclude-module", "llama_cpp.llava_cpp",
+        "--hidden-import", "uvicorn.logging",
+        "--hidden-import", "uvicorn.loops.auto",
+        "--hidden-import", "uvicorn.protocols.http.auto",
+        "--hidden-import", "uvicorn.protocols.websockets.auto",
+        "--hidden-import", "uvicorn.lifespan.on",
+        "--hidden-import", "webview.platforms.edgechromium",
+        "--hidden-import", "tkinter",
+        "--hidden-import", "PIL.ImageTk",
+        str(launcher),
+    ]
+    run(cmd, cwd=ROOT, env=env)
+    if not dist_exe.exists():
+        raise SystemExit("[ERROR] dist/LocalAIGPP.exe was not created")
+
+
+def ignore_junk(_dir: str, names: list[str]) -> set[str]:
+    return {name for name in names if name == "__pycache__" or name.endswith(".pyc") or name.endswith(".pyo")}
+
+
+def copy_portable_backend_and_metadata() -> None:
+    dist = ROOT / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    backend_src = ROOT / "backend" / "app"
+    if not backend_src.exists():
+        raise SystemExit(f"[ERROR] backend app not found: {backend_src}")
+    backend_dst = dist / "backend"
+    if backend_dst.exists():
+        shutil.rmtree(backend_dst)
+    shutil.copytree(backend_src, backend_dst / "app", ignore=ignore_junk)
+    (backend_dst / "__init__.py").write_text("", encoding="utf-8")
+    for required in (backend_dst / "app" / "core.py", backend_dst / "app" / "llama_worker.py", backend_dst / "app" / "main.py"):
+        if not required.exists():
+            raise SystemExit(f"[ERROR] Required backend file is missing in dist: {required}")
+    for name in ("requirements-base.txt", "requirements.txt"):
+        src = ROOT / "backend" / name
+        if src.exists():
+            shutil.copy2(src, backend_dst / name)
+
+    models_dst = dist / "models_storage"
+    (models_dst / "branding").mkdir(parents=True, exist_ok=True)
+    models_src = ROOT / "models_storage"
+    for name in ("settings.json", "models.json"):
+        src = models_src / name
+        if src.exists():
+            shutil.copy2(src, models_dst / name)
+    branding_src = models_src / "branding"
+    if branding_src.exists():
+        for src in branding_src.iterdir():
+            if src.is_file():
+                shutil.copy2(src, models_dst / "branding" / src.name)
+    if (ROOT / "README.md").exists():
+        shutil.copy2(ROOT / "README.md", dist / "README.md")
+    log("[OK] Copied portable backend and models metadata into dist")
+
+
+def download_once(url: str, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.stat().st_size > 0:
+        log(f"[OK] Using cached {target.name}")
+        return
+    log(f"[INFO] Downloading {url}")
+    urllib.request.urlretrieve(url, target)
+
+
+def configure_embedded_python(worker_runtime: Path) -> None:
+    pth_files = sorted(worker_runtime.glob("python*._pth"))
+    if not pth_files:
+        raise SystemExit(f"[ERROR] Embedded python ._pth file not found in {worker_runtime}")
+    pth = pth_files[0]
+    # '..' is critical: python.exe lives in dist\worker_runtime, while backend package lives in dist\backend.
+    # Without this, worker_runtime can install packages but cannot import backend.app.llama_worker on another PC.
+    pth.write_text(
+        "python312.zip\n"
+        ".\n"
+        "Lib\n"
+        "Lib\\site-packages\n"
+        "..\n"
+        "import site\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    log(f"[OK] Patched embedded Python path file: {pth}")
+
+
+def create_worker_runtime(runtime_kind: str) -> None:
+    dist = ROOT / "dist"
+    worker_runtime = dist / "worker_runtime"
+    worker_py = worker_runtime / "python.exe"
+    if worker_runtime.exists():
+        shutil.rmtree(worker_runtime)
+    DOWNLOADS.mkdir(parents=True, exist_ok=True)
+    embed_zip = DOWNLOADS / PY_EMBED_ZIP
+    get_pip = DOWNLOADS / "get-pip.py"
+    download_once(PY_EMBED_URL, embed_zip)
+    download_once(GET_PIP_URL, get_pip)
+    worker_runtime.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(embed_zip, "r") as archive:
+        archive.extractall(worker_runtime)
+    configure_embedded_python(worker_runtime)
+    if not worker_py.exists():
+        raise SystemExit(f"[ERROR] Embedded worker python missing: {worker_py}")
+
+    run([str(worker_py), str(get_pip), "--no-warn-script-location"], cwd=dist)
+    req = ROOT / "backend" / "requirements-base.txt"
+    if req.exists():
+        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "-r", str(req)], cwd=dist)
+    else:
+        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "fastapi==0.116.1", "uvicorn==0.35.0", "python-multipart==0.0.20", "httpx==0.28.1"], cwd=dist)
+
+    runtime_kind = (runtime_kind or "cpu").lower()
+    if runtime_kind.startswith("cu"):
+        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--force-reinstall", "--no-cache-dir", "--only-binary=:all:", f"llama-cpp-python=={CUDA_VERSION}", "--extra-index-url", f"https://abetlen.github.io/llama-cpp-python/whl/{runtime_kind}"], cwd=dist)
+    else:
+        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--force-reinstall", "--no-cache-dir", f"llama-cpp-python=={CPU_VERSION}", "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cpu"], cwd=dist)
+
+    verify = (
+        "import sys,json; "
+        "import backend.app.llama_worker, llama_cpp; "
+        "print(json.dumps({'python':sys.executable,'sys_path':sys.path[:8],'llama_cpp':getattr(llama_cpp,'__version__','unknown')}, ensure_ascii=False))"
+    )
+    run([str(worker_py), "-c", verify], cwd=dist)
+    (dist / "runtime_info.json").write_text(
+        json.dumps(
+            {
+                "effective": runtime_kind,
+                "worker_python": "worker_runtime\\python.exe",
+                "python_embed_version": PY_EMBED_VERSION,
+                "backend_path_mode": "python._pth contains ..",
+                "proxy_bypass": True,
+                "built_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    log("[OK] worker_runtime verified")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cpu", action="store_true", help="Build CPU worker runtime")
+    parser.add_argument("--cuda", nargs="?", const="cu124", default=None, help="Build CUDA worker runtime, e.g. --cuda cu124")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    runtime_kind = "cpu" if args.cpu or not args.cuda else str(args.cuda)
+    OUT.mkdir(parents=True, exist_ok=True)
+    LOG.write_text("Local AI GPP desktop exe builder v35\n", encoding="utf-8")
+    log("=" * 60)
+    log("Local AI GPP - build desktop EXE")
+    log("=" * 60)
+    log(f"Root: {ROOT}")
+    log(f"Runtime: {runtime_kind}")
+    base_python = find_base_python()
+    log(f"[INFO] build/base python: {base_python}")
+    venv_py = ensure_backend_venv(base_python)
+    build_frontend()
+    build_pyinstaller(venv_py)
+    copy_portable_backend_and_metadata()
+    create_worker_runtime(runtime_kind)
+    log("")
+    log("=" * 60)
+    log("DESKTOP EXE BUILD COMPLETE")
+    log("=" * 60)
+    log(f"File: {ROOT / 'dist' / 'LocalAIGPP.exe'}")
+    log(f"Worker: {ROOT / 'dist' / 'worker_runtime' / 'python.exe'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
