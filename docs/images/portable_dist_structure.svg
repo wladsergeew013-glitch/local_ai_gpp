@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#f6f9ff"/><stop offset="1" stop-color="#e6f1ff"/></linearGradient>
+    <linearGradient id="head" x1="0" x2="1"><stop offset="0" stop-color="#0b3f78"/><stop offset="1" stop-color="#1e70bb"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0b3f78" flood-opacity="0.18"/></filter>
+    <style>
+      .title{font:700 36px 'Segoe UI',Arial,sans-serif;fill:#0b2440}.sub{font:400 18px 'Segoe UI',Arial,sans-serif;fill:#46627f}.path{font:600 20px 'Consolas','Segoe UI Mono',monospace;fill:#0b2440}.desc{font:400 16px 'Segoe UI',Arial,sans-serif;fill:#4b647f}.tag{font:700 13px 'Segoe UI',Arial,sans-serif;fill:#fff}.ok{font:700 18px 'Segoe UI',Arial,sans-serif;fill:#168a4a}.warn{font:700 18px 'Segoe UI',Arial,sans-serif;fill:#c27803}
+    </style>
+  </defs>
+  <rect width="1280" height="760" fill="url(#bg)"/>
+  <text x="70" y="72" class="title">Структура portable-папки dist</text>
+  <text x="70" y="108" class="sub">Для переноса на другой ПК переносится вся папка dist или ZIP, созданный tools\29_make_portable_package.bat</text>
+  <g filter="url(#shadow)">
+    <rect x="70" y="150" width="1140" height="540" rx="30" fill="#fff"/>
+    <rect x="70" y="150" width="1140" height="70" rx="30" fill="url(#head)"/>
+    <text x="105" y="195" style="font:700 26px 'Consolas',monospace;fill:#fff">dist\</text>
+
+    <g transform="translate(110,260)">
+      <text x="0" y="0" class="path">├─ LocalAIGPP.exe</text>
+      <text x="360" y="0" class="desc">desktop shell, tray, WebView, mini assistant</text>
+      <text x="0" y="50" class="path">├─ worker_runtime\python.exe</text>
+      <text x="360" y="50" class="desc">embedded Python для запуска LLM worker</text>
+      <text x="0" y="100" class="path">├─ backend\app\</text>
+      <text x="360" y="100" class="desc">портативный FastAPI backend и llama_worker.py</text>
+      <text x="0" y="150" class="path">├─ models_storage\</text>
+      <text x="360" y="150" class="desc">настройки, реестр моделей и локальные GGUF</text>
+      <text x="0" y="200" class="path">│  ├─ models.json</text>
+      <text x="360" y="200" class="desc">только portable/относительные пути</text>
+      <text x="0" y="250" class="path">│  ├─ settings.json</text>
+      <text x="360" y="250" class="desc">тема, runtime, API, параметры сервера</text>
+      <text x="0" y="300" class="path">│  ├─ gemma-4b\*.gguf</text>
+      <text x="360" y="300" class="desc">упакованная модель</text>
+      <text x="0" y="350" class="path">│  └─ Qwen3-8B\*.gguf</text>
+      <text x="360" y="350" class="desc">упакованная модель</text>
+      <text x="0" y="400" class="path">├─ CHECK_DIST_HEALTH.bat</text>
+      <text x="360" y="400" class="desc">проверка portable-пакета на чужом ПК</text>
+      <text x="0" y="450" class="path">└─ RUN_LocalAIGPP.bat</text>
+      <text x="360" y="450" class="desc">запуск приложения</text>
+    </g>
+  </g>
+  <rect x="70" y="710" width="530" height="34" rx="17" fill="#e9fff2"/><text x="92" y="733" class="ok">OK: переносится вся папка dist, не один EXE</text>
+  <rect x="640" y="710" width="570" height="34" rx="17" fill="#fff7e6"/><text x="662" y="733" class="warn">Важно: абсолютные пути к моделям в portable недопустимы</text>
+</svg>

@@ -1,16 +1,14 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
-
 cd /d "%~dp0.."
 set "ROOT=%CD%"
-set "LOG=%ROOT%\tools\out\desktop_sync_contract.log"
+set "LOG=%ROOT%\tools\out\dist_portable_check.log"
 if not exist "%ROOT%\tools\out" mkdir "%ROOT%\tools\out" >nul 2>nul
 
 echo ============================================================
-echo Local AI GPP - desktop sync contract check v67.4
+echo Local AI GPP - dist portability check v67.4
 echo ============================================================
-echo This check requires a running dist\LocalAIGPP.exe.
 echo Log: %LOG%
 echo.
 
@@ -33,25 +31,20 @@ if not defined PYTHON_CMD (
 )
 if not defined PYTHON_CMD (
   echo [ERROR] Python not found.
-  pause
   exit /b 1
 )
 
-%PYTHON_CMD% "%ROOT%\tools\27_check_desktop_sync_contract.py" %* >"%LOG%" 2>&1
+%PYTHON_CMD% "%ROOT%\tools\28_check_dist_portable.py" >"%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%LOG%"
 echo.
-
 if not "%RC%"=="0" (
   echo ============================================================
   echo FAILED
   echo ============================================================
-  pause
   exit /b %RC%
 )
-
 echo ============================================================
 echo OK
 echo ============================================================
-pause
 exit /b 0

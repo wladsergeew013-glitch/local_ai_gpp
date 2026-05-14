@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b3f78"/>
+      <stop offset="1" stop-color="#1c6ab4"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" x2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eef6ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#001b36" flood-opacity="0.25"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#2f6fed"/>
+    </marker>
+    <style>
+      .title { font: 700 40px 'Segoe UI', Arial, sans-serif; fill: #fff; }
+      .subtitle { font: 400 20px 'Segoe UI', Arial, sans-serif; fill: #d8ecff; }
+      .boxTitle { font: 700 24px 'Segoe UI', Arial, sans-serif; fill: #0b2440; }
+      .boxText { font: 400 16px 'Segoe UI', Arial, sans-serif; fill: #2f4d6f; }
+      .small { font: 600 14px 'Segoe UI', Arial, sans-serif; fill: #ffffff; }
+      .label { font: 700 15px 'Segoe UI', Arial, sans-serif; fill: #0b5cad; }
+      .line { stroke: #2f6fed; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1280" height="720" rx="0" fill="url(#bg)"/>
+  <circle cx="1120" cy="90" r="170" fill="#ffffff" opacity="0.07"/>
+  <circle cx="150" cy="640" r="210" fill="#ffffff" opacity="0.06"/>
+  <text x="72" y="80" class="title">Local AI GPP</text>
+  <text x="72" y="114" class="subtitle">Локальный корпоративный AI-хаб для закрытого контура предприятия</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="190" width="260" height="150" rx="28" fill="url(#card)"/>
+    <text x="100" y="238" class="boxTitle">React UI</text>
+    <text x="100" y="270" class="boxText">Основной чат</text>
+    <text x="100" y="296" class="boxText">Настройки runtime</text>
+    <text x="100" y="322" class="boxText">Каталог моделей</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="410" width="260" height="150" rx="28" fill="url(#card)"/>
+    <text x="100" y="458" class="boxTitle">Мини-помощник</text>
+    <text x="100" y="490" class="boxText">Нативное окно EXE</text>
+    <text x="100" y="516" class="boxText">Общий диалог</text>
+    <text x="100" y="542" class="boxText">Трей и быстрый чат</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="475" y="250" width="330" height="220" rx="32" fill="url(#card)"/>
+    <text x="510" y="302" class="boxTitle">FastAPI backend</text>
+    <text x="510" y="338" class="boxText">/api/chat/stream</text>
+    <text x="510" y="366" class="boxText">/v1/chat/completions</text>
+    <text x="510" y="394" class="boxText">/api/desktop/chat-sync</text>
+    <text x="510" y="422" class="boxText">Единый shared store</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="940" y="178" width="270" height="160" rx="28" fill="url(#card)"/>
+    <text x="974" y="228" class="boxTitle">worker_runtime</text>
+    <text x="974" y="262" class="boxText">Embedded Python</text>
+    <text x="974" y="288" class="boxText">llama-cpp-python</text>
+    <text x="974" y="314" class="boxText">CPU / CUDA runtime</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="940" y="410" width="270" height="160" rx="28" fill="url(#card)"/>
+    <text x="974" y="460" class="boxTitle">models_storage</text>
+    <text x="974" y="494" class="boxText">GGUF модели</text>
+    <text x="974" y="520" class="boxText">settings.json</text>
+    <text x="974" y="546" class="boxText">models.json</text>
+  </g>
+
+  <path class="line" d="M330 265 C390 265 415 315 475 330"/>
+  <path class="line" d="M330 485 C390 485 415 415 475 395"/>
+  <path class="line" d="M805 330 C860 300 880 260 940 250"/>
+  <path class="line" d="M805 405 C865 445 880 488 940 490"/>
+
+  <rect x="482" y="498" width="316" height="54" rx="27" fill="#0b5cad" opacity="0.92"/>
+  <text x="514" y="532" class="small">Один процесс EXE + дочерний worker для LLM</text>
+
+  <rect x="72" y="622" width="1136" height="48" rx="24" fill="#ffffff" opacity="0.14"/>
+  <text x="100" y="653" class="small">Portable-поставка: dist\LocalAIGPP.exe + dist\worker_runtime + dist\backend + dist\models_storage</text>
+</svg>

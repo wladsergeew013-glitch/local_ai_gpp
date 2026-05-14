@@ -308,6 +308,24 @@ def _is_hub_model_path(path_value: str) -> bool:
     return path_value.startswith("HUB::")
 
 
+def resolve_model_file_path(path_value: Any) -> Path:
+    raw = str(path_value or "").strip().strip('"')
+    path_obj = Path(raw)
+    if path_obj.is_absolute():
+        return path_obj
+    normalized = raw.replace('\\', '/')
+    candidates: list[Path] = []
+    if normalized.startswith('models_storage/'):
+        candidates.append(PROJECT_ROOT / path_obj)
+    else:
+        candidates.append(MODELS_DIR / path_obj)
+        candidates.append(PROJECT_ROOT / path_obj)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else path_obj
+
+
 def validate_model_record(model: dict[str, Any]) -> dict[str, Any]:
     item = dict(model)
     path_value = str(item.get("path") or "").strip()
@@ -325,12 +343,15 @@ def validate_model_record(model: dict[str, Any]) -> dict[str, Any]:
         item["validation_error"] = "Путь к файлу модели пустой."
         return item
 
-    path_obj = Path(path_value)
+    path_obj = resolve_model_file_path(path_value)
     if not path_obj.exists() or not path_obj.is_file():
         item["status"] = "missing"
         item["validation_error"] = f"Файл модели не найден: {path_obj}"
+        item["resolved_path"] = str(path_obj)
         return item
 
+    item["path"] = str(path_obj)
+    item["resolved_path"] = str(path_obj)
     item["file_exists"] = True
     item["file_size"] = path_obj.stat().st_size
     if item.get("status") == "missing":

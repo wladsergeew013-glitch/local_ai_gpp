@@ -3,7 +3,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 
 REM ============================================================
-REM Local AI GPP - canonical portable desktop EXE builder v67.1
+REM Local AI GPP - canonical portable desktop EXE builder v67.4
 REM Location: project_root\tools\02_build_exe.bat
 REM Produces:
 REM   dist\LocalAIGPP.exe
@@ -15,6 +15,9 @@ REM   tools\02_build_exe.bat
 REM   tools\02_build_exe.bat --cpu
 REM   tools\02_build_exe.bat --cuda auto
 REM   tools\02_build_exe.bat --cuda cu124
+REM   tools\02_build_exe.bat --cpu --no-models
+REM By default v67.4 copies registered local GGUF/BIN/SAFETENSORS files into dist.
+REM Use --no-models to build a lightweight shell without packaging models.
 REM ============================================================
 
 cd /d "%~dp0.."
@@ -33,14 +36,14 @@ set "NO_PROXY=localhost,127.0.0.1,::1,[::1],*.localhost"
 set "no_proxy=localhost,127.0.0.1,::1,[::1],*.localhost"
 set "LOCAL_AI_GPP_PROXY_BYPASS=1"
 
->"%LOG_FILE%" echo Local AI GPP desktop exe canonical builder v67.1
+>"%LOG_FILE%" echo Local AI GPP desktop exe canonical builder v67.4
 >>"%LOG_FILE%" echo Root: %ROOT%
 >>"%LOG_FILE%" echo Started: %DATE% %TIME%
 >>"%LOG_FILE%" echo Args: %*
 >>"%LOG_FILE%" echo.
 
 echo ============================================================
-echo Local AI GPP - build desktop EXE v67.1
+echo Local AI GPP - build desktop EXE v67.4
 echo ============================================================
 echo Root: %ROOT%
 echo Log:  %LOG_FILE%
@@ -135,6 +138,7 @@ echo DESKTOP EXE BUILD COMPLETE
 echo ============================================================
 echo File:   %ROOT%\dist\LocalAIGPP.exe
 echo Worker: %ROOT%\dist\worker_runtime\python.exe
+echo Models: %ROOT%\dist\models_storage
 echo.
 echo Run smoke test:
 echo   tools\09_smoke_test_exe.bat

@@ -152,9 +152,13 @@ function mergeDeep<T>(base: T, incoming: unknown): T {
   return out;
 }
 
-function newConversation(title = SHARED_CHAT_TITLE): Conversation {
+function makeConversationId(): string {
+  return `conv-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function newConversation(title = SHARED_CHAT_TITLE, id?: string): Conversation {
   return {
-    id: SHARED_CHAT_CONVERSATION_ID,
+    id: id || makeConversationId(),
     title,
     createdAt: new Date().toISOString(),
     messages: [],
@@ -173,7 +177,7 @@ const CHAT_SYNC_SOURCE_MAIN = 'main-ui';
 const IS_DESKTOP_API_MODE = API_BASE === '.';
 const SHARED_CHAT_CONVERSATION_ID = 'conv-shared';
 const SHARED_CHAT_TITLE = 'Тестовый диалог';
-const MAIN_SHARED_CHAT_SYNC_MARKER = 'V67_DESKTOP_SYNC_SINGLE_OWNER';
+const MAIN_SHARED_CHAT_SYNC_MARKER = 'V67_4_DESKTOP_SYNC_MULTI_CONVERSATION';
 
 
 function desktopApiUrl(path: string): string {
@@ -202,36 +206,39 @@ function normalizeSyncMessage(raw: unknown, fallbackIndex: number): ChatMessage 
   } as ChatMessage;
 }
 
+function normalizeSyncConversation(raw: unknown, fallbackIndex: number): Conversation | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const conv = raw as Record<string, unknown>;
+  const rawMessages = Array.isArray(conv.messages) ? conv.messages : [];
+  const messages = rawMessages
+    .map((message, index) => normalizeSyncMessage(message, fallbackIndex * 10000 + index))
+    .filter((message): message is ChatMessage => Boolean(message));
+  const id = String(conv.id || (fallbackIndex === 0 ? SHARED_CHAT_CONVERSATION_ID : `conv-import-${fallbackIndex}`));
+  return {
+    id,
+    title: String(conv.title || SHARED_CHAT_TITLE),
+    createdAt: String(conv.createdAt || new Date().toISOString()),
+    messages: mergeSyncMessages([], messages),
+  };
+}
+
 function normalizeSyncPayload(raw: unknown): ChatSyncState | null {
   if (!raw || typeof raw !== 'object') return null;
   const payload = raw as Record<string, unknown>;
   const conversationsRaw = Array.isArray(payload.conversations) ? payload.conversations : [];
   if (!conversationsRaw.length) return null;
-
-  const mergedMessages: ChatMessage[] = [];
-  let title = SHARED_CHAT_TITLE;
-  let createdAt = new Date().toISOString();
-  conversationsRaw.forEach((rawConversation, convIndex) => {
-    if (!rawConversation || typeof rawConversation !== 'object') return;
-    const conv = rawConversation as Record<string, unknown>;
-    if (typeof conv.title === 'string' && conv.title.trim()) title = conv.title;
-    if (typeof conv.createdAt === 'string' && conv.createdAt.trim()) createdAt = conv.createdAt;
-    const rawMessages = Array.isArray(conv.messages) ? conv.messages : [];
-    rawMessages.forEach((message, index) => {
-      const normalized = normalizeSyncMessage(message, convIndex * 10000 + index);
-      if (normalized) mergedMessages.push(normalized);
-    });
-  });
-
+  const conversations = conversationsRaw
+    .map((rawConversation, convIndex) => normalizeSyncConversation(rawConversation, convIndex))
+    .filter((conversation): conversation is Conversation => Boolean(conversation));
+  if (!conversations.length) return null;
+  const requestedActiveId = typeof payload.activeConversationId === 'string' ? payload.activeConversationId : '';
+  const activeConversationId = conversations.some((conversation) => conversation.id === requestedActiveId)
+    ? requestedActiveId
+    : conversations[0].id;
   return {
     updatedAt: typeof payload.updatedAt === 'number' ? payload.updatedAt : Date.now(),
-    activeConversationId: SHARED_CHAT_CONVERSATION_ID,
-    conversations: [{
-      id: SHARED_CHAT_CONVERSATION_ID,
-      title,
-      createdAt,
-      messages: mergeSyncMessages([], mergedMessages),
-    }],
+    activeConversationId,
+    conversations,
     source: typeof payload.source === 'string' ? payload.source : '',
   };
 }
@@ -263,14 +270,36 @@ function mergeSyncMessages(current: ChatMessage[], incoming: ChatMessage[]): Cha
 }
 
 function mergeSyncConversations(current: Conversation[], incoming: Conversation[]): Conversation[] {
-  const currentShared = current[0] || newConversation(SHARED_CHAT_TITLE);
-  const incomingShared = incoming[0] || newConversation(currentShared.title || SHARED_CHAT_TITLE);
-  return [{
-    id: SHARED_CHAT_CONVERSATION_ID,
-    title: incomingShared.title || currentShared.title || SHARED_CHAT_TITLE,
-    createdAt: currentShared.createdAt || incomingShared.createdAt || new Date().toISOString(),
-    messages: mergeSyncMessages(currentShared.messages || [], incomingShared.messages || []),
-  }];
+  const map = new Map<string, Conversation>();
+  current.forEach((conversation) => {
+    if (!conversation?.id) return;
+    map.set(conversation.id, { ...conversation, messages: [...(conversation.messages || [])] });
+  });
+  incoming.forEach((conversation) => {
+    if (!conversation?.id) return;
+    const existing = map.get(conversation.id);
+    if (!existing) {
+      map.set(conversation.id, { ...conversation, messages: [...(conversation.messages || [])] });
+      return;
+    }
+    map.set(conversation.id, {
+      ...existing,
+      title: conversation.title || existing.title || SHARED_CHAT_TITLE,
+      createdAt: existing.createdAt || conversation.createdAt || new Date().toISOString(),
+      messages: mergeSyncMessages(existing.messages || [], conversation.messages || []),
+    });
+  });
+  const incomingIds = incoming.map((conversation) => conversation.id).filter(Boolean);
+  const ordered: Conversation[] = [];
+  incomingIds.forEach((id) => {
+    const conversation = map.get(id);
+    if (conversation) {
+      ordered.push(conversation);
+      map.delete(id);
+    }
+  });
+  ordered.push(...map.values());
+  return ordered.length ? ordered.slice(0, 40) : [newConversation(SHARED_CHAT_TITLE, SHARED_CHAT_CONVERSATION_ID)];
 }
 
 export default function App() {
@@ -314,7 +343,7 @@ export default function App() {
   const [selectedModelId, setSelectedModelId] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('Ты корпоративный помощник. Отвечай кратко и проверяй факты.');
   const [chatInput, setChatInput] = useState('');
-  const [conversations, setConversations] = useState<Conversation[]>([newConversation(SHARED_CHAT_TITLE)]);
+  const [conversations, setConversations] = useState<Conversation[]>([newConversation(SHARED_CHAT_TITLE, SHARED_CHAT_CONVERSATION_ID)]);
   const [activeConversationId, setActiveConversationId] = useState(SHARED_CHAT_CONVERSATION_ID);
 
   const [hubDraftName, setHubDraftName] = useState('');
@@ -322,8 +351,10 @@ export default function App() {
   const [logoFile, setLogoFile] = useState<File | null>(null);
 
   useEffect(() => {
-    setActiveConversationId(SHARED_CHAT_CONVERSATION_ID);
-  }, [conversations]);
+    if (!conversations.some((conversation) => conversation.id === activeConversationId)) {
+      setActiveConversationId(conversations[0]?.id || SHARED_CHAT_CONVERSATION_ID);
+    }
+  }, [conversations, activeConversationId]);
 
   useEffect(() => {
     void bootstrap();
@@ -384,8 +415,8 @@ export default function App() {
     [llmModels, selectedModelId],
   );
   const activeConversation = useMemo(
-    () => conversations.find((item) => item.id === SHARED_CHAT_CONVERSATION_ID) || conversations[0],
-    [conversations],
+    () => conversations.find((item) => item.id === activeConversationId) || conversations[0],
+    [conversations, activeConversationId],
   );
   const loadedModelIds = useMemo(() => new Set(runtimeStatuses.map((item) => item.model_id)), [runtimeStatuses]);
   const apiDisplayBase = API_BASE || settings.server.public_base_url || window.location.origin;
@@ -433,33 +464,32 @@ export default function App() {
     chatSyncSkipWriteRef.current = true;
 
     if (payload.source === 'reset') {
-      setConversations([newConversation(SHARED_CHAT_TITLE)]);
-      setActiveConversationId(SHARED_CHAT_CONVERSATION_ID);
+      const created = newConversation(SHARED_CHAT_TITLE, SHARED_CHAT_CONVERSATION_ID);
+      setConversations([created]);
+      setActiveConversationId(created.id);
       return;
     }
 
-    // V67: в EXE общий диалог живёт на стороне desktop launcher.
-    // Главный экран не должен держать "свою" версию и пытаться мерджить
-    // поверх старого optimistic-сообщения. Если shared-store уже содержит
-    // сообщения, он является каноном и полностью заменяет локальный чат.
-    // Единственное исключение: пустой shared-store не стирает локальный
-    // optimistic-запрос в первые миллисекунды после отправки.
-    const canonicalConversations = mergeSyncConversations([newConversation(SHARED_CHAT_TITLE)], payload.conversations || []);
+    const canonicalConversations = mergeSyncConversations(conversations, payload.conversations || []);
+    const nextActiveId = payload.activeConversationId && canonicalConversations.some((conversation) => conversation.id === payload.activeConversationId)
+      ? payload.activeConversationId
+      : canonicalConversations[0]?.id || SHARED_CHAT_CONVERSATION_ID;
+
     const remoteCount = countSyncMessages(canonicalConversations);
     setConversations((prev) => {
       const localCount = countSyncMessages(prev);
-      if (remoteCount === 0 && localCount > 0) return prev;
+      if (remoteCount === 0 && localCount > 0 && payload.source !== 'clear-conversation' && payload.source !== 'new-conversation') return prev;
       return canonicalConversations;
     });
+    setActiveConversationId(nextActiveId);
 
-    const shared = canonicalConversations[0];
-    const lastAssistant = [...(shared?.messages || [])].reverse().find((message) => message.role === 'assistant');
+    const active = canonicalConversations.find((conversation) => conversation.id === nextActiveId) || canonicalConversations[0];
+    const lastAssistant = [...(active?.messages || [])].reverse().find((message) => message.role === 'assistant');
     if (lastAssistant?.pending) {
       setStatus({ tone: 'busy', title: lastAssistant.phase === 'typing' ? 'Ответ печатается' : 'Генерация', detail: lastAssistant.text || 'Модель готовит ответ.' });
     } else if (lastAssistant && (lastAssistant.answer || lastAssistant.text)) {
       setStatus({ tone: 'success', title: 'Ответ получен', detail: formatMessageMeta(lastAssistant) || 'Готово.' });
     }
-    setActiveConversationId(SHARED_CHAT_CONVERSATION_ID);
   }
 
   async function pullSharedChat(initial = false) {
@@ -487,7 +517,7 @@ export default function App() {
         const payload = normalizeSyncPayload(await response.json());
         if (!payload?.conversations?.length) continue;
         applySharedChatPayload(payload, true);
-        const messages = payload.conversations[0]?.messages || [];
+        const messages = payload.conversations.flatMap((conversation) => conversation.messages || []);
         const target = messages.find((message) => message.id === assistantId);
         if (target && !target.pending) return;
       } catch {
@@ -496,17 +526,16 @@ export default function App() {
     }
   }
 
-  async function pushSharedChatSnapshot(nextConversations: Conversation[], _nextActiveConversationId: string) {
+  async function pushSharedChatSnapshot(nextConversations: Conversation[], nextActiveConversationId: string, source = CHAT_SYNC_SOURCE_MAIN) {
     try {
-      if (countSyncMessages(nextConversations) === 0) return;
+      if (!nextConversations.length) return;
       const stamp = Math.max(Date.now(), chatSyncLastLocalWriteAtRef.current + 1);
       chatSyncLastLocalWriteAtRef.current = stamp;
-      const shared = mergeSyncConversations([newConversation(SHARED_CHAT_TITLE)], nextConversations)[0];
       const payload = {
-        source: CHAT_SYNC_SOURCE_MAIN,
+        source,
         updatedAt: stamp,
-        activeConversationId: SHARED_CHAT_CONVERSATION_ID,
-        conversations: [shared],
+        activeConversationId: nextActiveConversationId,
+        conversations: nextConversations,
       };
       const response = await fetch(desktopApiUrl('/api/desktop/chat-sync'), {
         method: 'POST',
@@ -519,7 +548,7 @@ export default function App() {
     }
   }
 
-  async function pushSharedChatMessage(_conversation: Conversation, message: ChatMessage) {
+  async function pushSharedChatMessage(conversation: Conversation, message: ChatMessage) {
     if (!message.text && !message.answer) return;
     try {
       const stamp = Math.max(Date.now(), chatSyncLastLocalWriteAtRef.current + 1);
@@ -527,10 +556,10 @@ export default function App() {
       const payload = {
         source: CHAT_SYNC_SOURCE_MAIN,
         updatedAt: stamp,
-        activeConversationId: SHARED_CHAT_CONVERSATION_ID,
-        conversationId: SHARED_CHAT_CONVERSATION_ID,
-        conversationTitle: SHARED_CHAT_TITLE,
-        conversationCreatedAt: conversations[0]?.createdAt || new Date().toISOString(),
+        activeConversationId: conversation.id,
+        conversationId: conversation.id,
+        conversationTitle: conversation.title,
+        conversationCreatedAt: conversation.createdAt || new Date().toISOString(),
         message: { ...message, syncUpdatedAt: stamp },
       };
       const response = await fetch(desktopApiUrl('/api/desktop/chat-message'), {
@@ -545,7 +574,7 @@ export default function App() {
   }
 
   async function pushSharedChat() {
-    return pushSharedChatSnapshot(conversations, SHARED_CHAT_CONVERSATION_ID);
+    return pushSharedChatSnapshot(conversations, activeConversationId);
   }
 
 
@@ -553,14 +582,17 @@ export default function App() {
     const stamp = Date.now();
     const userId = `shared-user-${stamp}-${Math.random().toString(16).slice(2)}`;
     const assistantId = `shared-assistant-${stamp}-${Math.random().toString(16).slice(2)}`;
-    const createdAt = conversations[0]?.createdAt || new Date().toISOString();
+    const targetConversation = activeConversation || conversations[0] || newConversation(SHARED_CHAT_TITLE, SHARED_CHAT_CONVERSATION_ID);
+    const conversationId = targetConversation.id;
+    const createdAt = targetConversation.createdAt || new Date().toISOString();
+    const conversationTitle = targetConversation.messages.length ? targetConversation.title : makeTitle(text);
 
     // v65: in EXE mode the desktop endpoint is the single engine. Show the same
     // message in the main UI immediately, then let polling merge the authoritative shared file.
     if (IS_DESKTOP_API_MODE) {
       const optimistic: Conversation = {
-        id: SHARED_CHAT_CONVERSATION_ID,
-        title: makeTitle(text),
+        id: conversationId,
+        title: conversationTitle,
         createdAt,
         messages: [
           { id: userId, role: 'user', text },
@@ -574,7 +606,7 @@ export default function App() {
         ],
       };
       setConversations((prev) => mergeSyncConversations(prev, [optimistic]));
-      setActiveConversationId(SHARED_CHAT_CONVERSATION_ID);
+      setActiveConversationId(conversationId);
       setChatInput('');
       setStatus({ tone: 'busy', title: 'Генерация', detail: 'Запрос отправлен в единый общий диалог.' });
     }
@@ -586,6 +618,10 @@ export default function App() {
         body: JSON.stringify({
           source: CHAT_SYNC_SOURCE_MAIN,
           message: text,
+          conversationId,
+          activeConversationId: conversationId,
+          conversationTitle,
+          conversationCreatedAt: createdAt,
           user_id: userId,
           assistant_id: assistantId,
           model_id: selectedModelId,
@@ -606,8 +642,8 @@ export default function App() {
         });
         if (IS_DESKTOP_API_MODE) {
           setConversations((prev) => mergeSyncConversations(prev, [{
-            id: SHARED_CHAT_CONVERSATION_ID,
-            title: SHARED_CHAT_TITLE,
+            id: conversationId,
+            title: conversationTitle,
             createdAt,
             messages: [{ id: assistantId, role: 'assistant', text: errorText, pending: false, phase: 'error' }],
           }]));
@@ -828,7 +864,7 @@ export default function App() {
   }
 
   function appendActiveMessage(message: ChatMessage) {
-    const targetId = SHARED_CHAT_CONVERSATION_ID;
+    const targetId = activeConversationId || activeConversation?.id || conversations[0]?.id || SHARED_CHAT_CONVERSATION_ID;
     const messageWithId: ChatMessage = {
       ...message,
       id: message.id || `${message.role}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -851,7 +887,7 @@ export default function App() {
 
 
   function updateActiveMessage(messageId: string, patch: Partial<ChatMessage>) {
-    const targetId = SHARED_CHAT_CONVERSATION_ID;
+    const targetId = activeConversationId || activeConversation?.id || conversations[0]?.id || SHARED_CHAT_CONVERSATION_ID;
     setConversations((prev) => {
       let updatedMessage: ChatMessage | null = null;
       const next = prev.map((conversation) => {
@@ -873,11 +909,39 @@ export default function App() {
   }
 
 
+
+  function handleSelectConversation(conversationId: string) {
+    setActiveConversationId(conversationId);
+    void pushSharedChatSnapshot(conversations, conversationId, 'main-ui-snapshot');
+  }
+
   function handleNewConversation() {
-    setConversations([newConversation(SHARED_CHAT_TITLE)]);
-    setActiveConversationId(SHARED_CHAT_CONVERSATION_ID);
+    const created = newConversation(`Диалог ${conversations.length + 1}`);
+    const next = [created, ...conversations];
+    setConversations(next);
+    setActiveConversationId(created.id);
     setChatInput('');
-    void fetch(desktopApiUrl('/api/desktop/chat-reset'), { method: 'POST' }).catch(() => undefined);
+    setStatus({ tone: 'idle', title: 'Новый диалог', detail: 'Создан отдельный пустой диалог.' });
+    void pushSharedChatSnapshot(next, created.id, 'new-conversation');
+  }
+
+  function handleClearActiveConversation() {
+    const targetId = activeConversationId || activeConversation?.id || conversations[0]?.id;
+    if (!targetId) return;
+    const next = conversations.map((conversation) => (
+      conversation.id === targetId
+        ? { ...conversation, title: conversation.title || SHARED_CHAT_TITLE, messages: [] }
+        : conversation
+    ));
+    setConversations(next);
+    setChatInput('');
+    setStatus({ tone: 'success', title: 'Диалог очищен', detail: 'История активного диалога удалена.' });
+    void pushSharedChatSnapshot(next, targetId, 'clear-conversation');
+    void fetch(desktopApiUrl('/api/desktop/chat-clear'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: targetId }),
+    }).catch(() => undefined);
   }
 
   async function handleSubmitUpload(e: React.FormEvent) {
@@ -1311,6 +1375,9 @@ export default function App() {
         <button type="button" className="primary-action" onClick={handleNewConversation}>
           Новый диалог
         </button>
+        <button type="button" className="quiet-button conversation-clear-button" onClick={handleClearActiveConversation}>
+          Очистить диалог
+        </button>
 
         <nav className="conversation-list" aria-label="Диалоги">
           {conversations.map((conversation) => (
@@ -1318,7 +1385,7 @@ export default function App() {
               type="button"
               key={conversation.id}
               className={`conversation-item ${conversation.id === activeConversationId ? 'active' : ''}`}
-              onClick={() => setActiveConversationId(conversation.id)}
+              onClick={() => handleSelectConversation(conversation.id)}
             >
               <span>{conversation.title}</span>
               <small>{conversation.messages.length} сообщений</small>
@@ -1349,6 +1416,9 @@ export default function App() {
             <h2>{activeConversation?.title || 'Диалог'}</h2>
           </div>
           <div className="header-actions">
+            <button type="button" className="quiet-button" onClick={handleClearActiveConversation}>
+              Очистить
+            </button>
             <button type="button" className="quiet-button" onClick={() => openSettings('runtime')}>
               Runtime
             </button>

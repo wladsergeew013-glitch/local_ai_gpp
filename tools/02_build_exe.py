@@ -22,6 +22,7 @@ PY_EMBED_URL = f"https://www.python.org/ftp/python/{PY_EMBED_VERSION}/{PY_EMBED_
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 CPU_VERSION = os.environ.get("LLAMA_CPP_CPU_VERSION", "0.3.19")
 CUDA_VERSION = os.environ.get("LLAMA_CPP_CUDA_VERSION", "0.3.4")
+MODEL_EXTENSIONS = {".gguf", ".bin", ".safetensors"}
 PARENT_REDIRECTS_BUILD_LOG = os.environ.get("LOCAL_AI_GPP_BUILD_LOG_REDIRECTED") == "1"
 
 
@@ -186,6 +187,15 @@ def ensure_backend_venv(base_python: str) -> Path:
     return venv_py
 
 
+def clean_python_caches() -> None:
+    for base in (ROOT / "backend", ROOT / "tools"):
+        if not base.exists():
+            continue
+        for cache_dir in base.rglob("__pycache__"):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    log("[OK] Removed stale __pycache__ folders from backend/tools before packaging")
+
+
 def build_frontend() -> None:
     frontend = ROOT / "frontend"
     if not (frontend / "package.json").exists():
@@ -256,6 +266,96 @@ def ignore_junk(_dir: str, names: list[str]) -> set[str]:
     return {name for name in names if name == "__pycache__" or name.endswith(".pyc") or name.endswith(".pyo")}
 
 
+def _safe_model_folder_name(record: dict[str, object], fallback_index: int) -> str:
+    raw = str(record.get("name") or record.get("id") or f"model_{fallback_index}").strip()
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw)
+    return safe.strip("._")[:80] or f"model_{fallback_index}"
+
+
+def _path_is_inside(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _copy_portable_model_registry(models_src: Path, models_dst: Path) -> None:
+    src_registry = models_src / "models.json"
+    dst_registry = models_dst / "models.json"
+    if not src_registry.exists():
+        dst_registry.write_text("[]", encoding="utf-8")
+        log("[WARN] Source models.json not found. Wrote empty portable registry.")
+        return
+
+    try:
+        registry = json.loads(src_registry.read_text(encoding="utf-8"))
+    except Exception as exc:
+        dst_registry.write_text("[]", encoding="utf-8")
+        log(f"[WARN] Cannot read models.json ({exc}). Wrote empty portable registry.")
+        return
+
+    if not isinstance(registry, list):
+        dst_registry.write_text("[]", encoding="utf-8")
+        log("[WARN] models.json is not a list. Wrote empty portable registry.")
+        return
+
+    package_models = os.environ.get("LOCAL_AI_GPP_PACKAGE_MODELS", "1").strip().lower() not in {"0", "false", "no", "off"}
+    portable: list[dict[str, object]] = []
+    copied = 0
+    missing = 0
+    skipped = 0
+
+    for index, item in enumerate(registry):
+        if not isinstance(item, dict):
+            continue
+        record = dict(item)
+        path_value = str(record.get("path") or "").strip()
+        source_path = Path(path_value) if path_value else None
+        if source_path and source_path.exists() and source_path.is_file() and source_path.suffix.lower() in MODEL_EXTENSIONS:
+            if package_models:
+                folder = _safe_model_folder_name(record, index)
+                dest = models_dst / folder / source_path.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    if not dest.exists() or dest.stat().st_size != source_path.stat().st_size:
+                        log(f"[INFO] Packaging model into dist: {source_path} -> {dest}")
+                        shutil.copy2(source_path, dest)
+                    record["path"] = str(Path("models_storage") / folder / source_path.name)
+                    record["source"] = "packaged_file"
+                    record["file_exists"] = True
+                    record["file_size"] = dest.stat().st_size
+                    copied += 1
+                except Exception as exc:
+                    log(f"[WARN] Failed to package model {source_path}: {exc}")
+                    record["file_exists"] = False
+                    record["validation_error"] = f"Model was not packaged: {exc}"
+                    missing += 1
+            else:
+                record["file_exists"] = True
+                record["file_size"] = source_path.stat().st_size
+                skipped += 1
+        else:
+            if path_value.startswith("HUB::"):
+                record["file_exists"] = False
+                record["validation_error"] = "Remote hub model is not localized into dist."
+            elif path_value:
+                record["file_exists"] = False
+                record["validation_error"] = f"Model file is missing on build machine: {path_value}"
+            else:
+                record["file_exists"] = False
+                record["validation_error"] = "Model path is empty."
+            missing += 1
+        portable.append(record)
+
+    dst_registry.write_text(json.dumps(portable, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"[OK] Portable models registry written: {dst_registry}")
+    if package_models:
+        log(f"[INFO] Model packaging summary: copied={copied}, missing={missing}")
+    else:
+        log(f"[INFO] Model packaging disabled by LOCAL_AI_GPP_PACKAGE_MODELS=0; external model paths kept/skipped={skipped}, missing={missing}")
+
+
 def copy_portable_backend_and_metadata() -> None:
     dist = ROOT / "dist"
     dist.mkdir(parents=True, exist_ok=True)
@@ -276,20 +376,25 @@ def copy_portable_backend_and_metadata() -> None:
             shutil.copy2(src, backend_dst / name)
 
     models_dst = dist / "models_storage"
+    if models_dst.exists():
+        # Keep packaged models only through the explicit registry copy below.
+        shutil.rmtree(models_dst)
     (models_dst / "branding").mkdir(parents=True, exist_ok=True)
     models_src = ROOT / "models_storage"
-    for name in ("settings.json", "models.json"):
-        src = models_src / name
-        if src.exists():
-            shutil.copy2(src, models_dst / name)
+    settings_src = models_src / "settings.json"
+    if settings_src.exists():
+        shutil.copy2(settings_src, models_dst / "settings.json")
+    else:
+        (models_dst / "settings.json").write_text("{}", encoding="utf-8")
     branding_src = models_src / "branding"
     if branding_src.exists():
-        for src in branding_src.iterdir():
-            if src.is_file():
-                shutil.copy2(src, models_dst / "branding" / src.name)
+        shutil.copytree(branding_src, models_dst / "branding", dirs_exist_ok=True, ignore=ignore_junk)
+    _copy_portable_model_registry(models_src, models_dst)
+
     if (ROOT / "README.md").exists():
         shutil.copy2(ROOT / "README.md", dist / "README.md")
-    log("[OK] Copied portable backend and models metadata into dist")
+    log("[OK] Copied portable backend, settings, branding and model registry into dist")
+
 
 
 def download_once(url: str, target: Path) -> None:
@@ -376,10 +481,129 @@ def create_worker_runtime(runtime_kind: str) -> None:
     log("[OK] worker_runtime verified")
 
 
+def write_dist_portable_helpers(runtime_kind: str) -> None:
+    """Write tiny self-check helpers directly into dist.
+
+    On a copied machine the user may have only the dist folder, not the project
+    tools folder. These helpers use the embedded worker_runtime\python.exe, so
+    they do not require installed Python.
+    """
+    dist = ROOT / "dist"
+    readme = dist / "README_PORTABLE_DIST.txt"
+    readme.write_text(
+        "Local AI GPP portable dist\n"
+        "==========================\n\n"
+        "Переносить нужно всю папку dist целиком, не один LocalAIGPP.exe.\n\n"
+        "Минимальный состав:\n"
+        "  LocalAIGPP.exe\n"
+        "  worker_runtime\\python.exe\n"
+        "  backend\\app\\llama_worker.py\n"
+        "  models_storage\\models.json\n"
+        "  models_storage\\<model>\\*.gguf\n\n"
+        "Проверка на целевой машине:\n"
+        "  CHECK_DIST_HEALTH.bat\n\n"
+        "Запуск:\n"
+        "  RUN_LocalAIGPP.bat\n\n"
+        "Если окно не открывается, проверьте наличие Microsoft Edge WebView2 Runtime.\n"
+        "Если модель не отвечает, запустите CHECK_DIST_HEALTH.bat и пришлите вывод.\n",
+        encoding="utf-8",
+    )
+
+    (dist / "RUN_LocalAIGPP.bat").write_text(
+        "@echo off\n"
+        "setlocal EnableExtensions\n"
+        "chcp 65001 >nul\n"
+        "cd /d \"%~dp0\"\n"
+        "set \"NO_PROXY=localhost,127.0.0.1,::1,[::1],*.localhost\"\n"
+        "set \"no_proxy=%NO_PROXY%\"\n"
+        "set \"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--no-proxy-server --proxy-bypass-list=<-loopback>;localhost;127.0.0.1;::1;[::1]\"\n"
+        "start \"\" \"%~dp0LocalAIGPP.exe\"\n",
+        encoding="utf-8",
+        newline="\r\n",
+    )
+
+    health_py = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "root = Path(__file__).resolve().parent\n"
+        "print('Local AI GPP dist health check')\n"
+        "print('root=', root)\n"
+        "required = [root/'LocalAIGPP.exe', root/'worker_runtime'/'python.exe', root/'backend'/'app'/'llama_worker.py', root/'models_storage'/'models.json']\n"
+        "errors = 0\n"
+        "for path in required:\n"
+        "    ok = path.exists()\n"
+        "    print(('[OK] ' if ok else '[ERROR] ') + str(path.relative_to(root)))\n"
+        "    errors += 0 if ok else 1\n"
+        "pth = root/'worker_runtime'/'python312._pth'\n"
+        "if pth.exists():\n"
+        "    lines = [x.strip().lstrip('\\ufeff') for x in pth.read_text(encoding='utf-8', errors='replace').splitlines()]\n"
+        "    print(('[OK] ' if '..' in lines else '[ERROR] ') + 'worker_runtime/python312._pth contains ..')\n"
+        "    errors += 0 if '..' in lines else 1\n"
+        "try:\n"
+        "    import backend.app.llama_worker, llama_cpp\n"
+        "    print('[OK] import backend.app.llama_worker')\n"
+        "    print('[OK] import llama_cpp version=', getattr(llama_cpp, '__version__', 'unknown'))\n"
+        "except Exception as exc:\n"
+        "    print('[ERROR] worker import failed:', repr(exc))\n"
+        "    errors += 1\n"
+        "try:\n"
+        "    models = json.loads((root/'models_storage'/'models.json').read_text(encoding='utf-8'))\n"
+        "except Exception as exc:\n"
+        "    print('[ERROR] cannot read models.json:', repr(exc))\n"
+        "    models = []\n"
+        "    errors += 1\n"
+        "if isinstance(models, list):\n"
+        "    llms = [m for m in models if isinstance(m, dict) and m.get('type') == 'LLM']\n"
+        "    print('LLM models=', len(llms))\n"
+        "    for m in llms:\n"
+        "        p = Path(str(m.get('path') or ''))\n"
+        "        inside = False\n"
+        "        try:\n"
+        "            p.resolve().relative_to(root.resolve())\n"
+        "            inside = True\n"
+        "        except Exception:\n"
+        "            inside = False\n"
+        "        ok = p.exists() and inside\n"
+        "        print(('[OK] ' if ok else '[ERROR] ') + str(m.get('id')) + ' -> ' + str(p))\n"
+        "        errors += 0 if ok else 1\n"
+        "print('errors=', errors)\n"
+        "raise SystemExit(0 if errors == 0 else 1)\n"
+    )
+    (dist / "_dist_health_check.py").write_text(health_py, encoding="utf-8")
+    (dist / "CHECK_DIST_HEALTH.bat").write_text(
+        "@echo off\n"
+        "setlocal EnableExtensions\n"
+        "chcp 65001 >nul\n"
+        "cd /d \"%~dp0\"\n"
+        "echo ============================================================\n"
+        "echo Local AI GPP - portable dist health check\n"
+        "echo ============================================================\n"
+        "if not exist \"worker_runtime\\python.exe\" (\n"
+        "  echo [ERROR] worker_runtime\\python.exe not found. Copy the whole dist folder.\n"
+        "  pause\n"
+        "  exit /b 1\n"
+        ")\n"
+        "\"%~dp0worker_runtime\\python.exe\" \"%~dp0_dist_health_check.py\"\n"
+        "set \"RC=%ERRORLEVEL%\"\n"
+        "echo.\n"
+        "if not \"%RC%\"==\"0\" (\n"
+        "  echo FAILED. Send this output and logs folder.\n"
+        ") else (\n"
+        "  echo OK. Dist structure is portable.\n"
+        ")\n"
+        "pause\n"
+        "exit /b %RC%\n",
+        encoding="utf-8",
+        newline="\r\n",
+    )
+    log(f"[OK] Wrote portable dist helpers for target machine checks: {dist / 'CHECK_DIST_HEALTH.bat'}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cpu", action="store_true", help="Build CPU worker runtime")
     parser.add_argument("--cuda", nargs="?", const="auto", default=None, help="Build CUDA worker runtime, e.g. --cuda auto or --cuda cu124")
+    parser.add_argument("--no-models", action="store_true", help="Do not copy registered model files into dist; keep metadata only")
     return parser.parse_args()
 
 
@@ -403,7 +627,7 @@ def choose_runtime_kind(args: argparse.Namespace) -> str:
 def main() -> int:
     args = parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
-    reset_log_file("Local AI GPP desktop exe builder v67.1")
+    reset_log_file("Local AI GPP desktop exe builder v67.4")
     runtime_kind = choose_runtime_kind(args)
     log("=" * 60)
     log("Local AI GPP - build desktop EXE")
@@ -413,10 +637,14 @@ def main() -> int:
     base_python = find_base_python()
     log(f"[INFO] build/base python: {base_python}")
     venv_py = ensure_backend_venv(base_python)
+    if getattr(args, "no_models", False):
+        os.environ["LOCAL_AI_GPP_PACKAGE_MODELS"] = "0"
+    clean_python_caches()
     build_frontend()
     build_pyinstaller(venv_py)
     copy_portable_backend_and_metadata()
     create_worker_runtime(runtime_kind)
+    write_dist_portable_helpers(runtime_kind)
     log("")
     log("=" * 60)
     log("DESKTOP EXE BUILD COMPLETE")
