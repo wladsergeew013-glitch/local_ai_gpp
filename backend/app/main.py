@@ -12,13 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from backend.app.core import (
     MODELS_DIR,
     PROJECT_ROOT,
-    clear_desktop_chat_state,
     enforce_idle_runtime_policy,
-    get_desktop_chat_state,
     load_models,
     load_settings,
     prewarm_runtime,
-    put_desktop_chat_state,
 )
 from backend.app.routers.bootstrap import router as bootstrap_router
 from backend.app.routers.chat import router as chat_router
@@ -101,20 +98,9 @@ app.include_router(compat_router)
 app.include_router(system_router)
 
 
-# Desktop chat sync routes must be registered before the catch-all frontend mount.
-@app.get('/api/desktop/chat-sync')
-def desktop_chat_sync_get() -> dict[str, Any]:
-    return get_desktop_chat_state()
-
-
-@app.put('/api/desktop/chat-sync')
-def desktop_chat_sync_put(payload: dict[str, Any]) -> dict[str, Any]:
-    return put_desktop_chat_state(payload)
-
-
-@app.delete('/api/desktop/chat-sync')
-def desktop_chat_sync_delete() -> dict[str, Any]:
-    return clear_desktop_chat_state()
+# Desktop integration routes are owned by tools/exe_launcher.py only.
+# The plain backend deliberately has no /api/desktop/* routes, so the EXE
+# cannot accidentally read the old LocalAppData shared_chat_v23 store.
 
 
 frontend_dist = PROJECT_ROOT / 'frontend' / 'dist'

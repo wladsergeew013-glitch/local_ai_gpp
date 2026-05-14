@@ -23,7 +23,7 @@ APP_NAME = "Local AI GPP"
 PROXY_BYPASS_VALUE = "localhost,127.0.0.1,::1,[::1],*.localhost"
 WEBVIEW2_PROXY_ARGS = "--no-proxy-server --proxy-bypass-list=<-loopback>;localhost;127.0.0.1;::1;[::1]"
 TRANSPARENT_COLOR = "#010203"
-LAUNCHER_VERSION_MARKER = "V66_CANONICAL_SHARED_CHAT_REMOTE_REPLACE"
+LAUNCHER_VERSION_MARKER = "V67_DESKTOP_SYNC_SINGLE_OWNER"
 
 server: uvicorn.Server | None = None
 server_thread: threading.Thread | None = None
@@ -67,7 +67,7 @@ def instance_file() -> Path:
 
 
 def chat_sync_file() -> Path:
-    return assistant_state_dir() / "shared_chat_v66.json"
+    return assistant_state_dir() / "shared_chat_v67.json"
 
 
 def assistant_position_file() -> Path:
@@ -113,6 +113,31 @@ def configure_local_runtime_environment() -> None:
 configure_local_runtime_environment()
 
 from backend.app.main import app  # noqa: E402
+
+def remove_imported_desktop_routes() -> None:
+    """The packaged EXE is the only owner of /api/desktop/* routes.
+
+    backend.app.main is also used by the plain browser/Docker backend. Older
+    builds registered /api/desktop/chat-sync there and wrote shared_chat_v23.json
+    in LocalAppData. If those routes stay on the imported app, Starlette can
+    dispatch GET /api/desktop/chat-sync to the old backend handler before the
+    launcher's v67 handler. Then the main WebView and the native mini helper
+    look like one process, but actually read different chat stores.
+    """
+    try:
+        kept = []
+        for route in list(getattr(app.router, "routes", [])):
+            route_path = str(getattr(route, "path", "") or "")
+            if route_path.startswith("/api/desktop/"):
+                continue
+            kept.append(route)
+        app.router.routes[:] = kept
+    except Exception:
+        # Do not block app start because of a defensive route cleanup.
+        pass
+
+
+remove_imported_desktop_routes()
 
 FRONTEND_DIST = resource_dir("frontend_dist")
 MODELS_DIR = runtime_dir() / "models_storage"
@@ -164,6 +189,20 @@ def wait_for_server(port: int, timeout: float = 25.0) -> bool:
         except OSError:
             time.sleep(0.1)
     return False
+
+
+def write_instance_info(port: int) -> None:
+    payload = {
+        "pid": os.getpid(),
+        "port": int(port),
+        "url": f"http://127.0.0.1:{int(port)}",
+        "desktop_sync_marker": LAUNCHER_VERSION_MARKER,
+        "runtime_dir": str(runtime_dir()),
+        "frontend_dist": str(FRONTEND_DIST),
+        "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    with contextlib.suppress(Exception):
+        instance_file().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def open_folder(path: Path) -> None:
@@ -235,6 +274,8 @@ def request_exit() -> None:
             server.should_exit = True
     except Exception:
         pass
+    with contextlib.suppress(Exception):
+        instance_file().unlink(missing_ok=True)
     try:
         window_call(main_window, "destroy")
     except Exception:
@@ -756,6 +797,16 @@ def api_get_chat_sync():
 @app.post("/api/desktop/chat-sync")
 def api_post_chat_sync(payload: dict[str, Any]):
     return write_chat_state(payload)
+
+
+@app.put("/api/desktop/chat-sync")
+def api_put_chat_sync(payload: dict[str, Any]):
+    return write_chat_state(payload)
+
+
+@app.delete("/api/desktop/chat-sync")
+def api_delete_chat_sync():
+    return reset_chat_state()
 
 
 @app.post("/api/desktop/chat-message")
@@ -1981,6 +2032,7 @@ def main() -> None:
         return
 
     url = f"http://127.0.0.1:{server_port}"
+    write_instance_info(server_port)
     assistant_agent = NativeAssistantAgent(lambda: server_port)
     start_tray()
 

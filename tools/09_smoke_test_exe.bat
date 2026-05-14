@@ -8,12 +8,12 @@ set "WORKER=%DIST%\worker_runtime\python.exe"
 set "LOG=%ROOT%\tools\out\smoke_test_exe.log"
 if not exist "%ROOT%\tools\out" mkdir "%ROOT%\tools\out" >nul 2>nul
 
->"%LOG%" echo Local AI GPP EXE smoke test v66
+>"%LOG%" echo Local AI GPP EXE smoke test v67
 >>"%LOG%" echo Root: %ROOT%
 >>"%LOG%" echo Started: %DATE% %TIME%
 
 echo ============================================================
-echo Local AI GPP - EXE smoke test v66
+echo Local AI GPP - EXE smoke test v67
 echo ============================================================
 echo Log: %LOG%
 echo.
@@ -52,23 +52,41 @@ if errorlevel 1 (
 echo [OK] python312._pth contains backend parent path.
 >>"%LOG%" echo [OK] python312._pth contains ..
 
-findstr /C:"V66_CANONICAL_SHARED_CHAT_REMOTE_REPLACE" "%ROOT%\tools\exe_launcher.py" >nul 2>nul
+findstr /C:"V67_DESKTOP_SYNC_SINGLE_OWNER" "%ROOT%\tools\exe_launcher.py" >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] tools\exe_launcher.py is not v66 native assistant launcher.
+  echo [ERROR] tools\exe_launcher.py is not v67 native assistant launcher.
   >>"%LOG%" echo [ERROR] launcher version marker missing.
   goto fail
 )
-echo [OK] launcher version marker: v66.
->>"%LOG%" echo [OK] launcher version marker v66.
+echo [OK] launcher version marker: v67.
+>>"%LOG%" echo [OK] launcher version marker v67.
 
-findstr /C:"V66_CANONICAL_SHARED_CHAT_REMOTE_REPLACE" "%ROOT%\frontend\src\App.tsx" >nul 2>nul
+findstr /C:"V67_DESKTOP_SYNC_SINGLE_OWNER" "%ROOT%\frontend\src\App.tsx" >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] frontend\src\App.tsx is not v66 canonical shared chat UI.
-  >>"%LOG%" echo [ERROR] frontend v66 marker missing.
+  echo [ERROR] frontend\src\App.tsx is not v67 canonical shared chat UI.
+  >>"%LOG%" echo [ERROR] frontend v67 marker missing.
   goto fail
 )
-echo [OK] frontend canonical shared-chat marker: v66.
->>"%LOG%" echo [OK] frontend canonical shared-chat marker v66.
+echo [OK] frontend canonical shared-chat marker: v67.
+>>"%LOG%" echo [OK] frontend canonical shared-chat marker v67.
+
+findstr /C:"/api/desktop/chat-sync" "%ROOT%\backend\app\main.py" >nul 2>nul
+if not errorlevel 1 (
+  echo [ERROR] backend\app\main.py still owns /api/desktop/chat-sync. EXE sync can be split again.
+  >>"%LOG%" echo [ERROR] backend main still contains desktop chat-sync route.
+  goto fail
+)
+echo [OK] backend desktop chat-sync route removed.
+>>"%LOG%" echo [OK] backend desktop chat-sync route removed.
+
+findstr /C:"remove_imported_desktop_routes" "%ROOT%\tools\exe_launcher.py" >nul 2>nul
+if errorlevel 1 (
+  echo [ERROR] tools\exe_launcher.py has no defensive desktop route cleanup.
+  >>"%LOG%" echo [ERROR] launcher route cleanup missing.
+  goto fail
+)
+echo [OK] launcher defensive route cleanup exists.
+>>"%LOG%" echo [OK] launcher defensive route cleanup exists.
 
 pushd "%DIST%" >nul
 "%WORKER%" -c "import sys,json; import backend.app.llama_worker, llama_cpp; print(json.dumps({'python': sys.executable, 'llama_cpp': getattr(llama_cpp,'__version__','unknown'), 'path': sys.path[:8]}, ensure_ascii=False, indent=2))" >>"%LOG%" 2>&1

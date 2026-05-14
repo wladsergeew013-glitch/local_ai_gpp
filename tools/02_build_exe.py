@@ -22,28 +22,84 @@ PY_EMBED_URL = f"https://www.python.org/ftp/python/{PY_EMBED_VERSION}/{PY_EMBED_
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 CPU_VERSION = os.environ.get("LLAMA_CPP_CPU_VERSION", "0.3.19")
 CUDA_VERSION = os.environ.get("LLAMA_CPP_CUDA_VERSION", "0.3.4")
+PARENT_REDIRECTS_BUILD_LOG = os.environ.get("LOCAL_AI_GPP_BUILD_LOG_REDIRECTED") == "1"
+
+
+def _write_log_file_line(message: str) -> None:
+    """Append to the build log when this Python process owns the log file.
+
+    tools\02_build_exe.bat redirects this script stdout/stderr into the same
+    build_exe.log. On Windows that redirected handle can lock the file, so direct
+    open(..., 'a'/'w') from Python raises PermissionError. In that mode stdout is
+    already the log, therefore direct file writes are intentionally skipped.
+    """
+    if PARENT_REDIRECTS_BUILD_LOG:
+        return
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(message + "\n")
+    except OSError:
+        # Do not fail the build because logging is locked by cmd.exe, antivirus,
+        # Notepad, or another viewer. stdout remains the canonical build stream.
+        return
+
+
+def reset_log_file(header: str) -> None:
+    if PARENT_REDIRECTS_BUILD_LOG:
+        print(header, flush=True)
+        return
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        LOG.write_text(header + "\n", encoding="utf-8")
+    except OSError:
+        print(header, flush=True)
 
 
 def log(message: str) -> None:
     print(message, flush=True)
-    LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a", encoding="utf-8", errors="replace") as handle:
-        handle.write(message + "\n")
+    _write_log_file_line(message)
 
 
 def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     rendered = " ".join(f'"{item}"' if " " in item else item for item in command)
     log("[RUN] " + rendered)
-    with LOG.open("a", encoding="utf-8", errors="replace") as handle:
+
+    # If the .bat parent already redirects stdout to build_exe.log, inherit stdout
+    # instead of opening the same file again. This fixes Windows PermissionError.
+    if PARENT_REDIRECTS_BUILD_LOG:
         completed = subprocess.run(
             command,
             cwd=str(cwd) if cwd else None,
             env=env,
-            stdout=handle,
+            stdout=sys.stdout,
             stderr=subprocess.STDOUT,
             text=True,
             check=False,
         )
+    else:
+        try:
+            LOG.parent.mkdir(parents=True, exist_ok=True)
+            with LOG.open("a", encoding="utf-8", errors="replace") as handle:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(cwd) if cwd else None,
+                    env=env,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
+        except OSError:
+            completed = subprocess.run(
+                command,
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                stdout=sys.stdout,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
 
@@ -323,15 +379,32 @@ def create_worker_runtime(runtime_kind: str) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cpu", action="store_true", help="Build CPU worker runtime")
-    parser.add_argument("--cuda", nargs="?", const="cu124", default=None, help="Build CUDA worker runtime, e.g. --cuda cu124")
+    parser.add_argument("--cuda", nargs="?", const="auto", default=None, help="Build CUDA worker runtime, e.g. --cuda auto or --cuda cu124")
     return parser.parse_args()
+
+
+def choose_runtime_kind(args: argparse.Namespace) -> str:
+    if args.cpu:
+        return "cpu"
+    if not args.cuda:
+        return "cpu"
+    requested = str(args.cuda or "auto").strip().lower()
+    if requested in {"", "auto", "cuda", "gpu"}:
+        if shutil.which("nvidia-smi"):
+            return os.environ.get("LOCAL_AI_GPP_DEFAULT_CUDA_TAG", "cu124")
+        log("[WARN] --cuda auto was requested, but nvidia-smi was not found. Building CPU worker runtime.")
+        return "cpu"
+    if not requested.startswith("cu"):
+        log(f"[WARN] Unsupported CUDA tag '{requested}'. Expected cu124/cu125/etc. Building CPU worker runtime.")
+        return "cpu"
+    return requested
 
 
 def main() -> int:
     args = parse_args()
-    runtime_kind = "cpu" if args.cpu or not args.cuda else str(args.cuda)
     OUT.mkdir(parents=True, exist_ok=True)
-    LOG.write_text("Local AI GPP desktop exe builder v35\n", encoding="utf-8")
+    reset_log_file("Local AI GPP desktop exe builder v67.1")
+    runtime_kind = choose_runtime_kind(args)
     log("=" * 60)
     log("Local AI GPP - build desktop EXE")
     log("=" * 60)

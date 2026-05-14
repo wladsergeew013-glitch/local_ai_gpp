@@ -173,11 +173,15 @@ const CHAT_SYNC_SOURCE_MAIN = 'main-ui';
 const IS_DESKTOP_API_MODE = API_BASE === '.';
 const SHARED_CHAT_CONVERSATION_ID = 'conv-shared';
 const SHARED_CHAT_TITLE = 'Тестовый диалог';
-const MAIN_SHARED_CHAT_SYNC_MARKER = 'V66_CANONICAL_SHARED_CHAT_REMOTE_REPLACE';
+const MAIN_SHARED_CHAT_SYNC_MARKER = 'V67_DESKTOP_SYNC_SINGLE_OWNER';
 
 
 function desktopApiUrl(path: string): string {
   return !API_BASE || API_BASE === '.' ? path : `${API_BASE}${path}`;
+}
+
+function hasCanonicalDesktopSyncMarker(response: Response): boolean {
+  return response.headers.get('X-Local-AI-GPP-Sync') === MAIN_SHARED_CHAT_SYNC_MARKER;
 }
 
 function countSyncMessages(conversations: Conversation[]): number {
@@ -434,7 +438,7 @@ export default function App() {
       return;
     }
 
-    // V66: в EXE общий диалог живёт на стороне desktop launcher.
+    // V67: в EXE общий диалог живёт на стороне desktop launcher.
     // Главный экран не должен держать "свою" версию и пытаться мерджить
     // поверх старого optimistic-сообщения. Если shared-store уже содержит
     // сообщения, он является каноном и полностью заменяет локальный чат.
@@ -461,7 +465,7 @@ export default function App() {
   async function pullSharedChat(initial = false) {
     try {
       const response = await fetch(desktopApiUrl(`/api/desktop/chat-sync?t=${Date.now()}`), { cache: 'no-store' });
-      if (!response.ok) return;
+      if (!response.ok || !hasCanonicalDesktopSyncMarker(response)) return;
       const payload = normalizeSyncPayload(await response.json());
       if (!payload?.conversations?.length) return;
       applySharedChatPayload(payload, initial);
@@ -472,14 +476,14 @@ export default function App() {
 
 
   async function waitForSharedAnswer(assistantId: string) {
-    // V66: после отправки из основного окна не ждём милости общего polling.
+    // V67: после отправки из основного окна не ждём милости общего polling.
     // Делаем короткий активный tail именно нужного assistant message. Это не
     // запускает вторую модель: только читает /api/desktop/chat-sync.
     for (let attempt = 0; attempt < 180; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, attempt < 12 ? 350 : 750));
       try {
         const response = await fetch(desktopApiUrl(`/api/desktop/chat-sync?t=${Date.now()}-${attempt}`), { cache: 'no-store' });
-        if (!response.ok) continue;
+        if (!response.ok || !hasCanonicalDesktopSyncMarker(response)) continue;
         const payload = normalizeSyncPayload(await response.json());
         if (!payload?.conversations?.length) continue;
         applySharedChatPayload(payload, true);

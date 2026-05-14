@@ -1537,66 +1537,8 @@ async def import_from_hub(payload: dict[str, Any], settings: dict[str, Any]) -> 
     )
 
 # -----------------------------------------------------------------------------
-# Desktop chat sync helpers (v31 repair)
+# Runtime registry helpers
 # -----------------------------------------------------------------------------
-
-def _app_state_dir() -> Path:
-    base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
-    path = Path(base) / "LocalAIGPP" if base else PROJECT_ROOT / "tools" / "out" / "app_state"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _desktop_chat_file() -> Path:
-    return _app_state_dir() / "shared_chat_v23.json"
-
-
-def _default_desktop_chat_state() -> dict[str, Any]:
-    now_ms = time.time() * 1000.0
-    return {
-        "updatedAt": now_ms,
-        "activeConversationId": "conv-default",
-        "conversations": [
-            {
-                "id": "conv-default",
-                "title": "Тестовый диалог",
-                "messages": [],
-                "createdAt": now_ms,
-                "updatedAt": now_ms,
-            }
-        ],
-    }
-
-
-def get_desktop_chat_state() -> dict[str, Any]:
-    path = _desktop_chat_file()
-    if not path.exists():
-        return _default_desktop_chat_state()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        return data if isinstance(data, dict) else _default_desktop_chat_state()
-    except Exception:
-        return _default_desktop_chat_state()
-
-
-def put_desktop_chat_state(payload: dict[str, Any]) -> dict[str, Any]:
-    data = payload if isinstance(payload, dict) else _default_desktop_chat_state()
-    data["updatedAt"] = time.time() * 1000.0
-    path = _desktop_chat_file()
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    return data
-
-
-def clear_desktop_chat_state() -> dict[str, Any]:
-    path = _desktop_chat_file()
-    try:
-        if path.exists():
-            path.unlink()
-    except Exception:
-        pass
-    return get_desktop_chat_state()
-
-
 def unload_all_runtimes() -> int:
     count = 0
     for model_id in list(RUNTIMES.keys()):
