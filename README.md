@@ -186,31 +186,6 @@ local_ai_gpp_backend   -> 127.0.0.1:8000
 local_ai_gpp_frontend  -> 127.0.0.1:8080
 ```
 
-## API
-
-Основные endpoint:
-
-```text
-GET  /api/health
-GET  /api/bootstrap
-POST /api/chat
-POST /api/chat/stream
-GET  /api/runtime/status
-GET  /api/runtime/diagnostics
-POST /v1/chat/completions
-```
-
-Desktop endpoint, используемые EXE и мини-помощником:
-
-```text
-GET  /api/desktop/chat-sync
-POST /api/desktop/chat-sync
-POST /api/desktop/chat-message
-POST /api/desktop/chat-send
-POST /api/desktop/chat-reset
-GET  /api/desktop/diagnostics
-```
-
 ## Логи
 
 Логи запросов и runtime находятся в:
@@ -223,44 +198,11 @@ tools\out/
 
 В интерфейсе у ответа можно открыть лог выполнения запроса.
 
-## Частые проблемы
-
-### Portable-версия не видит модели
-
-Проверить:
-
-```bat
-tools\28_check_dist_portable.bat
-```
-
-Если в `dist\models_storage\models.json` остались абсолютные пути исходного компьютера, нужно пересобрать portable-пакет:
-
-```bat
-taskkill /IM LocalAIGPP.exe /F
-tools\02_build_exe.bat --cpu
-tools\28_check_dist_portable.bat
-tools\29_make_portable_package.bat
-```
-
-### Мини-помощник и основной чат не синхронизируются
-
-Проверить после запуска EXE:
-
-```bat
-tools\27_check_desktop_sync_contract.bat
-```
-
-Если проверка падает, закрыть все старые процессы и запустить заново:
-
-```bat
-taskkill /IM LocalAIGPP.exe /F
-dist\LocalAIGPP.exe
-```
-
-### Долгий первый ответ
-
-Первый ответ может быть медленным, потому что модель загружается в `worker_runtime`. На CPU это особенно заметно. Для ускорения нужно использовать GPU runtime или держать модель прогретой в памяти.
 
 ## Назначение проекта
 
 Проект предназначен для закрытого контура предприятия, где нельзя полагаться на публичные облачные LLM-сервисы. Local AI GPP даёт локальный интерфейс, локальное хранение моделей и возможность переносить готовую desktop-поставку между рабочими местами.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
