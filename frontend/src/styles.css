@@ -191,6 +191,13 @@ img {
   max-width: 42vw;
 }
 
+.ribbon-brand .app-version {
+  display: block;
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
 .ribbon-center {
   min-width: 0;
   justify-self: stretch;
@@ -3065,9 +3072,7 @@ body.assistant-transparent-page #root {
 }
 
 
-============================================================
-END
-============================================================
+/* End of legacy assistant styles. */
 
 /* === Local AI GPP compact mini assistant v43 === */
 html.assistant-transparent-page,
@@ -4298,11 +4303,7 @@ body.assistant-transparent-page {
   background: #d4e4f6 !important;
 }
 
-============================================================
-PROJECT CODE DUMP - TOOLS
-============================================================
-Root: C:\Users\888\Desktop\local_ai_gpp_2
-Generated: 13.05.2026 12:46:13,18
+/* Legacy styles continue below. */
 
 /* === Local AI GPP v58: top ribbon and status journal polish === */
 .top-ribbon {

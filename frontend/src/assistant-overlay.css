@@ -134,10 +134,9 @@ body.assistant-overlay-body #root {
 .agent-v12-bubble {
   position: absolute;
   width: 512px;
-  min-height: 292px;
-  max-height: 360px;
-  display: grid;
-  gap: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 16px 16px 14px;
   border: 4px solid #0e4f97;
   background: rgba(255, 255, 255, 0.98);
@@ -185,6 +184,7 @@ body.assistant-overlay-body #root {
 
 .agent-v12-bubble-head {
   display: flex;
+  flex: none;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
@@ -229,9 +229,10 @@ body.assistant-overlay-body #root {
 
 .agent-v12-history {
   display: grid;
+  align-content: start;
+  flex: 1 1 auto;
   gap: 10px;
-  min-height: 126px;
-  max-height: 168px;
+  min-height: 0;
   overflow: auto;
   padding: 2px 10px 0;
 }
@@ -274,6 +275,7 @@ body.assistant-overlay-body #root {
 
 .agent-v12-compose {
   display: grid;
+  flex: none;
   grid-template-columns: 1fr 64px;
   gap: 10px;
   padding: 4px 10px 0;
@@ -306,6 +308,133 @@ body.assistant-overlay-body #root {
 
 .agent-v12-compose button:disabled {
   opacity: 0.55;
+}
+
+.agent-v12-resize {
+  position: absolute;
+  right: 5px;
+  bottom: 2px;
+  width: 38px;
+  height: 13px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.agent-v12-resize::after {
+  content: '';
+  display: block;
+  width: 22px;
+  height: 4px;
+  margin: auto;
+  border-top: 2px solid #3976b4;
+  border-bottom: 2px solid #3976b4;
+}
+
+.agent-v12-snake {
+  flex: none;
+  padding: 8px 10px;
+  border: 2px solid #a9c8e8;
+  background: #eff7ff;
+}
+
+.agent-v12-snake-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: #174f90;
+  font-size: 12px;
+}
+
+.agent-v12-snake-content {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+}
+
+.agent-v12-snake-board {
+  position: relative;
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(14, 14px);
+  grid-template-rows: repeat(8, 14px);
+  gap: 1px;
+  padding: 3px;
+  border: 2px solid #1d4f96;
+  background: #b4cce5;
+  outline-offset: 2px;
+}
+
+.agent-v12-snake-cell {
+  background: #fff;
+}
+
+.agent-v12-snake-cell.snake {
+  background: #256bb8;
+  box-shadow: inset 2px 2px 0 #69b4ef;
+}
+
+.agent-v12-snake-cell.food {
+  background: #ef765e;
+  border-radius: 50%;
+  box-shadow: inset -2px -2px 0 #be4e45;
+}
+
+.agent-v12-snake-over {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(236, 246, 255, 0.9);
+  color: #174f90;
+  font-weight: 800;
+}
+
+.agent-v12-snake-over button,
+.agent-v12-snake-controls button {
+  border: 1px solid #1d4f96;
+  background: #d7e9fb;
+  color: #174f90;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.agent-v12-snake-over button {
+  padding: 5px 10px;
+}
+
+.agent-v12-snake-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 27px);
+  grid-template-rows: repeat(2, 27px) auto;
+  gap: 3px;
+  align-items: center;
+}
+
+.agent-v12-snake-controls button {
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  font-size: 17px;
+}
+
+.agent-v12-snake-controls .up { grid-column: 2; grid-row: 1; }
+.agent-v12-snake-controls .left { grid-column: 1; grid-row: 2; }
+.agent-v12-snake-controls .down { grid-column: 2; grid-row: 2; }
+.agent-v12-snake-controls .right { grid-column: 3; grid-row: 2; }
+
+.agent-v12-snake-controls small {
+  grid-column: 1 / 4;
+  color: #466586;
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 @keyframes agentV12Ready {

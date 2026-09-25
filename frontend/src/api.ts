@@ -1,7 +1,9 @@
 import type { BootstrapPayload, EngineSettings, ModelRecord, RemoteHubModel, RuntimeDiagnostics, RuntimeStatus } from './types';
 
 const envApiBase = import.meta.env.VITE_API_BASE;
-export const API_BASE = envApiBase === undefined ? 'http://127.0.0.1:8000' : String(envApiBase).replace(/\/$/, '');
+export const API_BASE = envApiBase === undefined
+  ? (import.meta.env.DEV ? 'http://127.0.0.1:8000' : '')
+  : String(envApiBase).replace(/\/$/, '');
 
 function apiUrl(path: string): string {
   return `${API_BASE}${path}`;

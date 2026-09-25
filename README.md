@@ -1,5 +1,9 @@
 # Local AI GPP
 
+Текущая версия приложения: **1.3.0**. История изменений — в [CHANGELOG.md](CHANGELOG.md).
+
+При выпуске новой версии обновите `VERSION` и номера в `frontend/package.json` и `frontend/package-lock.json`, соберите EXE и создайте Git-тег `vMAJOR.MINOR.PATCH`. Фронтенд, API и свойства EXE берут номер из `VERSION`.
+
 **Local AI GPP** — локальный корпоративный AI-хаб для запуска LLM-моделей и управления моделями в закрытом контуре предприятия. Проект ориентирован на работу без внешних облачных API: модели, настройки, история диалогов и runtime находятся внутри локального окружения или portable-поставки.
 
 ![Архитектура Local AI GPP](docs/images/local_ai_gpp_architecture.svg)

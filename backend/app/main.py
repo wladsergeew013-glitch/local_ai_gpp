@@ -23,6 +23,7 @@ from backend.app.routers.compat import router as compat_router
 from backend.app.routers.models import router as models_router
 from backend.app.routers.settings import router as settings_router
 from backend.app.routers.system import router as system_router
+from backend.app.version import APP_VERSION
 
 
 def _normalize_origins(value: Any) -> list[str]:
@@ -78,7 +79,7 @@ configured_cors_origins = _normalize_origins(server_settings.get('cors_origins')
 ]
 cors_origins = list(dict.fromkeys(env_cors_origins + configured_cors_origins))
 
-app = FastAPI(title='GPP Local AI Engine', version='1.2.0', lifespan=lifespan)
+app = FastAPI(title='GPP Local AI Engine', version=APP_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

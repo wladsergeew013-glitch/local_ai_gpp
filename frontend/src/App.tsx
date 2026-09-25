@@ -27,6 +27,7 @@ import type {
   RuntimeStatus,
   StatusState,
 } from './types';
+import { APP_VERSION } from './version';
 
 type SettingsSection = 'model' | 'runtime' | 'server' | 'hub' | 'appearance';
 type RightPanelMode = 'status' | 'settings';
@@ -1250,10 +1251,25 @@ export default function App() {
       message.answer || message.text,
     ].filter(Boolean);
     try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error('Clipboard API недоступен в этом окружении.');
+      const text = parts.join('\n\n');
+      try {
+        if (!navigator.clipboard?.writeText) {
+          throw new Error('Clipboard API недоступен в этом окружении.');
+        }
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        textarea.remove();
+        if (!copied) {
+          throw new Error('Не удалось скопировать текст в буфер обмена.');
+        }
       }
-      await navigator.clipboard.writeText(parts.join('\n\n'));
       setStatus({ tone: 'success', title: 'Текст скопирован', detail: 'Сообщение помещено в буфер обмена.' });
     } catch (error) {
       setStatus({ tone: 'error', title: 'Ошибка копирования', detail: getErrorMessage(error) });
@@ -1341,6 +1357,7 @@ export default function App() {
           <div>
             <strong>{previewSettings.branding.title || 'Агент ГПП'}</strong>
             <span>{previewSettings.branding.subtitle || 'Локальный движок LLM моделей.'}</span>
+            <small className="app-version">v{APP_VERSION}</small>
           </div>
         </div>
         <div className="ribbon-center">

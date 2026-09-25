@@ -116,6 +116,7 @@ export type EngineSettings = {
 export type BootstrapPayload = {
   models: ModelRecord[];
   settings: EngineSettings;
+  version: string;
 };
 
 export type StatusTone = 'idle' | 'busy' | 'success' | 'warning' | 'error';

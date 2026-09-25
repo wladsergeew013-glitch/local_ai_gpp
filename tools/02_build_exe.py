@@ -26,6 +26,42 @@ MODEL_EXTENSIONS = {".gguf", ".bin", ".safetensors"}
 PARENT_REDIRECTS_BUILD_LOG = os.environ.get("LOCAL_AI_GPP_BUILD_LOG_REDIRECTED") == "1"
 
 
+def app_version() -> str:
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    parts = version.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise SystemExit("[ERROR] VERSION must contain MAJOR.MINOR.PATCH")
+    package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
+    package_lock = json.loads((ROOT / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
+    if package.get("version") != version or package_lock.get("version") != version:
+        raise SystemExit("[ERROR] Frontend package versions must match VERSION")
+    return version
+
+
+def write_windows_version_file() -> Path:
+    version = app_version()
+    major, minor, patch = map(int, version.split("."))
+    version_file = OUT / "LocalAIGPP_version_info.txt"
+    version_file.parent.mkdir(parents=True, exist_ok=True)
+    version_file.write_text(
+        "VSVersionInfo(\n"
+        f"  ffi=FixedFileInfo(filevers=({major}, {minor}, {patch}, 0), prodvers=({major}, {minor}, {patch}, 0), "
+        "mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),\n"
+        "  kids=[StringFileInfo([StringTable('040904B0', [\n"
+        "    StringStruct('CompanyName', 'Local AI GPP'),\n"
+        "    StringStruct('FileDescription', 'Local AI GPP desktop application'),\n"
+        f"    StringStruct('FileVersion', '{version}'),\n"
+        "    StringStruct('InternalName', 'LocalAIGPP'),\n"
+        "    StringStruct('OriginalFilename', 'LocalAIGPP.exe'),\n"
+        "    StringStruct('ProductName', 'Local AI GPP'),\n"
+        f"    StringStruct('ProductVersion', '{version}')\n"
+        "  ])]), VarFileInfo([VarStruct('Translation', [1033, 1200])])]\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    return version_file
+
+
 def _write_log_file_line(message: str) -> None:
     """Append to the build log when this Python process owns the log file.
 
@@ -229,6 +265,7 @@ def build_pyinstaller(venv_py: Path) -> None:
     env["NO_PROXY"] = "localhost,127.0.0.1,::1,[::1],*.localhost"
     env["no_proxy"] = env["NO_PROXY"]
     env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--no-proxy-server --proxy-bypass-list=<-loopback>;localhost;127.0.0.1;::1;[::1]"
+    version_file = write_windows_version_file()
     cmd = [
         str(venv_py), "-m", "PyInstaller",
         "--noconfirm", "--clean", "--onefile", "--windowed",
@@ -237,6 +274,8 @@ def build_pyinstaller(venv_py: Path) -> None:
         "--workpath", str(build_dir),
         "--specpath", str(spec_dir),
         "--paths", str(ROOT),
+        "--version-file", str(version_file),
+        "--add-data", f"{ROOT / 'VERSION'};.",
         "--add-data", f"{ROOT / 'frontend' / 'dist'};frontend_dist",
         "--collect-all", "webview",
         "--collect-all", "pystray",
@@ -359,6 +398,7 @@ def _copy_portable_model_registry(models_src: Path, models_dst: Path) -> None:
 def copy_portable_backend_and_metadata() -> None:
     dist = ROOT / "dist"
     dist.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "VERSION", dist / "VERSION")
     backend_src = ROOT / "backend" / "app"
     if not backend_src.exists():
         raise SystemExit(f"[ERROR] backend app not found: {backend_src}")
@@ -485,7 +525,7 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
     """Write tiny self-check helpers directly into dist.
 
     On a copied machine the user may have only the dist folder, not the project
-    tools folder. These helpers use the embedded worker_runtime\python.exe, so
+    tools folder. These helpers use the embedded worker_runtime\\python.exe, so
     they do not require installed Python.
     """
     dist = ROOT / "dist"

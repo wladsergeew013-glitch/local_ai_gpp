@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { fetchBootstrap, fetchRuntimeStatus, streamChat } from './api';
+import SnakeGame from './SnakeGame';
 import type { EngineSettings, ModelRecord, RuntimeSettings, RuntimeStatus } from './types';
 
 type AgentState = 'ready' | 'thinking' | 'speaking' | 'error';
@@ -24,7 +25,10 @@ type DragState = {
   moved: boolean;
 } | null;
 
+type ResizeState = { startY: number; baseHeight: number } | null;
+
 const STORAGE_KEY = 'local-ai-agent-avatar-v12';
+const HEIGHT_STORAGE_KEY = 'local-ai-agent-bubble-height-v12';
 const AVATAR_SIZE = { width: 154, height: 210 };
 const BUBBLE_SIZE = { width: 512, height: 292 };
 const EDGE = 16;
@@ -83,6 +87,16 @@ function writePoint(key: string, value: Point): void {
   }
 }
 
+function readBubbleHeight(): number {
+  try {
+    const value = Number(window.localStorage.getItem(HEIGHT_STORAGE_KEY));
+    if (Number.isFinite(value) && value >= BUBBLE_SIZE.height) return value;
+  } catch {
+    // noop
+  }
+  return BUBBLE_SIZE.height;
+}
+
 function normalizeMessageText(role: AgentMessage['role'], value: string): string {
   let text = String(value || '').replace(/\r/g, '').trim();
   if (!text) return '';
@@ -139,11 +153,13 @@ export default function AssistantOverlayApp() {
   const [agentState, setAgentState] = useState<AgentState>('ready');
   const [frame, setFrame] = useState(0);
   const [bubbleOpen, setBubbleOpen] = useState(false);
+  const [bubbleHeight, setBubbleHeight] = useState(readBubbleHeight);
   const [avatarPos, setAvatarPos] = useState<Point>(() => {
     const initial = readPoint(STORAGE_KEY, { x: 1040, y: 420 });
     return initial;
   });
   const dragRef = useRef<DragState>(null);
+  const resizeRef = useRef<ResizeState>(null);
   const suppressNextClickRef = useRef(false);
 
   useEffect(() => {
@@ -222,6 +238,12 @@ export default function AssistantOverlayApp() {
   }, [agentState, frame]);
 
   const badge = stateBadge(agentState);
+  const generating = agentState === 'thinking' || agentState === 'speaking';
+  const availableHeight = Math.max(180, viewport.height - EDGE * 2);
+  const displayedBubbleHeight = Math.min(
+    Math.max(bubbleHeight, generating ? 445 : BUBBLE_SIZE.height),
+    availableHeight,
+  );
 
   const bubbleLayout = useMemo(() => {
     const avatarMiddleY = avatarPos.y + AVATAR_SIZE.height / 2;
@@ -231,8 +253,8 @@ export default function AssistantOverlayApp() {
       ? avatarPos.x - BUBBLE_SIZE.width - GAP
       : avatarPos.x + AVATAR_SIZE.width + GAP;
     const clampedLeft = clamp(left, EDGE, viewport.width - BUBBLE_SIZE.width - EDGE);
-    const top = clamp(avatarPos.y - 32, EDGE, viewport.height - BUBBLE_SIZE.height - EDGE);
-    const tailTop = clamp(avatarMiddleY - top - 18, 52, BUBBLE_SIZE.height - 68);
+    const top = clamp(avatarPos.y - 32, EDGE, Math.max(EDGE, viewport.height - displayedBubbleHeight - EDGE));
+    const tailTop = clamp(avatarMiddleY - top - 18, 52, displayedBubbleHeight - 68);
     const tailSide = direction === 'left' ? 'right' : 'left';
     return {
       left: clampedLeft,
@@ -240,7 +262,36 @@ export default function AssistantOverlayApp() {
       tailTop,
       tailSide,
     };
-  }, [avatarPos, viewport]);
+  }, [avatarPos, viewport, displayedBubbleHeight]);
+
+  function beginResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    resizeRef.current = { startY: event.clientY, baseHeight: displayedBubbleHeight };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    const next = clamp(
+      resize.baseHeight + event.clientY - resize.startY,
+      BUBBLE_SIZE.height,
+      Math.max(BUBBLE_SIZE.height, viewport.height - EDGE * 2),
+    );
+    setBubbleHeight(next);
+    try {
+      window.localStorage.setItem(HEIGHT_STORAGE_KEY, String(next));
+    } catch {
+      // noop
+    }
+  }
+
+  function endResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    resizeRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
 
   function beginDrag(event: ReactPointerEvent<HTMLElement>) {
     event.preventDefault();
@@ -297,7 +348,7 @@ export default function AssistantOverlayApp() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     const text = normalizeMessageText('user', input);
-    if (!text || !activeModel) return;
+    if (!text || !activeModel || generating) return;
 
     const userId = `agent-u-${Date.now()}`;
     const assistantId = `agent-a-${Date.now()}`;
@@ -398,6 +449,7 @@ export default function AssistantOverlayApp() {
           style={{
             left: `${bubbleLayout.left}px`,
             top: `${bubbleLayout.top}px`,
+            height: `${displayedBubbleHeight}px`,
             ['--agent-tail-top' as string]: `${bubbleLayout.tailTop}px`,
           } as CSSProperties}
         >
@@ -427,16 +479,28 @@ export default function AssistantOverlayApp() {
             )}
           </div>
 
+          {generating && <SnakeGame />}
+
           <form className="agent-v12-compose" onSubmit={submit}>
             <input
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder={activeModel ? 'Напиши сообщение' : 'Сначала настрой модель'}
             />
-            <button type="submit" disabled={!activeModel || !input.trim()} aria-label="Отправить">
+            <button type="submit" disabled={!activeModel || !input.trim() || generating} aria-label="Отправить">
               ↵
             </button>
           </form>
+          <button
+            type="button"
+            className="agent-v12-resize"
+            onPointerDown={beginResize}
+            onPointerMove={moveResize}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+            aria-label="Изменить высоту окна"
+            title="Потяни вниз или вверх, чтобы изменить высоту окна"
+          />
         </section>
       )}
     </main>

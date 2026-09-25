@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app.py /app/app.py
 COPY backend /app/backend
+COPY VERSION /app/VERSION
 RUN mkdir -p /app/models_storage
 
 EXPOSE 8000

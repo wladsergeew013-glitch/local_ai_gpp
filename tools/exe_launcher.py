@@ -4,6 +4,7 @@ import codecs
 import contextlib
 import json
 import os
+import random
 import socket
 import subprocess
 import sys
@@ -115,6 +116,7 @@ def configure_local_runtime_environment() -> None:
 configure_local_runtime_environment()
 
 from backend.app.main import app  # noqa: E402
+from backend.app.version import APP_VERSION  # noqa: E402
 
 def remove_imported_desktop_routes() -> None:
     """The packaged EXE is the only owner of /api/desktop/* routes.
@@ -225,6 +227,7 @@ def write_instance_info(port: int) -> None:
         "port": int(port),
         "url": f"http://127.0.0.1:{int(port)}",
         "desktop_sync_marker": LAUNCHER_VERSION_MARKER,
+        "version": APP_VERSION,
         "runtime_dir": str(runtime_dir()),
         "frontend_dist": str(FRONTEND_DIST),
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1032,6 +1035,7 @@ def desktop_diagnostics() -> dict[str, Any]:
     return {
         "ok": True,
         "marker": LAUNCHER_VERSION_MARKER,
+        "version": APP_VERSION,
         "pid": os.getpid(),
         "port": int(server_port or 0),
         "runtime_dir": str(runtime_dir()),
@@ -1105,7 +1109,7 @@ def read_assistant_settings() -> dict[str, Any]:
     base["avatar_width"] = clamp_int(base.get("avatar_width"), 120, 260, 154)
     base["avatar_height"] = clamp_int(base.get("avatar_height"), 160, 340, 210)
     base["chat_width"] = clamp_int(base.get("chat_width"), 420, 760, 512)
-    base["chat_height"] = clamp_int(base.get("chat_height"), 260, 520, 304)
+    base["chat_height"] = clamp_int(base.get("chat_height"), 260, 900, 304)
     base["font_size"] = clamp_int(base.get("font_size"), 9, 14, 10)
     base["always_on_top"] = bool(base.get("always_on_top", True))
     return base
@@ -1117,7 +1121,7 @@ def write_assistant_settings(settings: dict[str, Any]) -> dict[str, Any]:
     normalized["avatar_width"] = clamp_int(normalized.get("avatar_width"), 120, 260, 154)
     normalized["avatar_height"] = clamp_int(normalized.get("avatar_height"), 160, 340, 210)
     normalized["chat_width"] = clamp_int(normalized.get("chat_width"), 420, 760, 512)
-    normalized["chat_height"] = clamp_int(normalized.get("chat_height"), 260, 520, 304)
+    normalized["chat_height"] = clamp_int(normalized.get("chat_height"), 260, 900, 304)
     normalized["font_size"] = clamp_int(normalized.get("font_size"), 9, 14, 10)
     normalized["always_on_top"] = bool(normalized.get("always_on_top", True))
     assistant_settings_file().write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1169,6 +1173,30 @@ class NativeAssistantAgent:
         self.entry_widget: Any | None = None
         self.send_button: Any | None = None
         self.close_button: Any | None = None
+        self.resize_edges: dict[str, Any] = {}
+        self.resize_start: dict[str, int | str] | None = None
+        self.resize_poll_after: str | None = None
+        self.chat_side = "left"
+        self.tail_side: str | None = None
+        self.compose_frame: Any | None = None
+        self.snake_frame: Any | None = None
+        self.snake_board: Any | None = None
+        self.snake_score_label: Any | None = None
+        self.snake_after: str | None = None
+        self.snake_active = False
+        self.snake_over = False
+        self.snake_body: list[tuple[int, int]] = []
+        self.snake_food = (0, 0)
+        self.snake_direction = (1, 0)
+        self.snake_next_direction = (1, 0)
+        self.snake_score = 0
+        self.awaiting_answer = False
+        self.pending_answer_id = ""
+        self.reveal_message_id = ""
+        self.last_revealed_answer_id = ""
+        self.reveal_text = ""
+        self.reveal_index = 0
+        self.reveal_after: str | None = None
         self.input_var: Any | None = None
         self.settings_window: Any | None = None
         self._visible = True
@@ -1190,7 +1218,7 @@ class NativeAssistantAgent:
 
         self._load_position()
         self.root = tk.Tk()
-        self.root.title("Local AI GPP Помощник")
+        self.root.title(f"Local AI GPP Помощник v{APP_VERSION}")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", self.always_on_top)
         self.root.configure(bg=TRANSPARENT_COLOR)
@@ -1238,7 +1266,7 @@ class NativeAssistantAgent:
 
     def _create_chat_window(self, tk: Any, Text: Any, ttk: Any) -> None:
         self.chat = tk.Toplevel(self.root)
-        self.chat.title("Local AI GPP Chat")
+        self.chat.title(f"Local AI GPP Chat v{APP_VERSION}")
         self.chat.overrideredirect(True)
         self.chat.attributes("-topmost", self.always_on_top)
         self.chat.configure(bg="#0e4f97")
@@ -1266,7 +1294,7 @@ class NativeAssistantAgent:
         header.pack_propagate(False)
         self.title_label = tk.Label(header, text="На связи", bg="#1d559c", fg="white", font=("Segoe UI", 18, "bold"), anchor="w")
         self.title_label.place(x=14, y=8, width=340, height=26)
-        self.status_label = tk.Label(header, text="●  Готов помочь", bg="#1d559c", fg="#53f079", font=("Segoe UI", 9, "bold"), anchor="w")
+        self.status_label = tk.Label(header, text=f"●  Готов помочь · v{APP_VERSION}", bg="#1d559c", fg="#53f079", font=("Segoe UI", 9, "bold"), anchor="w")
         self.status_label.place(x=14, y=34, width=360, height=16)
         self.close_button = tk.Label(header, text="×", bg="#2f67ad", fg="white", font=("Segoe UI", 18, "bold"), cursor="hand2")
         self.close_button.place(x=self.chat_w - 46, y=11, width=34, height=34)
@@ -1275,21 +1303,52 @@ class NativeAssistantAgent:
         body = tk.Frame(self.chat, bg="#fbfdff", padx=14, pady=12)
         body.pack(fill="both", expand=True, padx=4, pady=(0, 4))
         self.history_box = Text(body, wrap="word", bg="#fbfdff", fg="#0b1b33", relief="flat", borderwidth=0, highlightthickness=0, font=("Segoe UI", self.font_size), height=9)
-        self.history_box.pack(fill="both", expand=True)
         self.history_box.tag_configure("user", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"))
         self.history_box.tag_configure("assistant", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"))
         self.history_box.insert("end", "На связи. Напиши вопрос ниже — отвечу с уже выбранной локальной модели.\n")
         self.history_box.configure(state="disabled")
+        self.history_box.bind("<Control-KeyPress>", self._history_control_key)
+        self.history_box.bind("<Button-3>", self._show_history_menu)
 
         bottom = tk.Frame(body, bg="#fbfdff")
-        bottom.pack(fill="x", pady=(12, 0))
+        bottom.pack(side="bottom", fill="x", pady=(12, 0))
+        self.compose_frame = bottom
         self.input_var = tk.StringVar()
+        self.input_var.trace_add("write", lambda *_args: self._refresh_send_button())
         self.entry_widget = tk.Entry(bottom, textvariable=self.input_var, font=("Segoe UI", max(11, self.font_size + 1)), relief="solid", bd=1, highlightthickness=2, highlightbackground="#b8d0ea", highlightcolor="#1d5fa8")
         self.entry_widget.pack(side="left", fill="x", expand=True, ipady=7)
         self.entry_widget.bind("<Return>", lambda _e: self._send_message())
-        self.send_button = tk.Label(bottom, text="↵", bg="#8db5df", fg="white", font=("Segoe UI", 21, "bold"), cursor="hand2")
+        self.entry_widget.bind("<Control-KeyPress>", self._entry_control_key)
+        self.entry_widget.bind("<Shift-Insert>", self._paste_from_clipboard)
+        self.entry_widget.bind("<Button-3>", self._show_entry_menu)
+        self.send_button = tk.Label(bottom, text="↵", bg="#b5cbe2", fg="white", font=("Segoe UI", 21, "bold"), cursor="arrow")
         self.send_button.pack(side="left", padx=(10, 0), ipadx=16, ipady=3)
         self.send_button.bind("<Button-1>", lambda _e: self._send_message())
+        self._refresh_send_button()
+
+        self._create_snake_panel(tk, body)
+        self.history_box.pack(fill="both", expand=True)
+        self.chat.bind("<KeyPress>", self._snake_key)
+        self.entry_menu = tk.Menu(self.entry_widget, tearoff=0)
+        self.entry_menu.add_command(label="Вставить", command=self._paste_from_clipboard)
+        self.entry_menu.add_command(label="Копировать", command=lambda: self.entry_widget.event_generate("<<Copy>>"))
+        self.entry_menu.add_command(label="Вырезать", command=lambda: self.entry_widget.event_generate("<<Cut>>"))
+        self.entry_menu.add_separator()
+        self.entry_menu.add_command(label="Выделить всё", command=lambda: self.entry_widget.select_range(0, "end"))
+        self.history_menu = tk.Menu(self.history_box, tearoff=0)
+        self.history_menu.add_command(label="Копировать выделенное", command=self._copy_history_selection)
+        self.history_menu.add_command(label="Копировать весь текст", command=self._copy_all_history)
+        for edge, cursor in (
+            ("bottom", "sb_v_double_arrow"),
+            ("right", "sb_h_double_arrow"),
+            ("bottom-right", "bottom_right_corner"),
+        ):
+            strip = tk.Frame(self.chat, bg="#0e4f97", cursor=cursor)
+            strip.bind("<ButtonPress-1>", lambda event, value=edge: self._begin_chat_resize(event, value))
+            strip.bind("<B1-Motion>", self._move_chat_resize)
+            strip.bind("<ButtonRelease-1>", self._end_chat_resize)
+            self.resize_edges[edge] = strip
+        self._place_resize_edges()
 
         for widget in (self.chat, header, body, self.title_label, self.status_label):
             widget.bind("<Button-3>", self._show_chat_menu)
@@ -1303,6 +1362,315 @@ class NativeAssistantAgent:
         self.chat_menu.add_command(label="Выгрузить модели", command=self._menu_command(lambda: threading.Thread(target=unload_models_from_tray, daemon=True).start()))
         self.chat_menu.add_separator()
         self.chat_menu.add_command(label="Выход", command=self._menu_command(request_exit))
+
+    def _display_chat_height(self) -> int:
+        height = max(self.chat_h, 430 if self.snake_active else 260)
+        if self.root is not None:
+            height = min(height, max(260, self.root.winfo_screenheight() - 48))
+        return height
+
+    def _place_resize_edges(self) -> None:
+        if not self.resize_edges:
+            return
+        width, height = self.chat_w, self._display_chat_height()
+        positions = {
+            "bottom": (0, height - 7, width - 12, 7),
+            "right": (width - 7, 0, 7, height - 12),
+            "bottom-right": (width - 12, height - 12, 12, 12),
+        }
+        for edge, (x, y, strip_width, strip_height) in positions.items():
+            self.resize_edges[edge].place(x=x, y=y, width=strip_width, height=strip_height)
+
+    def _begin_chat_resize(self, event: Any, edge: str) -> str:
+        if self.chat is None:
+            return "break"
+        if self.resize_poll_after is not None and self.root is not None:
+            self.root.after_cancel(self.resize_poll_after)
+            self.resize_poll_after = None
+        self.resize_start = {
+            "edge": edge,
+            "pointer_x": event.x_root,
+            "pointer_y": event.y_root,
+            "x": self.chat.winfo_rootx(),
+            "y": self.chat.winfo_rooty(),
+            "width": self.chat.winfo_width(),
+            "height": self.chat.winfo_height(),
+            "avatar_x": self.avatar_x,
+            "side": self.chat_side,
+        }
+        if os.name == "nt" and self.root is not None:
+            self.resize_poll_after = self.root.after(30, self._poll_chat_resize)
+        return "break"
+
+    def _move_chat_resize(self, event: Any) -> str:
+        if os.name != "nt":
+            self._update_chat_resize(event.x_root, event.y_root)
+        return "break"
+
+    def _poll_chat_resize(self) -> None:
+        self.resize_poll_after = None
+        if self.resize_start is None or self.root is None:
+            return
+        point = self._cursor_position()
+        if point is not None:
+            self._update_chat_resize(point[0], point[1])
+        if not self._left_mouse_down():
+            self._finish_chat_resize()
+        else:
+            self.resize_poll_after = self.root.after(30, self._poll_chat_resize)
+
+    def _update_chat_resize(self, pointer_x: int, pointer_y: int) -> None:
+        if self.resize_start is None or self.chat is None or self.root is None:
+            return
+        start = self.resize_start
+        edge = str(start["edge"])
+        side = str(start["side"])
+        screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        base_x, base_y = int(start["x"]), int(start["y"])
+        base_w, base_h = int(start["width"]), int(start["height"])
+        dx = pointer_x - int(start["pointer_x"])
+        dy = pointer_y - int(start["pointer_y"])
+        width, height = base_w, base_h
+        x = base_x
+        if "right" in edge:
+            if side == "left":
+                max_width = min(760, screen_w - 24 - 24 - self.avatar_w)
+                width = max(420, min(max_width, base_w + dx))
+                x = max(12, min(base_x, screen_w - width - self.avatar_w - 24 - 12))
+                self.avatar_x = x + width + 24
+                self.root.geometry(f"{self.avatar_w}x{self.avatar_h}+{self.avatar_x}+{self.avatar_y}")
+            else:
+                max_width = min(760, screen_w - base_x - 12)
+                width = max(420, min(max_width, base_w + dx))
+        if "bottom" in edge:
+            minimum = 430 if self.snake_active else 260
+            max_height = min(900, screen_h - base_y - 12)
+            height = max(minimum, min(max_height, base_h + dy))
+        if width == self.chat_w and height == self.chat_h and x == self.chat.winfo_rootx():
+            return
+        self.chat_w, self.chat_h = width, height
+        self.chat.geometry(f"{width}x{height}+{x}+{base_y}")
+        if self.close_button is not None:
+            self.close_button.place(x=width - 46, y=11, width=34, height=34)
+        self._place_resize_edges()
+        self._place_tail(x, base_y, side, screen_w, screen_h)
+
+    def _finish_chat_resize(self) -> None:
+        if self.resize_start is None:
+            return
+        if self.resize_poll_after is not None and self.root is not None:
+            self.root.after_cancel(self.resize_poll_after)
+            self.resize_poll_after = None
+        avatar_moved = self.avatar_x != int(self.resize_start["avatar_x"])
+        self.resize_start = None
+        if self.chat is not None and self.root is not None:
+            self._place_tail(
+                self.chat.winfo_rootx(), self.chat.winfo_rooty(), self.chat_side,
+                self.root.winfo_screenwidth(), self.root.winfo_screenheight(),
+            )
+            if self.tail is not None:
+                self.tail.lift()
+            self.root.lift()
+        self.settings = write_assistant_settings({**self.settings, "chat_width": self.chat_w, "chat_height": self.chat_h})
+        if avatar_moved:
+            self._save_position()
+
+    def _end_chat_resize(self, _event: Any) -> str:
+        if self.resize_start is None:
+            return "break"
+        self._finish_chat_resize()
+        return "break"
+
+    def _paste_from_clipboard(self, _event: Any = None) -> str:
+        if self.entry_widget is None:
+            return "break"
+        try:
+            value = " ".join(self.entry_widget.clipboard_get().splitlines())
+            if self.entry_widget.selection_present():
+                self.entry_widget.delete("sel.first", "sel.last")
+            self.entry_widget.insert("insert", value)
+            self.entry_widget.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _entry_control_key(self, event: Any) -> str | None:
+        key = str(event.keysym).lower()
+        code = int(getattr(event, "keycode", 0) or 0)
+        if code == 86 or key in {"v", "м"}:
+            return self._paste_from_clipboard(event)
+        if code == 65 or key in {"a", "ф"}:
+            self.entry_widget.select_range(0, "end")
+            self.entry_widget.icursor("end")
+            return "break"
+        return None
+
+    def _history_control_key(self, event: Any) -> str | None:
+        key = str(event.keysym).lower()
+        code = int(getattr(event, "keycode", 0) or 0)
+        if code == 65 or key in {"a", "ф"}:
+            self.history_box.tag_add("sel", "1.0", "end-1c")
+            return "break"
+        if code == 67 or key in {"c", "с"}:
+            return self._copy_history_selection()
+        return None
+
+    def _copy_history_selection(self, _event: Any = None) -> str:
+        try:
+            text = self.history_box.get("sel.first", "sel.last")
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        return "break"
+
+    def _copy_all_history(self) -> None:
+        if self.history_box is None or self.root is None:
+            return
+        text = self.history_box.get("1.0", "end-1c")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update_idletasks()
+
+    def _show_history_menu(self, event: Any) -> str:
+        try:
+            self.history_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.history_menu.grab_release()
+        return "break"
+
+    def _refresh_send_button(self) -> None:
+        if self.send_button is None or self.input_var is None:
+            return
+        active = bool(self.input_var.get().strip())
+        self.send_button.configure(bg="#2f6fed" if active else "#b5cbe2", cursor="hand2" if active else "arrow")
+
+    def _show_entry_menu(self, event: Any) -> str:
+        try:
+            self.entry_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.entry_menu.grab_release()
+        return "break"
+
+    def _create_snake_panel(self, tk: Any, body: Any) -> None:
+        panel = tk.Frame(body, bg="#edf6ff", highlightbackground="#a9c8e8", highlightthickness=2, padx=8, pady=6)
+        self.snake_frame = panel
+        heading = tk.Frame(panel, bg="#edf6ff")
+        heading.pack(fill="x", pady=(0, 5))
+        tk.Label(heading, text="Змейка · пока готовится ответ", bg="#edf6ff", fg="#174f90", font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.snake_score_label = tk.Label(heading, text="Счёт: 0", bg="#edf6ff", fg="#174f90", font=("Segoe UI", 9, "bold"))
+        self.snake_score_label.pack(side="right")
+        content = tk.Frame(panel, bg="#edf6ff")
+        content.pack()
+        self.snake_board = tk.Canvas(content, width=224, height=128, bg="#f8fbff", highlightbackground="#1d4f96", highlightthickness=2, takefocus=1)
+        self.snake_board.pack(side="left", padx=(0, 18))
+        controls = tk.Frame(content, bg="#edf6ff")
+        controls.pack(side="left")
+        for symbol, direction, row, column in (
+            ("↑", (0, -1), 0, 1), ("←", (-1, 0), 1, 0),
+            ("↓", (0, 1), 1, 1), ("→", (1, 0), 1, 2),
+        ):
+            tk.Button(controls, text=symbol, command=lambda value=direction: self._turn_snake(value),
+                      width=2, bg="#d7e9fb", fg="#174f90", relief="solid", bd=1).grid(row=row, column=column, padx=1, pady=1)
+        tk.Button(controls, text="Заново", command=self._reset_snake, bg="#d7e9fb", fg="#174f90", relief="solid", bd=1).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+
+    def _new_snake_food(self) -> tuple[int, int]:
+        free = [(x, y) for y in range(8) for x in range(14) if (x, y) not in self.snake_body]
+        return random.choice(free) if free else self.snake_body[0]
+
+    def _draw_snake(self) -> None:
+        if self.snake_board is None:
+            return
+        board = self.snake_board
+        board.delete("all")
+        for y in range(8):
+            for x in range(14):
+                color = "#256bb8" if (x, y) in self.snake_body else "#ffffff"
+                board.create_rectangle(x * 16 + 1, y * 16 + 1, x * 16 + 16, y * 16 + 16, fill=color, outline="#c6d9ed")
+        if self.snake_food not in self.snake_body:
+            x, y = self.snake_food
+            board.create_oval(x * 16 + 3, y * 16 + 3, x * 16 + 14, y * 16 + 14, fill="#ef765e", outline="#be4e45")
+        if self.snake_over:
+            board.create_rectangle(28, 43, 196, 85, fill="#edf6ff", outline="#1d4f96")
+            board.create_text(112, 64, text="Игра окончена", fill="#174f90", font=("Segoe UI", 11, "bold"))
+        if self.snake_score_label is not None:
+            self.snake_score_label.configure(text=f"Счёт: {self.snake_score}")
+
+    def _reset_snake(self) -> None:
+        self.snake_body = [(6, 4), (5, 4), (4, 4)]
+        self.snake_direction = (1, 0)
+        self.snake_next_direction = (1, 0)
+        self.snake_score = 0
+        self.snake_over = False
+        self.snake_food = self._new_snake_food()
+        self._draw_snake()
+        if self.snake_board is not None:
+            self.snake_board.focus_set()
+        self._schedule_snake_tick()
+
+    def _turn_snake(self, direction: tuple[int, int]) -> None:
+        if self.snake_active and direction != (-self.snake_direction[0], -self.snake_direction[1]):
+            self.snake_next_direction = direction
+        if self.snake_board is not None:
+            self.snake_board.focus_set()
+
+    def _snake_key(self, event: Any) -> str | None:
+        if not self.snake_active or event.widget == self.entry_widget:
+            return None
+        if event.widget.winfo_class() in {"Entry", "Text", "TEntry", "Spinbox"}:
+            return None
+        directions = {
+            "up": (0, -1), "w": (0, -1), "down": (0, 1), "s": (0, 1),
+            "left": (-1, 0), "a": (-1, 0), "right": (1, 0), "d": (1, 0),
+        }
+        direction = directions.get(str(event.keysym).lower())
+        if direction is not None:
+            self._turn_snake(direction)
+            return "break"
+        return None
+
+    def _schedule_snake_tick(self) -> None:
+        if self.snake_active and not self.snake_over and self.root is not None and self.snake_after is None:
+            self.snake_after = self.root.after(170, self._tick_snake)
+
+    def _tick_snake(self) -> None:
+        self.snake_after = None
+        if not self.snake_active or self.snake_over:
+            return
+        self.snake_direction = self.snake_next_direction
+        head_x, head_y = self.snake_body[0]
+        dx, dy = self.snake_direction
+        next_head = ((head_x + dx) % 14, (head_y + dy) % 8)
+        eating = next_head == self.snake_food
+        body = self.snake_body if eating else self.snake_body[:-1]
+        if next_head in body:
+            self.snake_over = True
+        else:
+            self.snake_body = [next_head, *body]
+            if eating:
+                self.snake_score += 1
+                if len(self.snake_body) == 112:
+                    self.snake_over = True
+                else:
+                    self.snake_food = self._new_snake_food()
+        self._draw_snake()
+        self._schedule_snake_tick()
+
+    def _set_snake_active(self, active: bool) -> None:
+        if self.snake_active == active or self.snake_frame is None:
+            return
+        self.snake_active = active
+        if active:
+            self.snake_frame.pack(side="bottom", fill="x", pady=(8, 0), before=self.history_box)
+            self._reset_snake()
+        else:
+            if self.snake_after is not None and self.root is not None:
+                self.root.after_cancel(self.snake_after)
+                self.snake_after = None
+            self.snake_frame.pack_forget()
+        if self.bubble_open:
+            self._place_chat()
 
     def _menu_command(self, action: Any):
         def run() -> None:
@@ -1362,7 +1730,7 @@ class NativeAssistantAgent:
         add_row(0, "Ширина персонажа", "avatar_width", 120, 260)
         add_row(1, "Высота персонажа", "avatar_height", 160, 340)
         add_row(2, "Ширина чата", "chat_width", 420, 760)
-        add_row(3, "Высота чата", "chat_height", 260, 520)
+        add_row(3, "Высота чата", "chat_height", 260, 900)
         add_row(4, "Размер текста", "font_size", 9, 14)
         top_var = tk.BooleanVar(value=self.always_on_top)
         tk.Checkbutton(win, text="Поверх всех окон", variable=top_var, bg="#f7fbff", fg="#17324d", font=("Segoe UI", 10), anchor="w").grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=8)
@@ -1733,8 +2101,13 @@ class NativeAssistantAgent:
                 x = max(12, min(screen_w - self.chat_w - 12, right_x))
                 side = "right"
 
-        y = max(12, min(screen_h - self.chat_h - 48, self.avatar_y + 8))
-        self.chat.geometry(f"{self.chat_w}x{self.chat_h}+{x}+{y}")
+        displayed_height = self._display_chat_height()
+        y = max(12, min(screen_h - displayed_height - 48, self.avatar_y + 8))
+        self.chat_side = side
+        self.chat.geometry(f"{self.chat_w}x{displayed_height}+{x}+{y}")
+        self._place_resize_edges()
+        if self.close_button is not None:
+            self.close_button.place(x=self.chat_w - 46, y=11, width=34, height=34)
         self._place_tail(x, y, side, screen_w, screen_h)
 
     def _place_tail(self, chat_x: int, chat_y: int, side: str, screen_w: int, screen_h: int) -> None:
@@ -1746,7 +2119,7 @@ class NativeAssistantAgent:
 
         tail_w, tail_h = 34, 46
         avatar_mid_y = self.avatar_y + max(32, self.avatar_h // 2)
-        tail_y = max(chat_y + 58, min(chat_y + self.chat_h - 74, avatar_mid_y - tail_h // 2))
+        tail_y = max(chat_y + 58, min(chat_y + self._display_chat_height() - 74, avatar_mid_y - tail_h // 2))
         if side == "left":
             tail_x = chat_x + self.chat_w - 2
             points_border = [0, 7, tail_w, tail_h // 2, 0, tail_h - 7]
@@ -1756,17 +2129,16 @@ class NativeAssistantAgent:
             points_border = [tail_w, 7, 0, tail_h // 2, tail_w, tail_h - 7]
             points_fill = [tail_w, 12, 7, tail_h // 2, tail_w, tail_h - 12]
 
+        was_hidden = not self.tail.winfo_viewable()
         self.tail.geometry(f"{tail_w}x{tail_h}+{tail_x}+{tail_y}")
-        self.tail_canvas.delete("all")
-        self.tail_canvas.create_polygon(points_border, fill="#0e4f97", outline="#0e4f97")
-        self.tail_canvas.create_polygon(points_fill, fill="#fbfdff", outline="#fbfdff")
-        self.tail.deiconify()
-        self.tail.lift()
-        try:
-            self.chat.lift()
-            self.root.lift()
-        except Exception:
-            pass
+        if side != self.tail_side:
+            self.tail_canvas.delete("all")
+            self.tail_canvas.create_polygon(points_border, fill="#0e4f97", outline="#0e4f97")
+            self.tail_canvas.create_polygon(points_fill, fill="#fbfdff", outline="#fbfdff")
+            self.tail_side = side
+        if was_hidden:
+            self.tail.deiconify()
+            self.tail.lift()
 
     def _show_avatar_menu(self, event: Any) -> str:
         try:
@@ -1809,6 +2181,9 @@ class NativeAssistantAgent:
             self._place_chat()
             self.chat.deiconify()
             self.chat.lift()
+            if self.tail is not None:
+                self.tail.lift()
+            self.root.lift()
             try:
                 if self.entry_widget is not None:
                     self.entry_widget.focus_set()
@@ -1860,7 +2235,7 @@ class NativeAssistantAgent:
         if self.title_label is not None:
             self.title_label.configure(text=title)
         if self.status_label is not None:
-            self.status_label.configure(text=f"●  {status}")
+            self.status_label.configure(text=f"●  {status} · v{APP_VERSION}")
         if self.badge_label is not None:
             cfg = {
                 "ready": ("✓", "#25a957"),
@@ -1869,6 +2244,7 @@ class NativeAssistantAgent:
                 "error": ("!", "#c5453c"),
             }.get(self.state, ("✓", "#25a957"))
             self.badge_label.configure(text=cfg[0], bg=cfg[1])
+        self._set_snake_active(self.state == "thinking")
 
     def _clear_history(self) -> None:
         state = clear_chat_conversation()
@@ -1895,6 +2271,8 @@ class NativeAssistantAgent:
         try:
             state = read_chat_state()
             updated_at = float(state.get("updatedAt") or 0.0)
+            if self.reveal_message_id:
+                return
             if not force and updated_at <= self.last_chat_sync_updated_at:
                 return
             self.last_chat_sync_updated_at = updated_at
@@ -1906,6 +2284,20 @@ class NativeAssistantAgent:
                     active = conversation
                     break
             messages = active.get("messages") if isinstance(active, dict) and isinstance(active.get("messages"), list) else []
+            assistant_messages = [item for item in messages if isinstance(item, dict) and item.get("role") == "assistant"]
+            last = assistant_messages[-1] if assistant_messages else None
+            if isinstance(last, dict) and last.get("pending"):
+                self.awaiting_answer = True
+                self.pending_answer_id = str(last.get("id") or "")
+            elif isinstance(last, dict) and str(last.get("phase") or "") != "done":
+                self.awaiting_answer = False
+                self.pending_answer_id = ""
+            reveal_id = ""
+            if isinstance(last, dict) and not last.get("pending") and str(last.get("phase") or "") == "done":
+                candidate_id = str(last.get("id") or "")
+                if self.awaiting_answer and candidate_id and candidate_id != self.last_revealed_answer_id:
+                    reveal_id = candidate_id
+            reveal_text = ""
             self.history_box.configure(state="normal")
             self.history_box.delete("1.0", "end")
             if not messages:
@@ -1915,25 +2307,56 @@ class NativeAssistantAgent:
                     if not isinstance(item, dict):
                         continue
                     role = "user" if item.get("role") == "user" else "assistant"
-                    text = str(item.get("answer") or item.get("text") or "").strip()
+                    text = "Готовлю ответ..." if role == "assistant" and item.get("pending") else str(item.get("answer") or item.get("text") or "").strip()
+                    if reveal_id and str(item.get("id") or "") == reveal_id:
+                        reveal_text = self._strip_prefix("assistant", text)
+                        self.history_box.insert("end", "Помощник: ", "assistant")
+                        continue
                     if text:
                         self._insert_history_line(role, text)
             self.history_box.see("end")
             self.history_box.configure(state="disabled")
-            self._update_state_from_shared_messages(messages)
+            if reveal_id and reveal_text:
+                self.awaiting_answer = False
+                self.pending_answer_id = ""
+                self.reveal_message_id = reveal_id
+                self.reveal_text = reveal_text
+                self.reveal_index = 0
+                self._set_state("speaking", "Отвечаю", "Показываю готовый ответ")
+                self._reveal_answer_step()
+            else:
+                self._update_state_from_shared_messages(messages)
         except Exception:
             pass
+
+    def _reveal_answer_step(self) -> None:
+        self.reveal_after = None
+        if not self.reveal_message_id or self.history_box is None:
+            return
+        step = max(2, (len(self.reveal_text) + 279) // 280)
+        next_index = min(len(self.reveal_text), self.reveal_index + step)
+        self.history_box.configure(state="normal")
+        self.history_box.insert("end", self.reveal_text[self.reveal_index:next_index])
+        self.history_box.see("end")
+        self.history_box.configure(state="disabled")
+        self.reveal_index = next_index
+        if next_index >= len(self.reveal_text):
+            self.history_box.configure(state="normal")
+            self.history_box.insert("end", "\n")
+            self.history_box.configure(state="disabled")
+            self.last_revealed_answer_id = self.reveal_message_id
+            self.reveal_message_id = ""
+            self.reveal_text = ""
+            self._set_state("ready", "На связи", "Готов помочь")
+        elif self.root is not None:
+            self.reveal_after = self.root.after(25, self._reveal_answer_step)
 
     def _update_state_from_shared_messages(self, messages: list[Any]) -> None:
         try:
             assistant_messages = [item for item in messages if isinstance(item, dict) and item.get("role") == "assistant"]
             last = assistant_messages[-1] if assistant_messages else None
             if isinstance(last, dict) and last.get("pending"):
-                phase = str(last.get("phase") or "")
-                if phase == "typing" or str(last.get("answer") or "").strip():
-                    self._set_state("speaking", "Отвечаю", "Печатаю ответ")
-                else:
-                    self._set_state("thinking", "Думаю", "Готовлю ответ")
+                self._set_state("thinking", "Думаю", "Готовлю ответ")
             elif self.state in {"thinking", "speaking"}:
                 self._set_state("ready", "На связи", "Готов помочь")
         except Exception:
@@ -2009,6 +2432,7 @@ class NativeAssistantAgent:
         if not self.bubble_open:
             self.show_chat()
         self._set_state("thinking", "Думаю", "Отправил запрос в общий диалог")
+        self.awaiting_answer = True
         self.busy_request = True
         threading.Thread(target=self._send_message_worker, args=(text,), daemon=True).start()
 

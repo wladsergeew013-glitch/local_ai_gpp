@@ -6,6 +6,7 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 COPY frontend ./
+COPY VERSION /VERSION
 ARG VITE_API_BASE=
 ENV VITE_API_BASE=${VITE_API_BASE}
 RUN npm run build
