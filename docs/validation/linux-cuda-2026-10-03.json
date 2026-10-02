@@ -1,0 +1,99 @@
+{
+  "date": "2026-10-03",
+  "platform": "Linux/amd64 container on Docker Desktop with WSL2, Windows host",
+  "gpu": "NVIDIA GeForce RTX 3070 Ti 8GB",
+  "host_driver": "616.92",
+  "cuda_runtime": "12.4.1",
+  "python": "3.10.12",
+  "llama_cpp_python": "0.3.36/cu124",
+  "official_wheel_sha256": "3d53f94464d8d69028d993033d6120439c994108c04375a46205bd1935bc30ad",
+  "wheel_checksum_verified": true,
+  "scope": "Functional inference checks, not a throughput or answer-quality benchmark",
+  "checks": [
+    "React page",
+    "JS/CSS bundles",
+    "/api/health",
+    "/api/bootstrap",
+    "/v1/models",
+    "/openapi.json",
+    "Swagger UI",
+    "Branding asset proxy"
+  ],
+  "modes": [
+    {
+      "model": "Docker Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",
+      "answer": "Four",
+      "finish_reason": "stop",
+      "mode": "CPU",
+      "seconds": 102.454,
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 1,
+        "total_tokens": 24
+      },
+      "requested_gpu_layers": 0,
+      "gpu_offloaded_layers": 0,
+      "model_layers": 33,
+      "fallback_reason": "",
+      "model_adapter": "qwen",
+      "enable_thinking": false,
+      "reasoning_chars": 0
+    },
+    {
+      "model": "Docker Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",
+      "answer": "Four",
+      "finish_reason": "stop",
+      "mode": "CPU + CUDA",
+      "seconds": 142.469,
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 1,
+        "total_tokens": 24
+      },
+      "requested_gpu_layers": 16,
+      "gpu_offloaded_layers": 16,
+      "model_layers": 33,
+      "fallback_reason": "",
+      "model_adapter": "qwen",
+      "enable_thinking": false,
+      "reasoning_chars": 0
+    },
+    {
+      "model": "Docker Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",
+      "answer": "Four",
+      "finish_reason": "stop",
+      "mode": "CUDA",
+      "seconds": 89.156,
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 1,
+        "total_tokens": 24
+      },
+      "requested_gpu_layers": -1,
+      "gpu_offloaded_layers": 33,
+      "model_layers": 33,
+      "fallback_reason": "",
+      "model_adapter": "qwen",
+      "enable_thinking": false,
+      "reasoning_chars": 0
+    }
+  ],
+  "python_client": {
+    "first": "OK",
+    "second": "ORBIT",
+    "history_messages": 4,
+    "stream_done_checked": true,
+    "reused_worker": true,
+    "mode": "CUDA",
+    "gpu_offloaded_layers": 33,
+    "model_layers": 33,
+    "seconds": 0.468,
+    "enable_thinking": false
+  },
+  "limitations": [
+    "Native bare-metal Linux driver/Container Toolkit installation not tested on a separate host",
+    "Model loaded through a Windows read-only bind mount; cold-load timings are not native Linux benchmarks",
+    "Only RTX 3070 Ti and Qwen3.5 4B Q4_K_M tested; other GPU architectures and models not tested",
+    "Hosted GitHub CI builds/tests the image and API without GPU or GGUF inference"
+  ]
+}
