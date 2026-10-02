@@ -48,7 +48,7 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.gpu.yml config --quiet
           docker build -f backend/Dockerfile.cuda -t local-ai-cuda-ci .
       - name: Runtime regressions in CUDA image
-        run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" local-ai-cuda-ci -m unittest discover -s /tests -v
+        run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" -v "$PWD/tools:/app/tools:ro" local-ai-cuda-ci -m unittest discover -s /tests -v
       - name: Start API without GPU reservation and check health
         run: |
           docker run -d --name local-ai-cuda-ci -p 127.0.0.1:18765:8000 local-ai-cuda-ci
