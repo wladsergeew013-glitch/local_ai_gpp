@@ -37,7 +37,7 @@ if not exist "%VENV_PY%" (
 echo [INFO] Installing CPU llama-cpp-python...
 >>"%LOG_FILE%" echo [INFO] Installing CPU llama-cpp-python.
 "%VENV_PY%" -m pip uninstall -y llama-cpp-python >>"%LOG_FILE%" 2>&1
-"%VENV_PY%" -m pip install --force-reinstall --no-cache-dir "llama-cpp-python==0.3.19" --extra-index-url "https://abetlen.github.io/llama-cpp-python/whl/cpu" >>"%LOG_FILE%" 2>&1
+"%VENV_PY%" -m pip install --force-reinstall --no-cache-dir "llama-cpp-python==0.3.36" --extra-index-url "https://abetlen.github.io/llama-cpp-python/whl/cpu" >>"%LOG_FILE%" 2>&1
 if errorlevel 1 goto fail_with_log
 
 echo [INFO] Runtime verification:

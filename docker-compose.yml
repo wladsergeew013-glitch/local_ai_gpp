@@ -3,18 +3,25 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: local_ai_gpp_backend
+    init: true
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${LOCAL_AI_API_PORT:-18765}:8000"
     volumes:
-      - ./models_storage:/app/models_storage
+      - local_ai_data:/data
+      - type: bind
+        source: ${LOCAL_AI_MODELS_DIR:-./models_storage}
+        target: /models
+        read_only: true
 
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    container_name: local_ai_gpp_frontend
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
-      - "8080:80"
+      - "127.0.0.1:${LOCAL_AI_WEB_PORT:-8080}:80"
+
+volumes:
+  local_ai_data:

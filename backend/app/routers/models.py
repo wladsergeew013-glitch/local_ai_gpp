@@ -37,7 +37,7 @@ def validate_models() -> list[dict]:
 
 
 @router.post("/api/models/upload")
-async def upload_model(
+def upload_model(
     model_name: str = Form(...),
     model_type: str = Form("LLM"),
     copy_to_storage: bool = Form(True),

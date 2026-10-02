@@ -57,6 +57,7 @@ export type RuntimeSettings = {
   split_mode: 'none' | 'layer' | 'row';
   tensor_split: string;
   temperature: number;
+  enable_thinking?: boolean;
   max_tokens: number;
   top_k: number;
   top_p: number;
@@ -139,6 +140,8 @@ export type RemoteHubModel = {
 
 export type ChatMessage = {
   id?: string;
+  createdAt?: string;
+  syncUpdatedAt?: number;
   role: 'user' | 'assistant';
   text: string;
   answer?: string;

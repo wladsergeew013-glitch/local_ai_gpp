@@ -1,4 +1,3 @@
-@"
 # Python
 .venv/
 backend/.venv/
@@ -31,6 +30,9 @@ tools/**/out/
 *.v*_backup_*
 
 # Local runtime data
+.local/
+worker_runtime/
+runtime_info.json
 assistant_state/
 models_storage/**/*.gguf
 models_storage/**/*.bin
@@ -55,7 +57,6 @@ plugin/
 .vs/
 .DS_Store
 Thumbs.db
-"@ | Set-Content -Encoding UTF8 .gitignore
 # Old patch payloads / duplicated assets
 tools/assets/
 tools/overlay_assistant_payload_*/

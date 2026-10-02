@@ -16,6 +16,7 @@ from backend.app.core import (
     load_models,
     load_settings,
     prewarm_runtime,
+    unload_all_runtimes,
 )
 from backend.app.routers.bootstrap import router as bootstrap_router
 from backend.app.routers.chat import router as chat_router
@@ -43,7 +44,7 @@ async def lifespan(app: FastAPI):
         for model in load_models():
             if model.get('type') == 'LLM' and not str(model.get('path', '')).startswith('HUB::'):
                 try:
-                    prewarm_runtime(str(model['id']))
+                    await asyncio.to_thread(prewarm_runtime, str(model['id']))
                 except Exception:
                     pass
 
@@ -52,7 +53,7 @@ async def lifespan(app: FastAPI):
     async def runtime_maintenance_loop() -> None:
         while not stop_event.is_set():
             try:
-                enforce_idle_runtime_policy()
+                await asyncio.to_thread(enforce_idle_runtime_policy)
             except Exception:
                 pass
             try:
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
     finally:
         stop_event.set()
         await task
+        await asyncio.to_thread(unload_all_runtimes)
 
 
 settings = load_settings()
