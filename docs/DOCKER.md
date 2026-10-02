@@ -58,7 +58,7 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build --w
 | `16` | 16 слоёв на GPU, остальные на CPU (пример для Qwen4B с 33 слоями) |
 | `-1` | Все поддерживаемые слои на GPU |
 
-GPU-образ поддерживает все три режима. При проверке задавайте `gpu_fallback_to_cpu=false`, чтобы нехватка VRAM или недоступная CUDA вернули ошибку. Проверяйте фактические `mode`, `gpu_offloaded_layers`, `model_layers` и `fallback_reason` в `GET /api/runtime/status`; служебные операции приложения выполняются на CPU даже при всех слоях модели на GPU.
+GPU-образ поддерживает все три режима при запуске с GPU overlay. Его нативная библиотека требует драйвер `libcuda.so.1` даже для CPU inference; на хосте без NVIDIA запускайте обычный CPU-образ. При проверке задавайте `gpu_fallback_to_cpu=false`, чтобы нехватка VRAM или недоступная CUDA вернули ошибку. Проверяйте фактические `mode`, `gpu_offloaded_layers`, `model_layers` и `fallback_reason` в `GET /api/runtime/status`; служебные операции приложения выполняются на CPU даже при всех слоях модели на GPU.
 
 Регистрация Qwen для CUDA без рассуждений:
 
@@ -125,3 +125,5 @@ python tools/check_docker.py --model-path /models/Qwen3.5-4B-Q4_K_M.gguf --gpu-l
 Проверено 2026-10-02: Linux/amd64 образ на Docker Desktop, Qwen3.5 4B Q4_K_M, ответ `Four`, `finish_reason=stop`, адаптер `qwen`, рассуждения выключены. Двухходовый Python-клиент с SSE возвращает `ORBIT`. Холодная загрузка через Windows bind mount заняла 83.25s; это проверка работоспособности, не benchmark нативного Linux-диска.
 
 GPU-запрос к обычному CPU-образу требует fallback или вернёт ошибку при `gpu_fallback_to_cpu=false`. GPU-образ выбирайте через overlay выше. Проверочные запросы и фактические GPU-слои — [результаты](VALIDATION.md).
+
+Проверено 2026-10-03: Linux CUDA-контейнер на Docker Desktop/WSL2, RTX 3070 Ti. В GPU-образе Qwen4B отвечает `Four` во всех трёх режимах: CPU 0/33, смешанный 16/33, CUDA 33/33 слоя на GPU; fallback отсутствует. Python-клиент проверяет память `ORBIT`, SSE и повторное использование worker. Установка драйвера/Container Toolkit на отдельном физическом Linux-хосте не проверялась. [Подробные результаты и ограничения](VALIDATION.md#linux-cuda-docker--2026-10-03).
