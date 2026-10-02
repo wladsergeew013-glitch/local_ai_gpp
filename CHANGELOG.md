@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Linux NVIDIA CUDA: отдельный backend Dockerfile и Compose GPU overlay; CPU-сборка остаётся по умолчанию, проверка inference поддерживает три режима и фактические GPU-слои без fallback.
 - Адаптер Qwen отключает рассуждения через штатный GGUF-шаблон; переключатель в настройках и `chat_template_kwargs.enable_thinking` в API.
 - Проверенный Linux Docker CPU: отдельные образы backend/frontend, persistent volume, read-only GGUF mount, healthcheck и SSE через Nginx.
 - Исправлена потеря JSON heartbeat при тихой нативной загрузке модели; stderr читается отдельно с ограниченным буфером.

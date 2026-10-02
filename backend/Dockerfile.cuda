@@ -1,0 +1,32 @@
+# Linux/amd64 CUDA runtime; the regular Dockerfile remains CPU-only.
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app LOCAL_AI_GPP_DATA_DIR=/data
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Ubuntu 22.04 supplies Python 3.10. All application dependencies support it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates libgomp1 \
+    && python3 -m venv /opt/venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY backend/requirements-base.txt /tmp/requirements-base.txt
+ARG LLAMA_CPP_VERSION=0.3.36
+# Use the exact CUDA wheel: pip must never choose a CPU wheel/source fallback.
+RUN python -m pip install --no-cache-dir -r /tmp/requirements-base.txt \
+    && python -m pip install --no-cache-dir \
+       "https://github.com/abetlen/llama-cpp-python/releases/download/v${LLAMA_CPP_VERSION}-cu124/llama_cpp_python-${LLAMA_CPP_VERSION}-py3-none-manylinux_2_35_x86_64.whl" \
+    && python -c "import llama_cpp; print('llama-cpp-python', llama_cpp.__version__)"
+
+COPY backend/app /app/backend/app
+COPY VERSION /app/VERSION
+COPY models_storage /data/models_storage
+RUN mkdir -p /data/logs
+
+EXPOSE 8000
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"
+
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

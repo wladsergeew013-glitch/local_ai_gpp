@@ -1,0 +1,13 @@
+# Overlay: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build --wait
+services:
+  backend:
+    platform: linux/amd64
+    build:
+      dockerfile: backend/Dockerfile.cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

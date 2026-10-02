@@ -24,7 +24,7 @@ Local AI запускает GGUF-модели на вашем компьютер
 - **Qwen без длинных рассуждений:** адаптер использует штатный переключатель GGUF-шаблона; рассуждения отключены по умолчанию и включаются в настройках или API.
 - **Стабильный runtime:** отдельный постоянный worker, ограниченные timeout, отмена генерации и восстановление после ошибки.
 - **Подключение приложений:** `/v1/models`, `/v1/chat/completions`, стандартный SSE, история с `memory=true/false`.
-- **Linux:** Docker Compose с CPU runtime, healthcheck, постоянным хранилищем и read-only подключением папки GGUF.
+- **Linux:** Docker Compose с CPU или NVIDIA CUDA runtime, healthcheck, постоянным хранилищем и read-only подключением папки GGUF.
 
 ## Быстрый старт · Windows
 
@@ -80,6 +80,14 @@ docker compose up -d --build --wait
 | http://127.0.0.1:18765/docs | API напрямую / Swagger |
 
 В настройках чата укажите путь **внутри контейнера**, например `/models/Qwen3.5-4B-Q4_K_M.gguf`, и выберите CPU. История браузера остаётся в браузере; реестр, настройки и логи сервера — в Docker volume. [Порты, хранение и проверка inference →](docs/DOCKER.md)
+
+Для NVIDIA GPU на Linux x86_64 установите совместимый драйвер и NVIDIA Container Toolkit, затем запустите CUDA-вариант:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build --wait
+```
+
+В настройках выберите CUDA, CPU + CUDA или CPU. API и адреса остаются теми же. [Подготовка хоста, проверка GPU и примеры →](docs/DOCKER.md#запуск-с-nvidia-gpu)
 
 ## Подключить своё приложение
 
@@ -159,7 +167,7 @@ API не хранит беседы: для продолжения передав
 
 `GET /api/runtime/status` показывает PID worker, фактическое размещение слоёв, адаптер и режим рассуждений. Настройки генерации меняются без повторной загрузки модели. GPU-режим всё равно использует CPU для служебных операций приложения.
 
-Реализован текстовый chat completions. Изображения, embeddings, tools/function calling и Responses API пока не реализованы. Обычный Docker-образ использует CPU; Linux CUDA не проверена. API по умолчанию доступен через loopback; ключ защищает `/v1/*`, служебные `/api/*` предназначены для локального приложения.
+Реализован текстовый chat completions. Изображения, embeddings, tools/function calling и Responses API пока не реализованы. Обычный Docker-образ использует CPU; отдельный `docker-compose.gpu.yml` включает NVIDIA CUDA. API по умолчанию доступен через loopback; ключ защищает `/v1/*`, служебные `/api/*` предназначены для локального приложения.
 
 ## Проверки
 
@@ -174,7 +182,7 @@ python tools/check_docker.py --base-url http://127.0.0.1:8080
 python tools/check_docker.py --model-path /models/Qwen3.5-4B-Q4_K_M.gguf
 ```
 
-CI проверяет runtime на Windows/Linux и сборку Docker с веб-интерфейсом/API. GGUF не скачивается в CI; inference на Qwen4B проверяется отдельно локально. [Методика, результаты и границы проверки](docs/VALIDATION.md).
+CI проверяет runtime на Windows/Linux, обычный Docker с веб-интерфейсом/API и сборку CUDA-образа с регрессиями/API на runner без GPU. GGUF не скачивается в CI; inference на Qwen4B и фактические GPU-слои проверяются отдельно локально. [Методика, результаты и границы проверки](docs/VALIDATION.md).
 
 ## Устройство проекта
 

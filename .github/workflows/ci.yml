@@ -37,3 +37,31 @@ jobs:
       - name: Stop test containers
         if: always()
         run: docker compose -p local-ai-ci down -v
+  docker-cuda:
+    name: CUDA image / API (runner without GPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate GPU Compose and build CUDA image
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config --quiet
+          docker build -f backend/Dockerfile.cuda -t local-ai-cuda-ci .
+      - name: Runtime regressions in CUDA image
+        run: docker run --rm --entrypoint python -v "$PWD/tests:/tests:ro" local-ai-cuda-ci -m unittest discover -s /tests -v
+      - name: Start API without GPU reservation and check health
+        run: |
+          docker run -d --name local-ai-cuda-ci -p 127.0.0.1:18765:8000 local-ai-cuda-ci
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18765/api/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Logs
+        if: always()
+        run: docker logs --tail 100 local-ai-cuda-ci
+      - name: Stop test container
+        if: always()
+        run: docker rm -f local-ai-cuda-ci
