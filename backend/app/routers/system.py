@@ -6,9 +6,17 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from backend.app.core import LOGS_DIR, PROJECT_ROOT, unload_all_runtimes
+from backend.app.core import LOGS_DIR, PROJECT_ROOT, RUNTIMES, unload_all_runtimes
 
 router = APIRouter(tags=['system'])
+
+
+@router.post('/api/runtime/cancel')
+def cancel_generation() -> dict[str, int]:
+    workers = [entry['runtime'] for entry in list(RUNTIMES.values()) if entry.get('state') == 'generating']
+    for worker in workers:
+        worker.close()
+    return {'cancelled': len(workers)}
 
 
 def _is_allowed_open_target(path: Path) -> bool:

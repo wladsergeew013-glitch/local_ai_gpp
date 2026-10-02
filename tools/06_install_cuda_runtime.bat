@@ -17,7 +17,7 @@ if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul
 set "LOG_FILE=%LOG_DIR%\install_cuda_runtime.log"
 set "VENV_PY=%ROOT%\backend\.venv\Scripts\python.exe"
 set "CUDA_TAG=cu124"
-set "LLAMA_CPP_CUDA_VERSION=0.3.4"
+set "LLAMA_CPP_CUDA_VERSION=0.3.36"
 if not "%~1"=="" set "CUDA_TAG=%~1"
 if not "%~2"=="" set "LLAMA_CPP_CUDA_VERSION=%~2"
 
@@ -38,7 +38,7 @@ echo.
 
 if not exist "%VENV_PY%" (
   echo [ERROR] Backend venv not found: %VENV_PY%
-  echo Run tools\01_run_local_browser.bat --check first.
+  echo Create backend/.venv with Python 3.12 and install backend/requirements-base.txt first.
   >>"%LOG_FILE%" echo [ERROR] backend venv not found.
   goto fail
 )
@@ -70,7 +70,7 @@ echo [INFO] Installing prebuilt CUDA llama-cpp-python %LLAMA_CPP_CUDA_VERSION% f
 if errorlevel 1 (
   echo [ERROR] Prebuilt CUDA wheel install failed for %CUDA_TAG% / %LLAMA_CPP_CUDA_VERSION%.
   echo Try another tag, for example:
-  echo   tools\06_install_cuda_runtime.bat cu125 0.3.4
+  echo   tools\06_install_cuda_runtime.bat cu125 0.3.36
   echo If you want to build from source, install Visual Studio Build Tools with C++ and NVIDIA CUDA Toolkit.
   echo Manual source build:
   echo   set CMAKE_ARGS=-DGGML_CUDA=on
@@ -80,11 +80,15 @@ if errorlevel 1 (
 )
 
 echo [INFO] Runtime verification:
+echo [INFO] Installing NVIDIA CUDA 12.4 runtime and cuBLAS DLLs...
+"%VENV_PY%" -m pip install "nvidia-cuda-runtime-cu12==12.4.127" "nvidia-cublas-cu12==12.4.5.8" >>"%LOG_FILE%" 2>&1
+if errorlevel 1 goto fail_with_log
 set "PYTHONPATH=%ROOT%"
-"%VENV_PY%" -c "import json; from backend.app.core import collect_local_llama_diagnostics; d=collect_local_llama_diagnostics(); print(json.dumps(d, ensure_ascii=False, indent=2)); raise SystemExit(0 if d.get('gpu_runtime_ready') else 2)" > "%LOG_DIR%\install_cuda_runtime_verify.txt" 2>&1
+"%VENV_PY%" -c "import json; from backend.app.core import get_runtime_diagnostics; d=get_runtime_diagnostics(); print(json.dumps(d, ensure_ascii=False, indent=2)); raise SystemExit(0 if d.get('supports_gpu_offload') else 2)" > "%LOG_DIR%\install_cuda_runtime_verify.txt" 2>&1
+set "VERIFY_EXIT=%ERRORLEVEL%"
 type "%LOG_DIR%\install_cuda_runtime_verify.txt"
 type "%LOG_DIR%\install_cuda_runtime_verify.txt" >> "%LOG_FILE%"
-if errorlevel 1 (
+if not "%VERIFY_EXIT%"=="0" (
   echo [ERROR] CUDA runtime was installed, but GPU offload is not available.
   echo [ERROR] If diagnostics show missing CUDA DLLs, install the matching NVIDIA CUDA 12 runtime/toolkit.
   echo [ERROR] Typical DLLs: cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll.

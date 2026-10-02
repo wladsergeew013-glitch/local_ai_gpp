@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 
 import uvicorn
@@ -48,6 +49,20 @@ def resource_dir(name: str) -> Path:
     if hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / name  # type: ignore[attr-defined]
     return runtime_dir() / name
+
+
+def branding_asset(filename: str) -> Path:
+    """Use bundled branding even when portable data is moved or replaced."""
+    bundled = resource_dir("branding_icons") / filename
+    if bundled.is_file():
+        return bundled
+    return runtime_dir() / "models_storage" / "branding" / "icons" / filename
+
+
+def configure_windows_app_identity() -> None:
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LocalAI.GPP.Desktop")
 
 
 def app_state_dir() -> Path:
@@ -117,6 +132,7 @@ configure_local_runtime_environment()
 
 from backend.app.main import app  # noqa: E402
 from backend.app.version import APP_VERSION  # noqa: E402
+from backend.app.core import MODELS_DIR, load_settings  # noqa: E402
 
 def remove_imported_desktop_routes() -> None:
     """The packaged EXE is the only owner of /api/desktop/* routes.
@@ -144,10 +160,9 @@ def remove_imported_desktop_routes() -> None:
 remove_imported_desktop_routes()
 
 FRONTEND_DIST = resource_dir("frontend_dist")
-MODELS_DIR = runtime_dir() / "models_storage"
 LOGS_DIR = runtime_dir() / "logs"
 SHARED_CHAT_CONVERSATION_ID = "conv-shared"
-SHARED_CHAT_TITLE = "Тестовый диалог"
+SHARED_CHAT_TITLE = "Новый диалог"
 
 
 def desktop_response_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -205,8 +220,9 @@ def show_info(title: str, message: str) -> None:
 
 
 def find_free_port() -> int:
+    port = int(os.getenv('LOCAL_AI_GPP_PORT', str(load_settings()['server']['port'])))
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
+        sock.bind(("127.0.0.1", port))
         return int(sock.getsockname()[1])
 
 
@@ -226,6 +242,7 @@ def write_instance_info(port: int) -> None:
         "pid": os.getpid(),
         "port": int(port),
         "url": f"http://127.0.0.1:{int(port)}",
+        "api_base_url": f"http://127.0.0.1:{int(port)}/v1",
         "desktop_sync_marker": LAUNCHER_VERSION_MARKER,
         "version": APP_VERSION,
         "runtime_dir": str(runtime_dir()),
@@ -290,6 +307,10 @@ def toggle_assistant_window() -> dict[str, Any]:
 def request_exit() -> None:
     global quitting
     quitting = True
+    from backend.app.core import RUNTIMES
+    for entry in list(RUNTIMES.values()):
+        with contextlib.suppress(Exception):
+            entry['runtime'].close()
     try:
         if tray_icon is not None:
             tray_icon.stop()
@@ -366,6 +387,24 @@ chat_sync_lock = threading.Lock()
 generation_lock = threading.Lock()
 
 
+def message_created_at(item: dict[str, Any]) -> str:
+    """Legacy records can only recover their stored sync timestamp."""
+    if item.get("createdAt"):
+        return str(item["createdAt"])
+    try:
+        stamp = float(item.get("syncUpdatedAt") or 0)
+        return datetime.fromtimestamp(stamp / 1000, timezone.utc).isoformat() if stamp > 0 else ""
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def format_message_time(item: dict[str, Any]) -> str:
+    try:
+        return datetime.fromisoformat(message_created_at(item).replace("Z", "+00:00")).astimezone().strftime("%d.%m.%Y %H:%M")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "Время не сохранено"
+
+
 def _normalize_chat_message(item: Any, fallback_index: int) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -379,6 +418,9 @@ def _normalize_chat_message(item: Any, fallback_index: int) -> dict[str, Any] | 
     normalized["id"] = str(item.get("id") or f"msg-{fallback_index}-{int(time.time() * 1000)}")
     normalized["role"] = role
     normalized["text"] = text
+    created_at = message_created_at(item)
+    if created_at:
+        normalized["createdAt"] = created_at
     return normalized
 
 
@@ -463,7 +505,10 @@ def _normalize_chat_state(payload: Any, *, touch: bool = False) -> dict[str, Any
 
 def _write_chat_state_raw(state: dict[str, Any]) -> dict[str, Any]:
     # V64+: file write only. Do NOT call Tk or WebView from FastAPI/worker threads.
-    chat_sync_file().write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = chat_sync_file()
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
     return state
 
 
@@ -477,15 +522,30 @@ def read_chat_state() -> dict[str, Any]:
         path = chat_sync_file()
         if not path.exists():
             state = _default_chat_state()
-            path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            _write_chat_state_raw(state)
             return state
         try:
             state = _normalize_chat_state(json.loads(path.read_text(encoding="utf-8")), touch=False)
             return state
         except Exception:
+            # Keep the damaged history for recovery instead of overwriting it.
+            path.replace(path.with_name(path.name + f'.corrupt-{time.time_ns()}'))
             state = _default_chat_state()
-            path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            _write_chat_state_raw(state)
             return state
+
+
+def recover_interrupted_chat() -> None:
+    with chat_sync_lock:
+        state = read_chat_state_unlocked()
+        changed = False
+        for conversation in state.get('conversations', []):
+            for message in conversation.get('messages', []):
+                if message.get('pending'):
+                    message.update(pending=False, phase='error', text='Генерация прервалась при закрытии приложения. Отправьте запрос снова.')
+                    changed = True
+        if changed:
+            _write_chat_state_raw(state)
 
 
 def _conversation_message_key(message: dict[str, Any], fallback_index: int) -> str:
@@ -513,8 +573,6 @@ def _upsert_message_list(messages: list[dict[str, Any]], incoming_message: dict[
     if not normalized:
         return messages
     message_id = str(normalized.get("id") or "")
-    if not normalized.get("syncUpdatedAt"):
-        normalized["syncUpdatedAt"] = time.time() * 1000.0
     next_messages: list[dict[str, Any]] = []
     replaced = False
     for existing in messages:
@@ -527,6 +585,9 @@ def _upsert_message_list(messages: list[dict[str, Any]], incoming_message: dict[
             else:
                 merged = dict(existing)
                 merged.update(normalized)
+                created_at = message_created_at(existing)
+                if created_at:
+                    merged["createdAt"] = created_at
                 next_messages.append(merged)
             replaced = True
         else:
@@ -659,6 +720,7 @@ def read_chat_state_unlocked() -> dict[str, Any]:
     try:
         return _normalize_chat_state(json.loads(path.read_text(encoding="utf-8")), touch=False)
     except Exception:
+        path.replace(path.with_name(path.name + f'.corrupt-{time.time_ns()}'))
         return _default_chat_state()
 
 
@@ -690,13 +752,15 @@ def append_shared_message(role: str, text: str, *, message_id: str | None = None
         "id": message_id or f"native-{role}-{int(time.time() * 1000)}",
         "role": role,
         "text": clean,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
         "syncUpdatedAt": time.time() * 1000.0,
     }
     message.update(extra)
     state = read_chat_state_unlocked()
     target_id = str(conversation_id or state.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
-    title = conversation_title or SHARED_CHAT_TITLE
-    created_at = conversation_created_at or time.strftime("%Y-%m-%dT%H:%M:%S")
+    conversation = _find_conversation(state.get('conversations') or [], target_id) or {}
+    title = conversation_title or conversation.get('title') or SHARED_CHAT_TITLE
+    created_at = conversation_created_at or conversation.get('createdAt') or time.strftime("%Y-%m-%dT%H:%M:%S")
     return upsert_shared_chat_message(
         {
             "source": "assistant",
@@ -761,7 +825,7 @@ def _select_desktop_chat_config(payload: dict[str, Any]) -> dict[str, Any]:
         runtime.update(payload.get("runtime") or {})
     return {
         "model_id": str(selected.get("id") or ""),
-        "temperature": float(payload.get("temperature", runtime.get("temperature", 0.2)) or 0.2),
+        "temperature": float(payload.get("temperature", runtime.get("temperature", 0.2))),
         "max_tokens": int(payload.get("max_tokens", runtime.get("max_tokens", 1024)) or 1024),
         "runtime": runtime,
     }
@@ -780,6 +844,8 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
             "temperature": config["temperature"],
             "max_tokens": config["max_tokens"],
             "runtime": config["runtime"],
+            "history": payload.get('history', []),
+            "memory": payload.get('memory', True),
         }, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/chat/stream",
@@ -800,9 +866,9 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
             payload_extra.update({"pending": pending, "phase": phase, "answer": clean})
             append_shared_message("assistant", clean, message_id=assistant_id, conversation_id=conversation_id, **payload_extra)
 
-        with urllib.request.urlopen(request, timeout=600) as response:
+        with urllib.request.urlopen(request, timeout=int(config['runtime'].get('request_timeout_sec', 180)) + 10) as response:
             while True:
-                chunk = response.read(4096)
+                chunk = response.read1(4096)
                 if not chunk:
                     buffer += decoder.decode(b"", final=True)
                     break
@@ -877,6 +943,14 @@ def submit_shared_chat_message(payload: dict[str, Any]) -> dict[str, Any] | JSON
     conversation_id = str(payload.get("conversationId") or payload.get("activeConversationId") or current_state.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
     conversation_title = str(payload.get("conversationTitle") or SHARED_CHAT_TITLE)
     conversation_created_at = str(payload.get("conversationCreatedAt") or time.strftime("%Y-%m-%dT%H:%M:%S"))
+    conversation = _find_conversation(current_state.get('conversations') or [], conversation_id) or {}
+    payload = dict(payload)
+    payload['history'] = [
+        {'role': item['role'], 'content': str(item.get('answer') or item.get('text') or '')}
+        for item in (conversation.get('messages') or [])[-64:]
+        if item.get('role') in {'user', 'assistant'} and not item.get('pending')
+        and item.get('phase') != 'error' and (item.get('answer') or item.get('text'))
+    ]
     try:
         # Validate model config before writing the user message, so a bad config does not create a half-dialog.
         _select_desktop_chat_config(payload)
@@ -897,7 +971,7 @@ def submit_shared_chat_message(payload: dict[str, Any]) -> dict[str, Any] | JSON
         source=str(payload.get("source") or "desktop"),
     )
     threading.Thread(target=_shared_chat_generation_worker, args=(dict(payload), assistant_id, conversation_id, True), daemon=True).start()
-    return {"ok": True, "user_id": user_id, "assistant_id": assistant_id, "conversationId": SHARED_CHAT_CONVERSATION_ID, "state": state}
+    return {"ok": True, "user_id": user_id, "assistant_id": assistant_id, "conversationId": conversation_id, "state": state}
 
 
 @app.middleware("http")
@@ -1045,6 +1119,12 @@ def desktop_diagnostics() -> dict[str, Any]:
         "worker_python_exists": worker.exists(),
         "models_dir": str(MODELS_DIR),
         "models_json_exists": (MODELS_DIR / "models.json").exists(),
+        "app_icon": str(branding_asset("mini_agent_head_v2.ico")),
+        "app_icon_exists": branding_asset("mini_agent_head_v2.ico").is_file(),
+        "tray_icon": str(branding_asset("mini_agent_head_v2.png")),
+        "tray_icon_exists": branding_asset("mini_agent_head_v2.png").is_file(),
+        "assistant_dialog_menu_ready": assistant_agent is not None and assistant_agent.dialog_listbox is not None,
+        "assistant_dialog_ids": list(assistant_agent.dialog_ids) if assistant_agent is not None else [],
         "routes": routes,
     }
 
@@ -1151,6 +1231,14 @@ class NativeAssistantAgent:
         self.drag_poll_after: str | None = None
         self.sync_poll_after: str | None = None
         self.last_chat_sync_updated_at = 0.0
+        self.last_rendered_conversation_id = ""
+        self.active_dialog_title = ""
+        self.dialog_sidebar: Any | None = None
+        self.dialog_listbox: Any | None = None
+        self.chat_body: Any | None = None
+        self.dialog_ids: list[str] = []
+        self.dialog_list_signature: Any = None
+        self.dialog_sidebar_open = False
         self.busy_request = False
         self.model_id = ""
         self.temperature = 0.2
@@ -1219,6 +1307,9 @@ class NativeAssistantAgent:
         self._load_position()
         self.root = tk.Tk()
         self.root.title(f"Local AI GPP Помощник v{APP_VERSION}")
+        app_icon = branding_asset("mini_agent_head_v2.ico")
+        if os.name == "nt" and app_icon.is_file():
+            self.root.iconbitmap(default=str(app_icon))
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", self.always_on_top)
         self.root.configure(bg=TRANSPARENT_COLOR)
@@ -1293,18 +1384,44 @@ class NativeAssistantAgent:
         header.pack(fill="x")
         header.pack_propagate(False)
         self.title_label = tk.Label(header, text="На связи", bg="#1d559c", fg="white", font=("Segoe UI", 18, "bold"), anchor="w")
-        self.title_label.place(x=14, y=8, width=340, height=26)
+        self.title_label.place(x=54, y=8, width=300, height=26)
         self.status_label = tk.Label(header, text=f"●  Готов помочь · v{APP_VERSION}", bg="#1d559c", fg="#53f079", font=("Segoe UI", 9, "bold"), anchor="w")
-        self.status_label.place(x=14, y=34, width=360, height=16)
+        self.status_label.place(x=54, y=34, width=300, height=16)
+        self.dialog_toggle_button = tk.Label(header, text="☰", bg="#2f67ad", fg="white", font=("Segoe UI", 17, "bold"), cursor="hand2")
+        self.dialog_toggle_button.place(x=12, y=11, width=32, height=34)
+        self.dialog_toggle_button.bind("<Button-1>", lambda _e: self._toggle_dialog_sidebar())
         self.close_button = tk.Label(header, text="×", bg="#2f67ad", fg="white", font=("Segoe UI", 18, "bold"), cursor="hand2")
         self.close_button.place(x=self.chat_w - 46, y=11, width=34, height=34)
         self.close_button.bind("<Button-1>", lambda _e: self.hide_chat())
 
-        body = tk.Frame(self.chat, bg="#fbfdff", padx=14, pady=12)
-        body.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        content = tk.Frame(self.chat, bg="#fbfdff")
+        content.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self.dialog_sidebar = tk.Frame(content, bg="#edf4fb", width=166, padx=6, pady=10)
+        self.dialog_sidebar.pack_propagate(False)
+        tk.Button(self.dialog_sidebar, text="＋ Новый диалог", command=self._new_assistant_dialog,
+                  bg="#ffffff", fg="#155eb9", relief="flat", font=("Segoe UI", 9)).pack(fill="x", pady=(0, 8))
+        tk.Button(self.dialog_sidebar, text="Скрыть меню", command=self._toggle_dialog_sidebar,
+                  bg="#edf4fb", fg="#155eb9", relief="flat", font=("Segoe UI", 9)).pack(side="bottom", fill="x", pady=(6, 0))
+        dialog_list_frame = tk.Frame(self.dialog_sidebar, bg="#edf4fb")
+        dialog_list_frame.pack(fill="both", expand=True)
+        self.dialog_listbox = tk.Listbox(dialog_list_frame, bg="#edf4fb", fg="#16324e", selectbackground="#c7ddf8",
+                                        selectforeground="#145aa0", relief="flat", bd=0, highlightthickness=0,
+                                        exportselection=False, activestyle="none", font=("Segoe UI", 9))
+        dialog_scroll = tk.Scrollbar(dialog_list_frame, command=self.dialog_listbox.yview)
+        dialog_scroll.pack(side="right", fill="y")
+        self.dialog_listbox.configure(yscrollcommand=dialog_scroll.set)
+        self.dialog_listbox.pack(side="left", fill="both", expand=True)
+        self.dialog_listbox.bind("<<ListboxSelect>>", self._select_assistant_dialog)
+        body = tk.Frame(content, bg="#fbfdff", padx=14, pady=12)
+        body.pack(side="left", fill="both", expand=True)
+        self.chat_body = body
         self.history_box = Text(body, wrap="word", bg="#fbfdff", fg="#0b1b33", relief="flat", borderwidth=0, highlightthickness=0, font=("Segoe UI", self.font_size), height=9)
-        self.history_box.tag_configure("user", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"))
-        self.history_box.tag_configure("assistant", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"))
+        self.history_box.tag_configure("user", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"), justify="right", lmargin1=40, lmargin2=40, rmargin=4)
+        self.history_box.tag_configure("assistant", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"), justify="left", lmargin1=4, lmargin2=4, rmargin=40)
+        for role in ("user", "assistant"):
+            alignment = "right" if role == "user" else "left"
+            self.history_box.tag_configure(f"body-{role}", justify=alignment, lmargin1=40 if role == "user" else 4, lmargin2=40 if role == "user" else 4, rmargin=4 if role == "user" else 40)
+            self.history_box.tag_configure(f"timestamp-{role}", foreground="#66809e", font=("Segoe UI", max(9, self.font_size - 2)), justify=alignment)
         self.history_box.insert("end", "На связи. Напиши вопрос ниже — отвечу с уже выбранной локальной модели.\n")
         self.history_box.configure(state="disabled")
         self.history_box.bind("<Control-KeyPress>", self._history_control_key)
@@ -1354,6 +1471,7 @@ class NativeAssistantAgent:
             widget.bind("<Button-3>", self._show_chat_menu)
 
         self.chat_menu = tk.Menu(self.chat, tearoff=0)
+        self.chat_menu.add_command(label="Диалоги", command=self._menu_command(self._toggle_dialog_sidebar))
         self.chat_menu.add_command(label="Открыть полный интерфейс", command=self._menu_command(show_main_window))
         self.chat_menu.add_command(label="Скрыть чат", command=self._menu_command(self.hide_chat))
         self.chat_menu.add_command(label="Скрыть помощника", command=self._menu_command(self.hide))
@@ -1362,6 +1480,73 @@ class NativeAssistantAgent:
         self.chat_menu.add_command(label="Выгрузить модели", command=self._menu_command(lambda: threading.Thread(target=unload_models_from_tray, daemon=True).start()))
         self.chat_menu.add_separator()
         self.chat_menu.add_command(label="Выход", command=self._menu_command(request_exit))
+
+    def _toggle_dialog_sidebar(self) -> None:
+        if self.dialog_sidebar is None or self.chat_body is None:
+            return
+        self.dialog_sidebar_open = not self.dialog_sidebar_open
+        if self.dialog_sidebar_open:
+            self.dialog_sidebar.pack(side="left", fill="y", before=self.chat_body)
+            self._refresh_dialog_list(read_chat_state())
+        else:
+            self.dialog_sidebar.pack_forget()
+
+    def _refresh_dialog_list(self, state: dict[str, Any]) -> None:
+        if self.dialog_listbox is None:
+            return
+        conversations = state.get("conversations") or []
+        active_id = state.get("activeConversationId")
+        signature = (active_id, tuple((c["id"], c.get("title"), len(c.get("messages") or [])) for c in conversations))
+        if signature == self.dialog_list_signature:
+            return
+        self.dialog_list_signature = signature
+        self.dialog_ids = [c["id"] for c in conversations]
+        self.dialog_listbox.delete(0, "end")
+        for index, conversation in enumerate(conversations):
+            title = str(conversation.get("title") or "Новый диалог")
+            label = title if len(title) <= 18 else title[:17] + "…"
+            self.dialog_listbox.insert("end", f"{label} · {len(conversation.get('messages') or [])}")
+            if conversation["id"] == active_id:
+                self.dialog_listbox.selection_set(index)
+                self.dialog_listbox.see(index)
+
+    def _can_switch_dialog(self, state: dict[str, Any]) -> bool:
+        if any(m.get("pending") for c in state.get("conversations", []) for m in c.get("messages", [])):
+            self.set_state("thinking", "Ответ в процессе", "Дождитесь завершения ответа")
+            self.dialog_list_signature = None
+            self._refresh_dialog_list(state)
+            return False
+        return True
+
+    def _finish_dialog_switch(self) -> None:
+        if self.reveal_after and self.root is not None:
+            self.root.after_cancel(self.reveal_after)
+        self.reveal_after = None
+        self.reveal_message_id = ""
+        self.reveal_text = ""
+        self.awaiting_answer = False
+        self.pending_answer_id = ""
+        self._render_shared_history(force=True)
+
+    def _select_assistant_dialog(self, _event: Any = None) -> None:
+        selected = self.dialog_listbox.curselection() if self.dialog_listbox is not None else ()
+        if not selected or selected[0] >= len(self.dialog_ids):
+            return
+        state = read_chat_state()
+        target_id = self.dialog_ids[selected[0]]
+        if target_id == state.get("activeConversationId") or not self._can_switch_dialog(state):
+            return
+        write_chat_state({**state, "activeConversationId": target_id, "source": "assistant-dialog-select"})
+        self._finish_dialog_switch()
+
+    def _new_assistant_dialog(self) -> None:
+        state = read_chat_state()
+        if not self._can_switch_dialog(state):
+            return
+        conversation = _new_conversation(title="Новый диалог")
+        write_chat_state({**state, "activeConversationId": conversation["id"],
+                          "conversations": [conversation, *state["conversations"]], "source": "new-conversation"})
+        self._finish_dialog_switch()
 
     def _display_chat_height(self) -> int:
         height = max(self.chat_h, 430 if self.snake_active else 260)
@@ -2233,7 +2418,7 @@ class NativeAssistantAgent:
         self.status_title = title
         self.status_text = status
         if self.title_label is not None:
-            self.title_label.configure(text=title)
+            self.title_label.configure(text=self.active_dialog_title or title)
         if self.status_label is not None:
             self.status_label.configure(text=f"●  {status} · v{APP_VERSION}")
         if self.badge_label is not None:
@@ -2255,21 +2440,23 @@ class NativeAssistantAgent:
             self.history_box.insert("end", "История очищена.\n")
             self.history_box.configure(state="disabled")
 
-    def _insert_history_line(self, role: str, text: str) -> None:
+    def _insert_history_line(self, role: str, text: str, message: dict[str, Any]) -> None:
         if self.history_box is None:
             return
         clean = self._strip_prefix(role, text)
+        self.history_box.insert("end", format_message_time(message) + "\n", f"timestamp-{role}")
         if role == "user":
             self.history_box.insert("end", "Вы: ", "user")
         else:
             self.history_box.insert("end", "Помощник: ", "assistant")
-        self.history_box.insert("end", clean + "\n")
+        self.history_box.insert("end", clean + "\n\n", f"body-{role}")
 
     def _render_shared_history(self, force: bool = False) -> None:
         if self.history_box is None:
             return
         try:
             state = read_chat_state()
+            self._refresh_dialog_list(state)
             updated_at = float(state.get("updatedAt") or 0.0)
             if self.reveal_message_id:
                 return
@@ -2278,12 +2465,18 @@ class NativeAssistantAgent:
             self.last_chat_sync_updated_at = updated_at
             conversations = state.get("conversations") if isinstance(state.get("conversations"), list) else []
             active_id = str(state.get("activeConversationId") or "")
+            top_index = self.history_box.index("@0,0")
+            follow_latest = self.history_box.yview()[1] >= 0.98 or active_id != self.last_rendered_conversation_id
+            self.last_rendered_conversation_id = active_id
             active = conversations[0] if conversations else None
             for conversation in conversations:
                 if isinstance(conversation, dict) and conversation.get("id") == active_id:
                     active = conversation
                     break
             messages = active.get("messages") if isinstance(active, dict) and isinstance(active.get("messages"), list) else []
+            self.active_dialog_title = str(active.get("title") or "Новый диалог") if isinstance(active, dict) else "Новый диалог"
+            if self.title_label is not None:
+                self.title_label.configure(text=self.active_dialog_title)
             assistant_messages = [item for item in messages if isinstance(item, dict) and item.get("role") == "assistant"]
             last = assistant_messages[-1] if assistant_messages else None
             if isinstance(last, dict) and last.get("pending"):
@@ -2310,11 +2503,15 @@ class NativeAssistantAgent:
                     text = "Готовлю ответ..." if role == "assistant" and item.get("pending") else str(item.get("answer") or item.get("text") or "").strip()
                     if reveal_id and str(item.get("id") or "") == reveal_id:
                         reveal_text = self._strip_prefix("assistant", text)
+                        self.history_box.insert("end", format_message_time(item) + "\n", "timestamp-assistant")
                         self.history_box.insert("end", "Помощник: ", "assistant")
                         continue
                     if text:
-                        self._insert_history_line(role, text)
-            self.history_box.see("end")
+                        self._insert_history_line(role, text, item)
+            if follow_latest:
+                self.history_box.see("end")
+            else:
+                self.history_box.yview(top_index)
             self.history_box.configure(state="disabled")
             if reveal_id and reveal_text:
                 self.awaiting_answer = False
@@ -2335,9 +2532,11 @@ class NativeAssistantAgent:
             return
         step = max(2, (len(self.reveal_text) + 279) // 280)
         next_index = min(len(self.reveal_text), self.reveal_index + step)
+        follow_latest = self.history_box.yview()[1] >= 0.98
         self.history_box.configure(state="normal")
-        self.history_box.insert("end", self.reveal_text[self.reveal_index:next_index])
-        self.history_box.see("end")
+        self.history_box.insert("end", self.reveal_text[self.reveal_index:next_index], "body-assistant")
+        if follow_latest:
+            self.history_box.see("end")
         self.history_box.configure(state="disabled")
         self.reveal_index = next_index
         if next_index >= len(self.reveal_text):
@@ -2567,6 +2766,10 @@ class NativeAssistantAgent:
 def create_tray_image():
     try:
         from PIL import Image, ImageDraw
+        head = branding_asset("mini_agent_head_v2.png")
+        if head.is_file():
+            with Image.open(head) as original:
+                return original.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
         image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle((8, 8, 56, 56), radius=14, fill=(20, 90, 160, 255))
@@ -2655,6 +2858,7 @@ def start_tray() -> None:
 
 def main() -> None:
     global main_window, server, server_thread, server_port, webview_module, assistant_agent
+    configure_windows_app_identity()
     if not FRONTEND_DIST.exists():
         show_error(APP_NAME, f"Frontend bundle not found:\n{FRONTEND_DIST}")
         return
@@ -2671,7 +2875,12 @@ def main() -> None:
         return
 
     webview_module = webview
-    server_port = find_free_port()
+    recover_interrupted_chat()
+    try:
+        server_port = find_free_port()
+    except OSError:
+        show_error(APP_NAME, 'Порт Local AI занят. Закрой предыдущий экземпляр или задай LOCAL_AI_GPP_PORT.')
+        return
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -2714,7 +2923,8 @@ def main() -> None:
         pass
 
     try:
-        webview.start(debug=False)
+        app_icon = branding_asset("mini_agent_head_v2.ico")
+        webview.start(debug=False, icon=str(app_icon) if app_icon.is_file() else None)
     finally:
         if not quitting:
             # webview loop ended; keep clean shutdown rather than ghost process.

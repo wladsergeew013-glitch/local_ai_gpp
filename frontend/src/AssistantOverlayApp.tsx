@@ -372,6 +372,8 @@ export default function AssistantOverlayApp() {
           temperature: Number(runtime.temperature ?? 0.2),
           max_tokens: Number(runtime.max_tokens ?? 1024),
           runtime: runtime as unknown as Record<string, unknown>,
+          history: messages.filter(item => !item.pending && item.text).map(item => ({ role: item.role, content: item.text })),
+          memory: true,
         },
         (chunk) => {
           if (chunk.type === 'delta') {

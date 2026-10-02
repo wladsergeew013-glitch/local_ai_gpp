@@ -1,0 +1,112 @@
+{
+  "date": "2026-10-02",
+  "model": "Qwen3.5 4B Q4_K_M",
+  "runtime": "llama-cpp-python 0.3.36",
+  "scope": "Local functional checks, not a performance or answer-quality benchmark",
+  "windows_gpu": "NVIDIA RTX 3070 Ti 8GB",
+  "windows_modes": [
+    {
+      "mode": "CPU",
+      "answer": "4",
+      "seconds_with_load": 2.422,
+      "gpu_layers": 0,
+      "model_layers": 33,
+      "fallback": false,
+      "enable_thinking": false,
+      "usage": {
+        "prompt_tokens": 9,
+        "completion_tokens": 1,
+        "total_tokens": 10,
+        "estimated": true
+      }
+    },
+    {
+      "mode": "CPU + CUDA",
+      "answer": "4",
+      "seconds_with_load": 2.36,
+      "gpu_layers": 16,
+      "model_layers": 33,
+      "fallback": false,
+      "enable_thinking": false,
+      "usage": {
+        "prompt_tokens": 9,
+        "completion_tokens": 1,
+        "total_tokens": 10,
+        "estimated": true
+      }
+    },
+    {
+      "mode": "CUDA",
+      "answer": "4",
+      "seconds_with_load": 2.344,
+      "gpu_layers": 33,
+      "model_layers": 33,
+      "fallback": false,
+      "enable_thinking": false,
+      "usage": {
+        "prompt_tokens": 9,
+        "completion_tokens": 1,
+        "total_tokens": 10,
+        "estimated": true
+      }
+    }
+  ],
+  "qwen_toggle": [
+    {
+      "enable_thinking": true,
+      "completion_tokens": 253,
+      "seconds": 2.812
+    },
+    {
+      "enable_thinking": false,
+      "completion_tokens": 1,
+      "seconds": 0.079
+    }
+  ],
+  "toggle_reuses_worker": true,
+  "docker_linux": {
+    "platform": "Linux/amd64 on Docker Desktop",
+    "checks": [
+      "React page",
+      "JS/CSS bundles",
+      "/api/health",
+      "/api/bootstrap",
+      "/v1/models",
+      "/openapi.json",
+      "Swagger UI",
+      "Branding asset proxy"
+    ],
+    "inference": {
+      "model": "Docker Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",
+      "answer": "Four",
+      "finish_reason": "stop",
+      "mode": "CPU",
+      "seconds": 83.25,
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 1,
+        "total_tokens": 24
+      },
+      "model_adapter": "qwen",
+      "enable_thinking": false,
+      "reasoning_chars": 0
+    }
+  },
+  "docker_memory_example": {
+    "first": "OK",
+    "second": "ORBIT",
+    "history_messages": 4,
+    "seconds": 8.125,
+    "stream_done_checked": true
+  },
+  "regressions": {
+    "windows_passed": 27,
+    "linux_passed": 26,
+    "linux_skipped_windows_job_test": 1
+  },
+  "limitations": [
+    "Linux CUDA not tested",
+    "No veterinary answer-quality or full RAG benchmark",
+    "Cold Linux model read through Windows bind mount; timings are not native Linux benchmarks"
+  ]
+}

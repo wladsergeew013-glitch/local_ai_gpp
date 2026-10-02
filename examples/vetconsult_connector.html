@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Local AI — подключение VetConsult</title>
+<style>body{font:16px system-ui;background:#f4f8ff;color:#16324e;margin:40px auto;max-width:900px;padding:20px}label{display:block;margin:18px 0}input,textarea{box-sizing:border-box;width:100%;padding:10px;border:1px solid #a4bfdc;border-radius:5px}button{background:#2169bd;color:white;padding:12px 20px;border:0;border-radius:5px;cursor:pointer;margin-right:10px}pre{background:white;border:1px solid #c2d7ed;padding:20px;white-space:pre-wrap}button:disabled{opacity:.5}</style>
+<h1>Local AI → VetConsult</h1>
+<p>Пример подключения через администраторскую сессию VetConsult. Страница должна быть размещена на доверенном origin интерфейса VetConsult. Использует обычную cookie-сессию; пароль не запрашивает.</p>
+<label>API VetConsult<input id="vet" value="http://127.0.0.1:8000"></label>
+<label>Адрес Local AI<input id="local" value="http://127.0.0.1:8765/v1"></label>
+<label>ID модели<input id="model" value="TinyLlama:tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"></label>
+<label>Тестовый запрос<textarea id="prompt">What is two plus two? Answer briefly.</textarea></label>
+<button id="save">Сохранить коннектор</button><button id="test">Проверить сохранённый коннектор</button>
+<pre id="result" aria-live="polite">Готово к подключению.</pre>
+<script>
+const field = id => document.getElementById(id);
+async function request(path, body) {
+  const response = await fetch(field('vet').value.replace(/\/$/,'') + path, {
+    method:body === undefined ? 'GET':'POST', credentials:'include',
+    headers:body === undefined ? {}:{'Content-Type':'application/json'},
+    body:body === undefined ? undefined:JSON.stringify(body), signal:AbortSignal.timeout(210000)
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(JSON.stringify(data));
+  return data;
+}
+async function run(action) {
+  field('save').disabled = field('test').disabled = true;
+  field('result').textContent = 'Выполняю запрос…';
+  try { field('result').textContent = JSON.stringify(await action(), null, 2); }
+  catch(error) { field('result').textContent = 'Ошибка: ' + error.message; }
+  finally { field('save').disabled = field('test').disabled = false; }
+}
+field('save').onclick = () => run(async () => {
+  const catalog = await request('/llm/connections');
+  const items = Array.isArray(catalog) ? catalog : catalog.items || [];
+  const existing = items.find(item => item.id === 'local-ai-gpp');
+  if (existing) return {ok:true,already_saved:true,item:existing};
+  return request('/llm/connections', {id:'local-ai-gpp',name:'Local AI GPP (CUDA)',provider:'openai_compat',expected_revision:0,
+    config:{base_url:field('local').value,model:field('model').value,api_key:'',temperature:0.2,max_tokens:256,max_context_tokens:2048,timeout_sec:200}});
+});
+field('test').onclick = () => run(() => request('/llm/test', {connection_id:'local-ai-gpp',prompt:field('prompt').value}));
+</script></html>

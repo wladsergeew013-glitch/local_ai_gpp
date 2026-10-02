@@ -1,6 +1,14 @@
-@"
 .git
 .gitignore
+.github
+.local
+.agents
+.codex
+.env
+.env.*
+!.env.example
+assistant_state
+worker_runtime
 **/__pycache__
 **/.pytest_cache
 **/.DS_Store
@@ -13,7 +21,6 @@ logs
 dist
 build
 plugin
-models_storage/**/*.gguf
-models_storage/**/*.bin
-models_storage/**/*.safetensors
-"@ | Set-Content -Encoding UTF8 .dockerignore
+**/*.gguf
+**/*.bin
+**/*.safetensors

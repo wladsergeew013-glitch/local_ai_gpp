@@ -5,14 +5,12 @@ import contextlib
 import inspect
 import os
 import platform
-import queue
 import re
 import subprocess
 import shutil
 import sys
 import threading
 import time
-import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +21,8 @@ from fastapi import HTTPException
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else APP_DIR.parent.parent
-MODELS_DIR = PROJECT_ROOT / "models_storage"
-LOGS_DIR = PROJECT_ROOT / "logs"
+MODELS_DIR = Path(os.getenv("LOCAL_AI_GPP_DATA_DIR", str(PROJECT_ROOT))) / "models_storage"
+LOGS_DIR = Path(os.getenv("LOCAL_AI_GPP_DATA_DIR", str(PROJECT_ROOT))) / "logs"
 BRANDING_DIR = MODELS_DIR / "branding"
 MODELS_FILE = MODELS_DIR / "models.json"
 SETTINGS_FILE = MODELS_DIR / "settings.json"
@@ -35,7 +33,9 @@ BRANDING_DIR.mkdir(parents=True, exist_ok=True)
 
 RUNTIMES: dict[str, dict[str, Any]] = {}
 WORKER_FIRST_EVENT_TIMEOUT_SEC = 30
-WORKER_IDLE_TIMEOUT_SEC = 900
+WORKER_IDLE_TIMEOUT_SEC = 60
+RUNTIME_LOCK = threading.Lock()
+JSON_LOCK = threading.RLock()
 
 
 def _subprocess_no_window_kwargs() -> dict[str, Any]:
@@ -149,6 +149,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "split_mode": "layer",
         "tensor_split": "",
         "temperature": 0.2,
+        "enable_thinking": False,
         "max_tokens": 1024,
         "top_k": 40,
         "top_p": 0.95,
@@ -163,17 +164,22 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "use_mlock": False,
         "verbose_runtime": False,
         "gpu_fallback_to_cpu": True,
-        "warm_policy": "keep_hot",
+        "warm_policy": "unload_after_idle",
         "idle_unload_sec": 1800,
         "preload_on_start": False,
+        "request_timeout_sec": 180,
+        "load_timeout_sec": 120,
+        "worker_idle_timeout_sec": 60,
     },
     "server": {
         "host": "127.0.0.1",
-        "port": 8000,
-        "public_base_url": "http://127.0.0.1:8000",
+        "port": 8765,
+        "public_base_url": "http://127.0.0.1:8765",
         "openai_compat_enabled": True,
         "openai_compat_path": "/v1/chat/completions",
         "cors_origins": [
+            "http://127.0.0.1:5174",
+            "http://localhost:5174",
             "http://127.0.0.1:5173",
             "http://localhost:5173",
             "http://127.0.0.1:8080",
@@ -246,7 +252,14 @@ def read_log_tail(path: Path | str | None, max_lines: int = 160) -> list[str]:
 
 
 def _write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    with JSON_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+        try:
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _read_json(path: Path, fallback: Any) -> Any:
@@ -255,9 +268,8 @@ def _read_json(path: Path, fallback: Any) -> Any:
         return fallback
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        _write_json(path, fallback)
-        return fallback
+    except (OSError, ValueError) as exc:
+        raise HTTPException(503, f"Cannot read {path.name}; original file preserved: {exc}") from exc
 
 
 def merge_dict(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -293,7 +305,6 @@ def load_settings() -> dict[str, Any]:
     raw = _read_json(SETTINGS_FILE, DEFAULT_SETTINGS)
     merged = merge_dict(DEFAULT_SETTINGS, raw if isinstance(raw, dict) else {})
     merged["branding"]["logo_url"] = get_logo_url()
-    _write_json(SETTINGS_FILE, merged)
     return merged
 
 
@@ -316,7 +327,7 @@ def resolve_model_file_path(path_value: Any) -> Path:
     normalized = raw.replace('\\', '/')
     candidates: list[Path] = []
     if normalized.startswith('models_storage/'):
-        candidates.append(PROJECT_ROOT / path_obj)
+        candidates.append(MODELS_DIR.parent / path_obj)
     else:
         candidates.append(MODELS_DIR / path_obj)
         candidates.append(PROJECT_ROOT / path_obj)
@@ -374,7 +385,19 @@ def load_models() -> list[dict[str, Any]]:
 
 
 def save_models(models: list[dict[str, Any]]) -> None:
-    _write_json(MODELS_FILE, models)
+    stored = []
+    for model in models:
+        record = dict(model)
+        path = Path(str(record.get('path') or ''))
+        if path.is_absolute():
+            try:
+                relative = path.resolve().relative_to(MODELS_DIR.resolve())
+                record['path'] = str(Path('models_storage') / relative)
+                record.pop('resolved_path', None)
+            except ValueError:
+                pass
+        stored.append(record)
+    _write_json(MODELS_FILE, stored)
 
 
 def upload_logo_file(file_obj: Any, filename: str) -> str:
@@ -449,19 +472,21 @@ def make_model_record(
 
 def upsert_model(record: dict[str, Any]) -> dict[str, Any]:
     checked = validate_model_record(record)
-    models = [m for m in load_models() if m.get("id") != checked.get("id")]
-    models.insert(0, checked)
-    save_models(models)
+    with JSON_LOCK:
+        models = [m for m in load_models() if m.get("id") != checked.get("id")]
+        models.insert(0, checked)
+        save_models(models)
     return checked
 
 
 def delete_model(model_id: str) -> None:
-    models = load_models()
-    next_models = [m for m in models if m.get("id") != model_id]
-    if len(next_models) == len(models):
-        raise HTTPException(status_code=404, detail="Model not found")
-    save_models(next_models)
-    unload_runtime(model_id)
+    with runtime_operation(), JSON_LOCK:
+        models = load_models()
+        next_models = [m for m in models if m.get("id") != model_id]
+        if len(next_models) == len(models):
+            raise HTTPException(status_code=404, detail="Model not found")
+        _unload_runtime(model_id)
+        save_models(next_models)
 
 
 def find_model(model_id: str) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
@@ -606,23 +631,22 @@ def get_gpu_process_snapshot() -> dict[str, Any]:
 
 def get_runtime_summary(model_id: str) -> dict[str, Any]:
     entry = RUNTIMES.get(model_id) or {}
-    config = entry.get("config") if isinstance(entry.get("config"), dict) else {}
-    n_gpu_layers = _int_value(config.get("n_gpu_layers"), 0)
-    if entry.get("fallback_reason"):
-        mode = "CPU fallback"
-    elif n_gpu_layers == 0:
-        mode = "CPU only"
-    elif n_gpu_layers < 0:
-        mode = "GPU requested: all layers"
-    else:
-        mode = f"GPU requested: {n_gpu_layers} layers"
-    return {
-        "mode": mode,
-        "n_gpu_layers": n_gpu_layers,
-        "fallback_reason": entry.get("fallback_reason", ""),
-        "loaded_at": entry.get("loaded_at"),
-        "last_used_at": entry.get("last_used_at"),
-    }
+    worker = entry.get("runtime")
+    summary = dict(getattr(worker, "runtime", {}))
+    summary.update(getattr(worker, "offload_counts", {}))
+    if worker is not None:
+        # Report observed offload counts, independently of the requested -1 setting.
+        for line in worker.stderr.copy():
+            match = re.search(r"offloaded (\d+)/(\d+) layers to GPU", line)
+            if match:
+                summary.update(gpu_offloaded_layers=int(match[1]), model_layers=int(match[2]))
+                break
+    if summary.get('mode') == 'CUDA' and 'gpu_offloaded_layers' in summary:
+        count, total = summary['gpu_offloaded_layers'], summary['model_layers']
+        summary['mode'] = 'CPU' if count == 0 else ('CPU + CUDA' if count < total else 'CUDA')
+    return {**summary, "mode": summary.get("mode", "loading"),
+            "worker_pid": getattr(getattr(worker, "process", None), "pid", None),
+            "loaded_at": entry.get("loaded_at"), "last_used_at": entry.get("last_used_at")}
 
 
 def source_root() -> Path:
@@ -647,6 +671,7 @@ def external_worker_python() -> str:
         PROJECT_ROOT / "worker_runtime" / "Scripts" / "python.exe",
         source_root() / "backend" / ".venv" / "Scripts" / "python.exe",
         PROJECT_ROOT / "backend" / ".venv" / "Scripts" / "python.exe",
+        Path(sys.executable) if not getattr(sys, 'frozen', False) else None,
     ]
     for candidate in candidates:
         if candidate and candidate.exists():
@@ -655,196 +680,7 @@ def external_worker_python() -> str:
 
 
 def should_use_external_worker() -> bool:
-    return bool(getattr(sys, "frozen", False) and external_worker_python())
-
-
-def worker_payload(
-    *,
-    model: dict[str, Any],
-    runtime_cfg: dict[str, Any],
-    messages: list[dict[str, str]],
-    temperature: float,
-    max_tokens: int,
-    stream: bool,
-) -> dict[str, Any]:
-    return {
-        "model": validate_model_record(model),
-        "runtime": runtime_cfg,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": stream,
-    }
-
-
-def run_worker_completion(payload: dict[str, Any], request_log_path: Path | None = None) -> dict[str, Any]:
-    python = external_worker_python()
-    if not python:
-        raise HTTPException(status_code=500, detail="External llama.cpp worker python не найден")
-    append_request_log(request_log_path, "external_worker_start", {"python": python, "cwd": str(source_root())})
-    with _clean_subprocess_dll_search_path():
-        process = subprocess.Popen(
-            [python, "-m", "backend.app.llama_worker"],
-            cwd=str(source_root()),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_worker_env(request_log_path),
-            **_subprocess_no_window_kwargs(),
-        )
-    stdout_bytes, stderr_bytes = process.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8"), timeout=None)
-    stdout = stdout_bytes.decode("utf-8", "replace") if stdout_bytes else ""
-    stderr = stderr_bytes.decode("utf-8", "replace") if stderr_bytes else ""
-    append_request_log(request_log_path, "external_worker_output", {"returncode": process.returncode, "stdout": stdout, "stderr": stderr})
-    result_payload: dict[str, Any] | None = None
-    runtime_payload: dict[str, Any] = {}
-    error_payload: dict[str, Any] | None = None
-    for line in stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if item.get("type") == "runtime":
-            runtime_payload = item
-        elif item.get("type") == "result":
-            result_payload = item.get("result") if isinstance(item.get("result"), dict) else {}
-        elif item.get("type") == "error":
-            error_payload = item
-    if result_payload is None:
-        message = (error_payload or {}).get("message") or stderr or "External llama.cpp worker не вернул результат"
-        raise HTTPException(status_code=500, detail=f"{message}. Лог выполнения: {request_log_path}")
-    result_payload["_local_ai_gpp"] = {
-        "runtime": {
-            "mode": runtime_payload.get("mode", "external worker"),
-            "n_gpu_layers": payload.get("runtime", {}).get("n_gpu_layers"),
-            "worker_python": python,
-        },
-        "gpu_snapshot_after_generation": get_gpu_process_snapshot(),
-    }
-    return result_payload
-
-
-def stream_worker_completion(payload: dict[str, Any], request_log_path: Path | None = None):
-    python = external_worker_python()
-    if not python:
-        yield {"type": "error", "message": "External llama.cpp worker python не найден"}
-        return
-    append_request_log(
-        request_log_path,
-        "external_worker_stream_start",
-        {"python": python, "cwd": str(source_root()), "gpu_snapshot_before_worker": get_gpu_process_snapshot()},
-    )
-    with _clean_subprocess_dll_search_path():
-        process = subprocess.Popen(
-            [python, "-m", "backend.app.llama_worker"],
-            cwd=str(source_root()),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=1,
-            env=_worker_env(request_log_path),
-            **_subprocess_no_window_kwargs(),
-        )
-    assert process.stdin is not None
-    process.stdin.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-    process.stdin.close()
-
-    output_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
-
-    def read_worker_output() -> None:
-        try:
-            assert process.stdout is not None
-            for raw_line in process.stdout:
-                output_queue.put(("line", raw_line))
-            stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
-            returncode = process.wait()
-            output_queue.put(("end", {"returncode": returncode, "stderr": stderr}))
-        except Exception as exc:
-            output_queue.put(("reader_error", {"message": str(exc), "traceback": traceback.format_exc()}))
-
-    threading.Thread(target=read_worker_output, daemon=True).start()
-
-    started = time.monotonic()
-    last_activity = started
-    seen_events = 0
-    while True:
-        try:
-            kind, data = output_queue.get(timeout=1)
-        except queue.Empty:
-            now = time.monotonic()
-            if seen_events == 0 and now - started > WORKER_FIRST_EVENT_TIMEOUT_SEC:
-                process.kill()
-                try:
-                    process.wait(timeout=5)
-                except Exception:
-                    pass
-                append_request_log(
-                    request_log_path,
-                    "external_worker_first_event_timeout",
-                    {
-                        "timeout_sec": WORKER_FIRST_EVENT_TIMEOUT_SEC,
-                        "returncode": process.poll(),
-                        "gpu_snapshot_after_timeout": get_gpu_process_snapshot(),
-                    },
-                )
-                yield {
-                    "type": "error",
-                    "message": (
-                        "llama.cpp worker не отдал первое событие запуска. "
-                        "Запрос остановлен, чтобы интерфейс не висел бесконечно. "
-                        "Закрой старые экземпляры EXE и попробуй снова; подробности в логе. "
-                        f"Лог выполнения: {request_log_path}"
-                    ),
-                }
-                return
-            if seen_events > 0 and now - last_activity > WORKER_IDLE_TIMEOUT_SEC:
-                process.kill()
-                try:
-                    process.wait(timeout=5)
-                except Exception:
-                    pass
-                append_request_log(
-                    request_log_path,
-                    "external_worker_idle_timeout",
-                    {
-                        "timeout_sec": WORKER_IDLE_TIMEOUT_SEC,
-                        "seen_events": seen_events,
-                        "gpu_snapshot_after_timeout": get_gpu_process_snapshot(),
-                    },
-                )
-                yield {"type": "error", "message": "llama.cpp worker слишком долго не отдавал данные. Запрос остановлен."}
-                return
-            continue
-
-        if kind == "line":
-            seen_events += 1
-            last_activity = time.monotonic()
-            line = data.decode("utf-8", "replace")
-            if not line.strip():
-                continue
-            append_request_log(request_log_path, "external_worker_stream_line", line.strip())
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                yield {"type": "log", "text": line.strip()}
-            continue
-
-        if kind == "reader_error":
-            append_request_log(request_log_path, "external_worker_reader_error", data)
-            yield {"type": "error", "message": data.get("message") or "Ошибка чтения вывода llama.cpp worker"}
-            return
-
-        if kind == "end":
-            append_request_log(
-                request_log_path,
-                "external_worker_stream_end",
-                {**data, "gpu_snapshot_after_worker": get_gpu_process_snapshot()},
-            )
-            if data.get("returncode") and data.get("stderr"):
-                yield {"type": "error", "message": data["stderr"]}
-            return
+    return True
 
 
 def get_external_worker_llama_diagnostics() -> dict[str, Any]:
@@ -855,6 +691,8 @@ def get_external_worker_llama_diagnostics() -> dict[str, Any]:
 import inspect
 import json
 from pathlib import Path
+from backend.app.cuda_runtime import configure_cuda_dlls
+configure_cuda_dlls()
 
 result = {
     "package_installed": False,
@@ -919,6 +757,8 @@ print(json.dumps(result, ensure_ascii=False, default=str))
 
 
 def get_runtime_diagnostics() -> dict[str, Any]:
+    from backend.app.cuda_runtime import configure_cuda_dlls
+    configure_cuda_dlls()
     supported_parameters: list[str] = []
     gpu_related_supported: list[str] = []
     package_installed = False
@@ -1070,406 +910,180 @@ def get_runtime_diagnostics() -> dict[str, Any]:
         "summary": summary,
         "recommendations": recommendations,
         "install_commands": {
-            "cuda": r"tools\06_install_cuda_runtime.bat cu124 0.3.4",
+            "cuda": r"tools\06_install_cuda_runtime.bat cu124 0.3.36",
             "vulkan": r"set CMAKE_ARGS=-DGGML_VULKAN=on && backend\.venv\Scripts\python.exe -m pip install --force-reinstall --no-cache-dir llama-cpp-python",
             "cpu": r"backend\.venv\Scripts\python.exe -m pip install --force-reinstall --no-cache-dir llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu",
         },
     }
 
 
-def get_runtime(
-    model: dict[str, Any],
-    settings: dict[str, Any],
-    request_log_path: Path | None = None,
-    runtime_override: dict[str, Any] | None = None,
-) -> Any:
+@contextlib.contextmanager
+def runtime_operation():
+    if not RUNTIME_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Inference is busy. Retry after the active request finishes.")
+    try:
+        yield
+    finally:
+        RUNTIME_LOCK.release()
+
+
+def _worker_payload(model, cfg, **extra):
+    return {"model": validate_model_record(model), "runtime": cfg, **extra}
+
+
+def _worker_events(worker, payload, *, loading=False):
+    cfg = payload.get("runtime") or {}
+    timeout = max(1, _int_value(cfg.get("load_timeout_sec" if loading else "request_timeout_sec"), 120 if loading else 180))
+    idle = max(1, _int_value(cfg.get("worker_idle_timeout_sec"), WORKER_IDLE_TIMEOUT_SEC))
+    yield from worker.events(payload, timeout=timeout, idle_timeout=idle)
+
+
+def _get_runtime(model, settings, request_log_path=None, runtime_override=None, prewarm=True):
+    from backend.app.worker_client import WorkerClient
+    from backend.app.llama_worker import build_llama_kwargs
+    model = validate_model_record(model)
+    if model.get("type") != "LLM" or not model.get("file_exists"):
+        raise HTTPException(400, model.get("validation_error") or "A local GGUF LLM is required.")
+    cfg = _merge_runtime(model, settings, runtime_override)
+    payload = _worker_payload(model, cfg, operation="load")
+    load_config = build_llama_kwargs(payload)
     model_id = model["id"]
-    runtime_cfg = _merge_runtime(model, settings, runtime_override)
-    cached = RUNTIMES.get(model_id)
-    if cached is not None:
-        if cached.get("config") != runtime_cfg:
-            append_request_log(request_log_path, "runtime_config_changed_reloading", {"old": cached.get("config"), "new": runtime_cfg})
-            unload_runtime(model_id)
-        else:
-            cached["state"] = "hot"
-            cached["last_used_at"] = now_iso()
-            cached["last_used_ts"] = time.time()
-            append_request_log(request_log_path, "runtime_cache_hit", get_runtime_summary(model_id))
-            return cached["runtime"]
-    if model.get("type") != "LLM":
-        raise HTTPException(status_code=400, detail="Полноценный runtime поддержан только для LLM")
+    entry = RUNTIMES.get(model_id)
+    if entry and (entry["load_config"] != load_config or entry["runtime"].process.poll() is not None):
+        _unload_runtime(model_id)
+        entry = None
+    if entry:
+        entry.update(config=cfg, policy=cfg.get("warm_policy", "unload_after_idle"))
+        append_request_log(request_log_path, "runtime_cache_hit", get_runtime_summary(model_id))
+        return entry["runtime"]
+    # One loaded model keeps bounded RAM/VRAM even when dialogs choose different models.
+    for other_id in list(RUNTIMES):
+        _unload_runtime(other_id)
+    python = external_worker_python() or ("" if getattr(sys, "frozen", False) else sys.executable)
+    if not python:
+        raise HTTPException(503, "Packaged worker_runtime/python.exe is missing.")
+    with _clean_subprocess_dll_search_path():
+        worker = WorkerClient([python, "-m", "backend.app.llama_worker", "--serve"],
+                              cwd=str(source_root()), env=_worker_env(request_log_path),
+                              **_subprocess_no_window_kwargs())
+    stamp = now_iso()
+    entry = {"runtime": worker, "state": "loading", "model_name": model.get("name"),
+             "loaded_at": stamp, "last_used_at": stamp, "last_used_ts": time.time(),
+             "config": cfg, "load_config": load_config, "policy": cfg.get("warm_policy", "unload_after_idle")}
+    RUNTIMES[model_id] = entry
+    if not prewarm:
+        return worker
     try:
-        from llama_cpp import Llama
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="llama-cpp-python не установлен") from exc
-    model_path = Path(model["path"])
-    if not model_path.exists():
-        raise HTTPException(status_code=400, detail=f"Файл модели не найден: {model_path}")
-    llama_kwargs: dict[str, Any] = {
-        "model_path": str(model_path),
-        "n_ctx": _int_value(runtime_cfg.get("n_ctx"), 4096),
-        "n_batch": _int_value(runtime_cfg.get("n_batch"), 512),
-        "n_threads": _int_value(runtime_cfg.get("n_threads"), max(1, os.cpu_count() or 4)),
-        "n_threads_batch": _int_value(runtime_cfg.get("n_threads_batch"), 0),
-        "n_gpu_layers": _int_value(runtime_cfg.get("n_gpu_layers"), 0),
-        "main_gpu": _int_value(runtime_cfg.get("main_gpu"), 0),
-        "split_mode": _split_mode(runtime_cfg.get("split_mode")),
-        "offload_kqv": bool(runtime_cfg.get("offload_kqv", True)),
-        "flash_attn": bool(runtime_cfg.get("flash_attn", False)),
-        "op_offload": bool(runtime_cfg.get("op_offload", True)),
-        "swa_full": bool(runtime_cfg.get("swa_full", False)),
-        "use_mmap": bool(runtime_cfg.get("use_mmap", True)),
-        "use_mlock": bool(runtime_cfg.get("use_mlock", False)),
-        "verbose": bool(runtime_cfg.get("verbose_runtime", False)),
-        "seed": _int_value(runtime_cfg.get("seed"), -1),
-    }
-    tensor_split = _tensor_split(runtime_cfg.get("tensor_split"))
-    if tensor_split:
-        llama_kwargs["tensor_split"] = tensor_split
-    fallback_reason = ""
-    append_request_log(
-        request_log_path,
-        "runtime_load_primary_attempt",
-        {
-            "model": validate_model_record(model),
-            "runtime_config": runtime_cfg,
-            "llama_kwargs": _filter_supported_kwargs(Llama, llama_kwargs),
-            "gpu_snapshot_before_load": get_gpu_process_snapshot(),
-        },
-    )
-    try:
-        runtime = Llama(**_filter_supported_kwargs(Llama, llama_kwargs))
-    except Exception as exc:
-        append_request_log(
-            request_log_path,
-            "runtime_load_primary_failed",
-            {
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-                "gpu_snapshot_after_failure": get_gpu_process_snapshot(),
-            },
-        )
-        if bool(runtime_cfg.get("gpu_fallback_to_cpu", True)):
-            fallback_kwargs: dict[str, Any] = {
-                "model_path": str(model_path),
-                "n_ctx": _int_value(runtime_cfg.get("n_ctx"), 4096),
-                "n_batch": min(_int_value(runtime_cfg.get("n_batch"), 512), 256),
-                "n_threads": _int_value(runtime_cfg.get("n_threads"), max(1, os.cpu_count() or 4)),
-                "n_threads_batch": 0,
-                "n_gpu_layers": 0,
-                "use_mmap": False,
-                "use_mlock": False,
-                "verbose": bool(runtime_cfg.get("verbose_runtime", False)),
-            }
-            append_request_log(
-                request_log_path,
-                "runtime_load_cpu_fallback_attempt",
-                {"llama_kwargs": _filter_supported_kwargs(Llama, fallback_kwargs)},
-            )
-            try:
-                runtime = Llama(**_filter_supported_kwargs(Llama, fallback_kwargs))
-                fallback_reason = str(exc)
-                runtime_cfg = merge_dict(runtime_cfg, {"n_gpu_layers": 0, "_fallback_reason": fallback_reason})
-                append_request_log(
-                    request_log_path,
-                    "runtime_load_cpu_fallback_success",
-                    {"reason": fallback_reason, "gpu_snapshot_after_load": get_gpu_process_snapshot()},
-                )
-            except Exception as fallback_exc:
-                append_request_log(
-                    request_log_path,
-                    "runtime_load_cpu_fallback_failed",
-                    {
-                        "primary_error": str(exc),
-                        "fallback_error": str(fallback_exc),
-                        "traceback": traceback.format_exc(),
-                        "gpu_snapshot_after_fallback_failure": get_gpu_process_snapshot(),
-                    },
-                )
-                log_hint = f" Лог выполнения: {request_log_path}" if request_log_path else ""
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        f"Не удалось загрузить модель в llama.cpp: {exc}. "
-                        f"CPU fallback тоже не поднялся: {fallback_exc}. "
-                        "Если менял GPU-настройки, проверь диагностику runtime, выгрузи модель и попробуй CPU preset."
-                        f"{log_hint}"
-                    ),
-                ) from exc
-        else:
-            log_hint = f" Лог выполнения: {request_log_path}" if request_log_path else ""
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    f"Не удалось загрузить модель в llama.cpp: {exc}. "
-                    "Если менял GPU-настройки, проверь диагностику runtime, выгрузи модель и попробуй CPU/Hybrid/GPU preset."
-                    f"{log_hint}"
-                ),
-            ) from exc
-    loaded_at = now_iso()
-    RUNTIMES[model_id] = {
-        "runtime": runtime,
-        "state": "hot",
-        "model_name": model.get("name") or model_id,
-        "loaded_at": loaded_at,
-        "last_used_at": loaded_at,
-        "last_used_ts": time.time(),
-        "config": runtime_cfg,
-        "policy": runtime_cfg.get("warm_policy", "keep_hot"),
-        "fallback_reason": fallback_reason,
-    }
-    append_request_log(
-        request_log_path,
-        "runtime_load_success",
-        {
-            "runtime": get_runtime_summary(model_id),
-            "gpu_snapshot_after_load": get_gpu_process_snapshot(),
-        },
-    )
-    return runtime
+        for event in _worker_events(worker, payload, loading=True):
+            if event.get("type") == "error":
+                raise HTTPException(event.get("status_code", 500), event.get("message"))
+            if event.get("type") == "ready":
+                entry.update(state="hot", fallback_reason=worker.runtime.get("fallback_reason", ""))
+                append_request_log(request_log_path, "runtime_load_success", worker.runtime)
+                return worker
+        raise HTTPException(502, "Worker did not confirm model loading.")
+    except BaseException:
+        _unload_runtime(model_id)
+        raise
+
+def get_runtime(model, settings, request_log_path=None, runtime_override=None):
+    with runtime_operation():
+        return _get_runtime(model, settings, request_log_path, runtime_override)
 
 
-def create_chat_completion(
-    *,
-    model_id: str,
-    messages: list[dict[str, str]],
-    temperature: float,
-    max_tokens: int,
-    request_log_path: Path | None = None,
-    runtime_override: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    _, model, _ = find_model(model_id)
-    if str(model.get("path", "")).startswith("HUB::"):
-        raise HTTPException(status_code=400, detail="Модель из хаба еще не локализирована. Импортируй ее в движок.")
-    settings = load_settings()
-    runtime_cfg = _merge_runtime(model, settings, runtime_override)
-    append_request_log(
-        request_log_path,
-        "chat_completion_start",
-        {
-            "model": validate_model_record(model),
-            "runtime_config": runtime_cfg,
-            "message_count": len(messages),
-            "messages": [
-                {"role": item.get("role"), "content": str(item.get("content") or "")[:4000]}
-                for item in messages
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        },
-    )
-    if should_use_external_worker():
-        return run_worker_completion(
-            worker_payload(
-                model=model,
-                runtime_cfg=runtime_cfg,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=False,
-            ),
-            request_log_path=request_log_path,
-        )
-    runtime = get_runtime(model, settings, request_log_path=request_log_path, runtime_override=runtime_override)
-    chat_kwargs: dict[str, Any] = {
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_k": _int_value(runtime_cfg.get("top_k"), 40),
-        "top_p": _float_value(runtime_cfg.get("top_p"), 0.95),
-        "min_p": _float_value(runtime_cfg.get("min_p"), 0.05),
-        "repeat_penalty": _float_value(runtime_cfg.get("repeat_penalty"), 1.1),
-        "seed": _int_value(runtime_cfg.get("seed"), -1),
-    }
-    try:
-        started = time.perf_counter()
-        result = runtime.create_chat_completion(**_filter_supported_kwargs(runtime.create_chat_completion, chat_kwargs))
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        runtime_summary = get_runtime_summary(model_id)
-        result["_local_ai_gpp"] = {
-            "runtime": runtime_summary,
-            "generation_elapsed_ms": elapsed_ms,
-            "gpu_snapshot_after_generation": get_gpu_process_snapshot(),
-        }
-        append_request_log(
-            request_log_path,
-            "chat_completion_success",
-            {
-                "runtime": runtime_summary,
-                "usage": result.get("usage", {}),
-                "finish_reason": ((result.get("choices") or [{}])[0] or {}).get("finish_reason"),
-                "generation_elapsed_ms": elapsed_ms,
-                "gpu_snapshot_after_generation": result["_local_ai_gpp"]["gpu_snapshot_after_generation"],
-            },
-        )
-        return result
-    except Exception as exc:
-        append_request_log(
-            request_log_path,
-            "chat_completion_failed",
-            {"error": str(exc), "traceback": traceback.format_exc(), "gpu_snapshot_after_error": get_gpu_process_snapshot()},
-        )
-        raise HTTPException(status_code=500, detail=f"Ошибка генерации llama.cpp: {exc}") from exc
-
-
-def stream_chat_completion(
-    *,
-    model_id: str,
-    messages: list[dict[str, str]],
-    temperature: float,
-    max_tokens: int,
-    request_log_path: Path | None = None,
-    runtime_override: dict[str, Any] | None = None,
-):
-    _, model, _ = find_model(model_id)
-    if str(model.get("path", "")).startswith("HUB::"):
-        yield {"type": "error", "message": "Модель из хаба еще не локализирована. Импортируй ее в движок."}
-        return
-    settings = load_settings()
-    runtime_cfg = _merge_runtime(model, settings, runtime_override)
-    append_request_log(
-        request_log_path,
-        "stream_chat_start",
-        {
-            "model": validate_model_record(model),
-            "runtime_config": runtime_cfg,
-            "message_count": len(messages),
-            "messages": [
-                {"role": item.get("role"), "content": str(item.get("content") or "")[:4000]}
-                for item in messages
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "external_worker": should_use_external_worker(),
-        },
-    )
-    if should_use_external_worker():
-        yield from stream_worker_completion(
-            worker_payload(
-                model=model,
-                runtime_cfg=runtime_cfg,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-            ),
-            request_log_path=request_log_path,
-        )
-        return
-
-    try:
-        runtime = get_runtime(model, settings, request_log_path=request_log_path, runtime_override=runtime_override)
-        runtime_summary = get_runtime_summary(model_id)
-        yield {"type": "runtime", "mode": runtime_summary.get("mode"), "runtime": runtime_summary}
-        chat_kwargs: dict[str, Any] = {
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_k": _int_value(runtime_cfg.get("top_k"), 40),
-            "top_p": _float_value(runtime_cfg.get("top_p"), 0.95),
-            "min_p": _float_value(runtime_cfg.get("min_p"), 0.05),
-            "repeat_penalty": _float_value(runtime_cfg.get("repeat_penalty"), 1.1),
-            "seed": _int_value(runtime_cfg.get("seed"), -1),
-            "stream": True,
-        }
-        full_text = ""
-        finish_reason = None
-        started = time.perf_counter()
-        for chunk in runtime.create_chat_completion(**_filter_supported_kwargs(runtime.create_chat_completion, chat_kwargs)):
-            choice = (chunk.get("choices") or [{}])[0]
-            finish_reason = choice.get("finish_reason") or finish_reason
-            delta = choice.get("delta") or {}
-            text = str(delta.get("content") or "")
-            if text:
-                full_text += text
-                yield {"type": "delta", "text": text}
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        append_request_log(
-            request_log_path,
-            "stream_chat_success",
-            {
-                "finish_reason": finish_reason,
-                "elapsed_ms": elapsed_ms,
-                "content_chars": len(full_text),
-                "runtime": runtime_summary,
-                "gpu_snapshot_after_generation": get_gpu_process_snapshot(),
-            },
-        )
-        yield {"type": "done", "content": full_text, "finish_reason": finish_reason, "elapsed_ms": elapsed_ms, "usage": {}, "runtime": runtime_summary}
-    except Exception as exc:
-        append_request_log(
-            request_log_path,
-            "stream_chat_failed",
-            {"error": str(exc), "traceback": traceback.format_exc(), "gpu_snapshot_after_error": get_gpu_process_snapshot()},
-        )
-        yield {"type": "error", "message": str(exc)}
-
-
-def prewarm_runtime(model_id: str, runtime_override: dict[str, Any] | None = None) -> dict[str, Any]:
-    models, model, idx = find_model(model_id)
-    settings = load_settings()
-    request_id, log_path = create_request_log(model_id, "prewarm")
-    if model.get("type") == "LLM" and not str(model.get("path", "")).startswith("HUB::"):
+def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
+                       request_log_path=None, runtime_override=None, truncate_history=False):
+    with runtime_operation():
+        _, model, _ = find_model(model_id)
+        settings = load_settings()
+        cfg = _merge_runtime(model, settings, runtime_override)
+        worker = _get_runtime(model, settings, request_log_path, runtime_override, prewarm=False)
+        entry = RUNTIMES[model_id]
+        entry.update(state="generating", last_used_at=now_iso(), last_used_ts=time.time())
+        append_request_log(request_log_path, "generation_start", {"message_count": len(messages), "worker_pid": worker.process.pid})
+        events = _worker_events(worker, _worker_payload(model, cfg, messages=messages, temperature=temperature,
+                                max_tokens=max_tokens, stream=stream, truncate_history=truncate_history))
         try:
-            get_runtime(model, settings, request_log_path=log_path, runtime_override=runtime_override)
-        except HTTPException as exc:
-            append_request_log(log_path, "prewarm_failed", {"error": exc.detail, "request_id": request_id})
-            detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
-            raise HTTPException(status_code=exc.status_code, detail=f"{detail} Лог выполнения: {log_path}") from exc
-    model["status"] = "warm"
-    model["started_at"] = now_iso()
-    model["last_log_path"] = str(log_path)
-    models[idx] = model
-    save_models(models)
-    append_request_log(log_path, "prewarm_success", {"request_id": request_id, "model_id": model_id})
-    return model
+            for event in events:
+                if event.get("type") == "error":
+                    raise HTTPException(event.get("status_code", 500), event.get("message") or "Inference failed.")
+                if event.get("type") in {"done", "result"}:
+                    append_request_log(request_log_path, "generation_complete", {"type": event["type"], "worker_pid": worker.process.pid})
+                yield event
+        finally:
+            events.close()
+            entry.update(state="hot", last_used_at=now_iso(), last_used_ts=time.time())
+            if worker.process.poll() is not None:
+                RUNTIMES.pop(model_id, None)
 
 
-def unload_runtime(model_id: str) -> bool:
+def create_chat_completion(*, model_id, messages, temperature, max_tokens, request_log_path=None,
+                           runtime_override=None, truncate_history=False):
+    for event in _completion_events(model_id=model_id, messages=messages, temperature=temperature,
+                                   max_tokens=max_tokens, stream=False, request_log_path=request_log_path,
+                                   runtime_override=runtime_override, truncate_history=truncate_history):
+        if event.get("type") == "result":
+            return event["result"]
+    raise HTTPException(502, "Worker did not return a completion.")
+
+
+def stream_chat_completion(**kwargs):
+    try:
+        yield from _completion_events(stream=True, **kwargs)
+    except HTTPException as exc:
+        yield {"type": "error", "status_code": exc.status_code, "message": str(exc.detail)}
+    except Exception as exc:
+        yield {"type": "error", "status_code": 500, "message": str(exc)}
+
+
+def prewarm_runtime(model_id, runtime_override=None):
+    with runtime_operation():
+        models, model, idx = find_model(model_id)
+        request_id, log_path = create_request_log(model_id, "prewarm")
+        _get_runtime(model, load_settings(), log_path, runtime_override)
+        model.update(status="warm", started_at=now_iso(), last_log_path=str(log_path))
+        models[idx] = model
+        save_models(models)
+        return model
+
+
+def _unload_runtime(model_id):
     entry = RUNTIMES.pop(model_id, None)
     if not entry:
         return False
-    runtime = entry.get("runtime")
-    close = getattr(runtime, "close", None)
-    if callable(close):
-        close()
+    entry["runtime"].close()
     return True
 
 
-def get_runtime_status() -> list[dict[str, Any]]:
+def unload_runtime(model_id):
+    with runtime_operation():
+        return _unload_runtime(model_id)
+
+
+def get_runtime_status():
     now_ts = time.time()
-    models_by_id = {str(item.get("id")): item for item in load_models()}
-    rows: list[dict[str, Any]] = []
-    for model_id, entry in RUNTIMES.items():
-        model = models_by_id.get(model_id, {})
-        last_used_ts = float(entry.get("last_used_ts") or now_ts)
-        rows.append(
-            {
-                "model_id": model_id,
-                "model_name": entry.get("model_name") or model.get("name") or model_id,
-                "state": entry.get("state", "hot"),
-                "loaded_at": entry.get("loaded_at"),
-                "last_used_at": entry.get("last_used_at"),
-                "idle_seconds": max(0, int(now_ts - last_used_ts)),
-                "policy": entry.get("policy", "keep_hot"),
-                "runtime_mode": get_runtime_summary(model_id).get("mode"),
-                "fallback_reason": entry.get("fallback_reason", ""),
-            }
-        )
-    return rows
+    return [{"model_id": model_id, "model_name": entry.get("model_name"),
+             "state": entry.get("state", "hot"), "loaded_at": entry.get("loaded_at"),
+             "last_used_at": entry.get("last_used_at"),
+             "idle_seconds": max(0, int(now_ts-entry.get("last_used_ts", now_ts))),
+             "policy": entry.get("policy"), **get_runtime_summary(model_id),
+             "runtime_mode": get_runtime_summary(model_id)["mode"]}
+            for model_id, entry in list(RUNTIMES.items())]
 
 
-def enforce_idle_runtime_policy() -> None:
-    settings = load_settings()
-    runtime_settings = settings.get("runtime", {})
-    if runtime_settings.get("warm_policy") != "unload_after_idle":
+def enforce_idle_runtime_policy():
+    if not RUNTIME_LOCK.acquire(blocking=False):
         return
-    idle_limit = int(runtime_settings.get("idle_unload_sec", 1800) or 1800)
-    now_ts = time.time()
-    for model_id, entry in list(RUNTIMES.items()):
-        last_used_ts = float(entry.get("last_used_ts") or now_ts)
-        if now_ts - last_used_ts >= idle_limit:
-            unload_runtime(model_id)
+    try:
+        for model_id, entry in list(RUNTIMES.items()):
+            cfg = entry["config"]
+            if entry["runtime"].process.poll() is not None or (
+                cfg.get("warm_policy") == "unload_after_idle" and
+                time.time()-entry.get("last_used_ts", time.time()) >= int(cfg.get("idle_unload_sec", 1800))
+            ):
+                _unload_runtime(model_id)
+    finally:
+        RUNTIME_LOCK.release()
 
 
 async def fetch_hub_models(settings: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1561,11 +1175,8 @@ async def import_from_hub(payload: dict[str, Any], settings: dict[str, Any]) -> 
 # Runtime registry helpers
 # -----------------------------------------------------------------------------
 def unload_all_runtimes() -> int:
-    count = 0
-    for model_id in list(RUNTIMES.keys()):
-        try:
-            if unload_runtime(model_id):
-                count += 1
-        except Exception:
-            RUNTIMES.pop(model_id, None)
-    return count
+    with runtime_operation():
+        ids = list(RUNTIMES)
+        for model_id in ids:
+            _unload_runtime(model_id)
+        return len(ids)

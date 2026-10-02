@@ -1,212 +1,177 @@
-# Local AI GPP
+<div align="center">
+  <img src="models_storage/branding/icons/mini_agent_head_v2.png" width="108" alt="Local AI GPP">
+  <h1>Local AI GPP</h1>
+  <p><strong>Ваш мини-помощник. Ваши модели. Локальный inference.</strong></p>
+  <p>
+    <a href="https://github.com/wladsergeew013-glitch/local_ai_gpp/actions/workflows/ci.yml"><img src="https://github.com/wladsergeew013-glitch/local_ai_gpp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
+    <img src="https://img.shields.io/badge/Windows-EXE-0078D4" alt="Windows EXE">
+    <img src="https://img.shields.io/badge/Linux-Docker-2496ED?logo=docker&logoColor=white" alt="Linux Docker">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT"></a>
+  </p>
+  <p><a href="docs/API.md">API</a> · <a href="docs/DOCKER.md">Docker</a> · <a href="examples/client.py">Пример приложения</a> · <a href="docs/VALIDATION.md">Результаты проверок</a></p>
+</div>
 
-Текущая версия приложения: **1.3.0**. История изменений — в [CHANGELOG.md](CHANGELOG.md).
+Local AI запускает GGUF-модели на вашем компьютере и предоставляет OpenAI-compatible API другим приложениям. Основной интерфейс — Windows EXE с мини-помощником и общей историей. В браузере — компактный сине-белый чат с отдельными диалогами.
 
-При выпуске новой версии обновите `VERSION` и номера в `frontend/package.json` и `frontend/package-lock.json`, соберите EXE и создайте Git-тег `vMAJOR.MINOR.PATCH`. Фронтенд, API и свойства EXE берут номер из `VERSION`.
+![Чат Local AI: Qwen4B, CUDA и продолжение диалога](docs/images/chat.png)
 
-**Local AI GPP** — локальный корпоративный AI-хаб для запуска LLM-моделей и управления моделями в закрытом контуре предприятия. Проект ориентирован на работу без внешних облачных API: модели, настройки, история диалогов и runtime находятся внутри локального окружения или portable-поставки.
+## Возможности
 
-![Архитектура Local AI GPP](docs/images/local_ai_gpp_architecture.svg)
+- **Мини-помощник:** скрываемый список диалогов, создание и выбор беседы, дата и время сообщений, иконка в трее.
+- **Чат с памятью:** отдельная история каждой беседы, поток ответа, переключатель памяти, сохранение ручной прокрутки.
+- **Три режима Windows:** CPU, CPU + CUDA, CUDA. Диагностика показывает фактическое число слоёв на GPU и причину fallback.
+- **Qwen без длинных рассуждений:** адаптер использует штатный переключатель GGUF-шаблона; рассуждения отключены по умолчанию и включаются в настройках или API.
+- **Стабильный runtime:** отдельный постоянный worker, ограниченные timeout, отмена генерации и восстановление после ошибки.
+- **Подключение приложений:** `/v1/models`, `/v1/chat/completions`, стандартный SSE, история с `memory=true/false`.
+- **Linux:** Docker Compose с CPU runtime, healthcheck, постоянным хранилищем и read-only подключением папки GGUF.
 
-## Что умеет
+## Быстрый старт · Windows
 
-- запуск локальных LLM-моделей в формате **GGUF** через `llama-cpp-python`;
-- основной чат с потоковой генерацией ответа;
-- OpenAI-compatible endpoint: `./v1/chat/completions`;
-- нативный мини-помощник рядом с основным интерфейсом;
-- единая история диалогов между основным чатом и мини-помощником;
-- несколько диалогов с переключением и очисткой активного диалога;
-- portable-сборка для переноса на другой компьютер;
-- хранение моделей, настроек, логов и branding-ресурсов внутри проекта/поставки;
-- проверочные bat-скрипты для сборки, smoke-test и диагностики portable-пакета.
+Нужны Python 3.12 и Node.js 22. Для CUDA нужна NVIDIA GPU с достаточной свободной видеопамятью.
 
-## Интерфейс
+```powershell
+git clone https://github.com/wladsergeew013-glitch/local_ai_gpp.git
+cd local_ai_gpp
+py -3.12 -m venv backend/.venv
+backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
+cd frontend
+npm ci
+npm run build
+cd ..
+powershell -ExecutionPolicy Bypass -File tools/run_local.ps1
+```
 
-Мини-помощник работает как нативное окно desktop-версии и синхронизируется с основным чатом через общий desktop sync store.
+Откройте **http://127.0.0.1:8765**, подключите `.gguf` по пути или загрузите файлом. Можно использовать файл из папки LM Studio: копировать модель для локальной регистрации не требуется. Схема API: **http://127.0.0.1:8765/docs**.
 
-![Мини-помощник](docs/images/mini_assistant.png)
+Для CUDA установите runtime и выберите режим в настройках:
 
-## Основная структура проекта
+```bat
+tools\06_install_cuda_runtime.bat cu124 0.3.36
+```
+
+### Собрать EXE
+
+```powershell
+py -3.12 tools/02_build_exe.py --cuda cu124
+# CPU-поставка:
+py -3.12 tools/02_build_exe.py --cpu
+```
+
+Запускайте `dist/LocalAIGPP.exe`. Переносите **всю папку dist**, включая `worker_runtime`, `backend`, `models_storage` и файлы моделей. Проверка поставки: `dist/CHECK_DIST_HEALTH.bat`. Для упаковки: `tools/29_make_portable_package.bat`.
+
+EXE поднимает API сам. При занятом порте используйте уже запущенный экземпляр или закройте его штатно через меню трея.
+
+## Быстрый старт · Linux / Docker
+
+Нужен Docker Engine с Compose v2. Образ содержит CPU runtime; файлы моделей подключаются отдельно.
+
+```bash
+git clone https://github.com/wladsergeew013-glitch/local_ai_gpp.git
+cd local_ai_gpp
+export LOCAL_AI_MODELS_DIR=/absolute/path/to/gguf-folder
+docker compose up -d --build --wait
+```
+
+| Адрес | Назначение |
+|---|---|
+| http://127.0.0.1:8080 | Веб-чат и API через Nginx |
+| http://127.0.0.1:8080/v1 | Base URL для приложений |
+| http://127.0.0.1:18765/docs | API напрямую / Swagger |
+
+В настройках чата укажите путь **внутри контейнера**, например `/models/Qwen3.5-4B-Q4_K_M.gguf`, и выберите CPU. История браузера остаётся в браузере; реестр, настройки и логи сервера — в Docker volume. [Порты, хранение и проверка inference →](docs/DOCKER.md)
+
+## Подключить своё приложение
+
+Сначала получите точный ID зарегистрированной модели:
+
+```bash
+curl http://127.0.0.1:8765/v1/models
+```
+
+Отправьте вопрос:
+
+```bash
+curl http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf","messages":[{"role":"user","content":"Привет! Ответь кратко."}],"max_tokens":512,"memory":true,"stream":false}'
+```
+
+Для Docker замените адрес на `http://127.0.0.1:8080`. ID берётся из `/v1/models`, имя файла в примере — для нашей проверочной модели. В PowerShell используйте `curl.exe` или готовый Python-клиент.
+
+### Python · приложение с памятью
+
+[examples/client.py](examples/client.py) использует только стандартную библиотеку Python. Он получает список моделей, поддерживает SSE, хранит историю и сообщает о незавершённом ответе.
+
+```python
+from examples.client import LocalAI
+
+ai = LocalAI(base_url="http://127.0.0.1:8765/v1", memory=True)
+print(ai.ask("Запомни: мой проект называется ORBIT."))
+print(ai.ask("Как называется мой проект?"))
+
+# Отдельный диалог — отдельный экземпляр клиента:
+other = LocalAI(memory=False)
+print(other.ask("Сколько будет два плюс два?"))
+```
+
+```bash
+python examples/client.py --stream
+python examples/client.py --no-memory --prompt "Привет!"
+python examples/client.py --base-url http://127.0.0.1:8080/v1 --max-tokens 512
+```
+
+API не хранит беседы: для продолжения передавайте предыдущие `messages`; `memory=false` исключает историю. При включённых рассуждениях Qwen в историю следует включать только финальный ответ — пример клиента это делает.
+
+### VetConsult
+
+Провайдер: **openai_compat**. Base URL: **http://127.0.0.1:8765/v1**. Model: точный ID из `/v1/models`. Для Docker — **http://127.0.0.1:8080/v1**.
+
+[Пример подключения](examples/vetconsult_connection.json) · [Страница настройки через обычную сессию VetConsult](examples/vetconsult_connector.html) · [Проверка штатного клиента](tools/check_vetconsult_client.py).
+
+Подключение сохранено и проверено через штатный `/llm/test`; отдельно проверен настоящий OpenAI-compatible клиент VetConsult с Qwen4B. Проверка связи не является оценкой качества ветеринарных ответов или полноценного RAG-прохода.
+
+## Режимы и настройки
+
+| Настройка | Что делает |
+|---|---|
+| `n_gpu_layers=0` | CPU; KV и operation offload отключены |
+| `n_gpu_layers=16` | 16 слоёв на GPU, остальные на CPU |
+| `n_gpu_layers=-1` | Все поддерживаемые слои на GPU |
+| `gpu_fallback_to_cpu=false` | Ошибка при недоступном GPU вместо перехода на CPU |
+| `enable_thinking=false` | Qwen отвечает напрямую, если её GGUF-шаблон поддерживает переключатель |
+| `warm_policy` | Держать модель в памяти / выгружать после простоя / вручную |
+
+`GET /api/runtime/status` показывает PID worker, фактическое размещение слоёв, адаптер и режим рассуждений. Настройки генерации меняются без повторной загрузки модели. GPU-режим всё равно использует CPU для служебных операций приложения.
+
+Реализован текстовый chat completions. Изображения, embeddings, tools/function calling и Responses API пока не реализованы. Обычный Docker-образ использует CPU; Linux CUDA не проверена. API по умолчанию доступен через loopback; ключ защищает `/v1/*`, служебные `/api/*` предназначены для локального приложения.
+
+## Проверки
+
+```powershell
+backend/.venv/Scripts/python.exe -m unittest discover -s tests -v
+backend/.venv/Scripts/python.exe tools/check_native_dialogs.py
+backend/.venv/Scripts/python.exe tools/check_inference_modes.py --model-name "Qwen3.5 4B" --model-path "dist/models_storage/Qwen3.5_4B/Qwen3.5-4B-Q4_K_M.gguf"
+```
+
+```bash
+python tools/check_docker.py --base-url http://127.0.0.1:8080
+python tools/check_docker.py --model-path /models/Qwen3.5-4B-Q4_K_M.gguf
+```
+
+CI проверяет runtime на Windows/Linux и сборку Docker с веб-интерфейсом/API. GGUF не скачивается в CI; inference на Qwen4B проверяется отдельно локально. [Методика, результаты и границы проверки](docs/VALIDATION.md).
+
+## Устройство проекта
 
 ```text
-local_ai_gpp_2/
-├─ backend/                 # FastAPI backend, runtime, llama worker
-├─ frontend/                # React/Vite интерфейс
-├─ models_storage/          # настройки, реестр моделей, branding, локальные модели
-├─ tools/                   # bat/py скрипты запуска, сборки и проверок
-├─ docs/                    # документация и изображения
-├─ docker-compose.yml       # docker-запуск backend + frontend
-└─ README.md
+backend/app/       FastAPI, изолированный worker, адаптеры моделей
+frontend/          React + TypeScript + Vite, компактный чат
+models_storage/    Реестр, настройки и ресурсы оформления
+examples/          Клиент Python и подключение VetConsult
+tools/             Запуск, сборка EXE, диагностика и проверки
+tests/             Регрессии без GGUF и GPU
+docs/              API, Docker, результаты проверок и изображения
 ```
 
-## Быстрый запуск в режиме разработки
-
-```bat
-tools\01_run_local_browser.bat
-```
-
-Запускаются:
-
-```text
-Backend:  http://127.0.0.1:8000
-Frontend: http://127.0.0.1:5173
-```
-
-Для полной переустановки окружения:
-
-```bat
-tools\01_run_local_browser.bat --setup
-```
-
-Для освобождения стандартных портов перед запуском:
-
-```bat
-tools\01_run_local_browser.bat --reset-ports
-```
-
-## Сборка desktop EXE
-
-CPU-сборка:
-
-```bat
-tools\02_build_exe.bat --cpu
-```
-
-CUDA-сборка, если подготовлен совместимый CUDA runtime/wheel:
-
-```bat
-tools\02_build_exe.bat --cuda cu124
-```
-
-После сборки результат находится в:
-
-```text
-dist\LocalAIGPP.exe
-```
-
-Но для LLM-приложения важен не один EXE, а вся portable-папка `dist`.
-
-## Portable-поставка
-
-![Структура portable dist](docs/images/portable_dist_structure.svg)
-
-В portable-поставку входят:
-
-```text
-dist/
-├─ LocalAIGPP.exe
-├─ worker_runtime/
-├─ backend/
-├─ models_storage/
-├─ CHECK_DIST_HEALTH.bat
-├─ RUN_LocalAIGPP.bat
-└─ README_PORTABLE_DIST.txt
-```
-
-Для проверки portable-структуры на машине сборки:
-
-```bat
-tools\28_check_dist_portable.bat
-```
-
-Для упаковки всей папки `dist` в ZIP:
-
-```bat
-tools\29_make_portable_package.bat
-```
-
-ZIP будет создан в:
-
-```text
-tools\out\LocalAIGPP_portable_dist_*.zip
-```
-
-На другом компьютере нужно распаковать ZIP и сначала запустить:
-
-```bat
-CHECK_DIST_HEALTH.bat
-```
-
-Затем:
-
-```bat
-RUN_LocalAIGPP.bat
-```
-
-> Важно: переносить нужно всю папку `dist`, а не только `LocalAIGPP.exe`. Модели, backend и embedded Python runtime лежат рядом с EXE.
-
-## Модели
-
-Поддерживаемый основной формат для LLM:
-
-```text
-*.gguf
-```
-
-Модели регистрируются через интерфейс или через `models_storage/models.json`.
-
-Для portable-сборки пути к моделям должны быть относительными и указывать внутрь `dist/models_storage`:
-
-```text
-models_storage\gemma-4b\gemma-3-4b-it-Q4_K_M.gguf
-```
-
-Недопустимо оставлять в portable-сборке абсолютные пути исходной машины:
-
-```text
-C:\Users\...\.lmstudio\models\...
-E:\...
-```
-
-Проверка `tools\28_check_dist_portable.bat` должна выявлять такие ошибки.
-
-## Проверки после сборки
-
-После сборки рекомендуется выполнить:
-
-```bat
-tools\09_smoke_test_exe.bat
-tools\28_check_dist_portable.bat
-```
-
-После запуска `dist\LocalAIGPP.exe`:
-
-```bat
-tools\27_check_desktop_sync_contract.bat
-```
-
-`27_check_desktop_sync_contract.bat` проверяет, что основной чат и мини-помощник используют один desktop sync store, а не две разные истории.
-
-## Docker-запуск
-
-```bat
-tools\03_build_docker.bat
-```
-
-Контейнеры:
-
-```text
-local_ai_gpp_backend   -> 127.0.0.1:8000
-local_ai_gpp_frontend  -> 127.0.0.1:8080
-```
-
-## Логи
-
-Логи запросов и runtime находятся в:
-
-```text
-logs/
-dist\logs/
-tools\out/
-```
-
-В интерфейсе у ответа можно открыть лог выполнения запроса.
-
-
-## Назначение проекта
-
-Проект предназначен для закрытого контура предприятия, где нельзя полагаться на публичные облачные LLM-сервисы. Local AI GPP даёт локальный интерфейс, локальное хранение моделей и возможность переносить готовую desktop-поставку между рабочими местами.
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+Версия: **1.3.0** · [История изменений](CHANGELOG.md) · [MIT License](LICENSE).
+Модели и их лицензии выбираются отдельно; веса GGUF и персональная история не входят в Git-репозиторий.

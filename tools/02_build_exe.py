@@ -20,8 +20,8 @@ PY_EMBED_VERSION = os.environ.get("LOCAL_AI_GPP_EMBED_PYTHON_VERSION", "3.12.10"
 PY_EMBED_ZIP = f"python-{PY_EMBED_VERSION}-embed-amd64.zip"
 PY_EMBED_URL = f"https://www.python.org/ftp/python/{PY_EMBED_VERSION}/{PY_EMBED_ZIP}"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-CPU_VERSION = os.environ.get("LLAMA_CPP_CPU_VERSION", "0.3.19")
-CUDA_VERSION = os.environ.get("LLAMA_CPP_CUDA_VERSION", "0.3.4")
+CPU_VERSION = os.environ.get("LLAMA_CPP_CPU_VERSION", "0.3.36")
+CUDA_VERSION = os.environ.get("LLAMA_CPP_CUDA_VERSION", "0.3.36")
 MODEL_EXTENSIONS = {".gguf", ".bin", ".safetensors"}
 PARENT_REDIRECTS_BUILD_LOG = os.environ.get("LOCAL_AI_GPP_BUILD_LOG_REDIRECTED") == "1"
 
@@ -201,19 +201,14 @@ def find_base_python() -> str:
 def ensure_backend_venv(base_python: str) -> Path:
     venv_dir = ROOT / "backend" / ".venv"
     venv_py = venv_dir / "Scripts" / "python.exe"
-    cfg = venv_dir / "pyvenv.cfg"
-    if cfg.exists():
-        text = cfg.read_text(encoding="utf-8", errors="replace").lower()
-        if "codex-runtimes" in text or "windowsapps" in text:
-            log("[WARN] backend .venv points to a non-portable/bad Python. Recreating it.")
-            shutil.rmtree(venv_dir, ignore_errors=True)
     if not venv_py.exists():
         log("[INFO] Creating backend .venv")
         run([base_python, "-m", "venv", str(venv_dir)])
     if not venv_py.exists():
         raise SystemExit(f"[ERROR] backend venv python was not created: {venv_py}")
-    run([str(venv_py), "-m", "pip", "install", "--upgrade", "pip"])
-    root_req = ROOT / "requirements.txt"
+    # The build environment stays intact. The separate embedded worker determines
+    # the packaged CPU/CUDA backend; installing root requirements would replace it.
+    root_req = ROOT / "backend" / "requirements-base.txt"
     if root_req.exists():
         run([str(venv_py), "-m", "pip", "install", "-r", str(root_req)])
     else:
@@ -228,7 +223,8 @@ def clean_python_caches() -> None:
         if not base.exists():
             continue
         for cache_dir in base.rglob("__pycache__"):
-            shutil.rmtree(cache_dir, ignore_errors=True)
+            if ".venv" not in cache_dir.parts:
+                remove_build_tree(cache_dir)
     log("[OK] Removed stale __pycache__ folders from backend/tools before packaging")
 
 
@@ -236,13 +232,16 @@ def build_frontend() -> None:
     frontend = ROOT / "frontend"
     if not (frontend / "package.json").exists():
         raise SystemExit("[ERROR] frontend/package.json not found")
+    node = shutil.which("node")
+    npm_cli = Path(node).parent / "node_modules/npm/bin/npm-cli.js" if node else Path()
+    npm = [node, str(npm_cli)] if node and npm_cli.is_file() else ["npm.cmd"]
     if not (frontend / "node_modules").exists():
-        run(["npm.cmd", "install"], cwd=frontend)
+        run(npm + ["ci"], cwd=frontend)
     env = os.environ.copy()
     env["VITE_API_BASE"] = "."
     env["NO_PROXY"] = "localhost,127.0.0.1,::1,[::1],*.localhost"
     env["no_proxy"] = env["NO_PROXY"]
-    run(["npm.cmd", "run", "build"], cwd=frontend, env=env)
+    run(npm + ["run", "build"], cwd=frontend, env=env)
     if not (frontend / "dist" / "index.html").exists():
         raise SystemExit("[ERROR] frontend/dist/index.html was not created")
 
@@ -270,6 +269,7 @@ def build_pyinstaller(venv_py: Path) -> None:
         str(venv_py), "-m", "PyInstaller",
         "--noconfirm", "--clean", "--onefile", "--windowed",
         "--name", "LocalAIGPP",
+        "--icon", str(ROOT / "models_storage" / "branding" / "icons" / "mini_agent_head_v2.ico"),
         "--distpath", str(ROOT / "dist"),
         "--workpath", str(build_dir),
         "--specpath", str(spec_dir),
@@ -277,6 +277,7 @@ def build_pyinstaller(venv_py: Path) -> None:
         "--version-file", str(version_file),
         "--add-data", f"{ROOT / 'VERSION'};.",
         "--add-data", f"{ROOT / 'frontend' / 'dist'};frontend_dist",
+        "--add-data", f"{ROOT / 'models_storage' / 'branding' / 'icons'};branding_icons",
         "--collect-all", "webview",
         "--collect-all", "pystray",
         "--collect-all", "PIL",
@@ -317,6 +318,14 @@ def _path_is_inside(child: Path, parent: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def remove_build_tree(target: Path) -> None:
+    target = target.resolve()
+    if target == ROOT.resolve() or not _path_is_inside(target, ROOT):
+        raise ValueError(f"Refusing to delete outside the build workspace: {target}")
+    if target.exists():
+        shutil.rmtree(target)
 
 
 def _copy_portable_model_registry(models_src: Path, models_dst: Path) -> None:
@@ -404,7 +413,7 @@ def copy_portable_backend_and_metadata() -> None:
         raise SystemExit(f"[ERROR] backend app not found: {backend_src}")
     backend_dst = dist / "backend"
     if backend_dst.exists():
-        shutil.rmtree(backend_dst)
+        remove_build_tree(backend_dst)
     shutil.copytree(backend_src, backend_dst / "app", ignore=ignore_junk)
     (backend_dst / "__init__.py").write_text("", encoding="utf-8")
     for required in (backend_dst / "app" / "core.py", backend_dst / "app" / "llama_worker.py", backend_dst / "app" / "main.py"):
@@ -418,9 +427,9 @@ def copy_portable_backend_and_metadata() -> None:
     models_dst = dist / "models_storage"
     if models_dst.exists():
         # Keep packaged models only through the explicit registry copy below.
-        shutil.rmtree(models_dst)
+        remove_build_tree(models_dst)
     (models_dst / "branding").mkdir(parents=True, exist_ok=True)
-    models_src = ROOT / "models_storage"
+    models_src = Path(os.environ.get("LOCAL_AI_GPP_DATA_DIR", str(ROOT))) / "models_storage"
     settings_src = models_src / "settings.json"
     if settings_src.exists():
         shutil.copy2(settings_src, models_dst / "settings.json")
@@ -433,6 +442,9 @@ def copy_portable_backend_and_metadata() -> None:
 
     if (ROOT / "README.md").exists():
         shutil.copy2(ROOT / "README.md", dist / "README.md")
+    for folder in ("docs", "examples"):
+        if (ROOT / folder).is_dir():
+            shutil.copytree(ROOT / folder, dist / folder, dirs_exist_ok=True, ignore=ignore_junk)
     log("[OK] Copied portable backend, settings, branding and model registry into dist")
 
 
@@ -443,7 +455,10 @@ def download_once(url: str, target: Path) -> None:
         log(f"[OK] Using cached {target.name}")
         return
     log(f"[INFO] Downloading {url}")
-    urllib.request.urlretrieve(url, target)
+    partial = target.with_suffix(target.suffix + ".partial")
+    with urllib.request.urlopen(url, timeout=30) as response, partial.open("wb") as output:
+        shutil.copyfileobj(response, output)
+    partial.replace(target)
 
 
 def configure_embedded_python(worker_runtime: Path) -> None:
@@ -471,7 +486,7 @@ def create_worker_runtime(runtime_kind: str) -> None:
     worker_runtime = dist / "worker_runtime"
     worker_py = worker_runtime / "python.exe"
     if worker_runtime.exists():
-        shutil.rmtree(worker_runtime)
+        remove_build_tree(worker_runtime)
     DOWNLOADS.mkdir(parents=True, exist_ok=True)
     embed_zip = DOWNLOADS / PY_EMBED_ZIP
     get_pip = DOWNLOADS / "get-pip.py"
@@ -493,12 +508,23 @@ def create_worker_runtime(runtime_kind: str) -> None:
 
     runtime_kind = (runtime_kind or "cpu").lower()
     if runtime_kind.startswith("cu"):
-        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--force-reinstall", "--no-cache-dir", "--only-binary=:all:", f"llama-cpp-python=={CUDA_VERSION}", "--extra-index-url", f"https://abetlen.github.io/llama-cpp-python/whl/{runtime_kind}"], cwd=dist)
+        cached_wheel = os.environ.get("LOCAL_AI_GPP_CUDA_WHEEL")
+        package = [cached_wheel] if cached_wheel else [f"llama-cpp-python=={CUDA_VERSION}", "--extra-index-url", f"https://abetlen.github.io/llama-cpp-python/whl/{runtime_kind}"]
+        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--only-binary=:all:"] + package, cwd=dist)
+        dll_source = Path(os.environ.get("LOCAL_AI_GPP_CUDA_DLL_DIR", str(ROOT / "backend/.venv/cuda")))
+        dlls = ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")
+        if all((dll_source / name).is_file() for name in dlls):
+            (worker_runtime / "cuda").mkdir(exist_ok=True)
+            for name in dlls:
+                shutil.copy2(dll_source / name, worker_runtime / "cuda" / name)
+        else:
+            run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "nvidia-cuda-runtime-cu12==12.4.127", "nvidia-cublas-cu12==12.4.5.8"], cwd=dist)
     else:
         run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--force-reinstall", "--no-cache-dir", f"llama-cpp-python=={CPU_VERSION}", "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cpu"], cwd=dist)
 
     verify = (
         "import sys,json; "
+        "from backend.app.cuda_runtime import configure_cuda_dlls; configure_cuda_dlls(); "
         "import backend.app.llama_worker, llama_cpp; "
         "print(json.dumps({'python':sys.executable,'sys_path':sys.path[:8],'llama_cpp':getattr(llama_cpp,'__version__','unknown')}, ensure_ascii=False))"
     )
@@ -580,6 +606,8 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
         "    print(('[OK] ' if '..' in lines else '[ERROR] ') + 'worker_runtime/python312._pth contains ..')\n"
         "    errors += 0 if '..' in lines else 1\n"
         "try:\n"
+        "    from backend.app.cuda_runtime import configure_cuda_dlls\n"
+        "    configure_cuda_dlls()\n"
         "    import backend.app.llama_worker, llama_cpp\n"
         "    print('[OK] import backend.app.llama_worker')\n"
         "    print('[OK] import llama_cpp version=', getattr(llama_cpp, '__version__', 'unknown'))\n"
@@ -597,6 +625,7 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
         "    print('LLM models=', len(llms))\n"
         "    for m in llms:\n"
         "        p = Path(str(m.get('path') or ''))\n"
+        "        if not p.is_absolute(): p = root / p\n"
         "        inside = False\n"
         "        try:\n"
         "            p.resolve().relative_to(root.resolve())\n"

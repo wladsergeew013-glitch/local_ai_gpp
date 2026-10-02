@@ -79,7 +79,7 @@ if errorlevel 1 goto fail_with_log
 echo.
 echo [OK] Containers are running.
 echo Frontend: http://127.0.0.1:8080
-echo Backend:  http://127.0.0.1:8000/api/health
+echo Backend:  http://127.0.0.1:18765/api/health
 echo.
 echo [INFO] Opening browser...
 start "" "http://127.0.0.1:8080"

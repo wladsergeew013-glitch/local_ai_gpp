@@ -2,7 +2,7 @@ import type { BootstrapPayload, EngineSettings, ModelRecord, RemoteHubModel, Run
 
 const envApiBase = import.meta.env.VITE_API_BASE;
 export const API_BASE = envApiBase === undefined
-  ? (import.meta.env.DEV ? 'http://127.0.0.1:8000' : '')
+  ? (import.meta.env.DEV ? 'http://127.0.0.1:8765' : '')
   : String(envApiBase).replace(/\/$/, '');
 
 function apiUrl(path: string): string {
@@ -132,6 +132,8 @@ export type ChatStreamEvent = {
   };
 };
 
+export type ChatHistory = { role: 'user' | 'assistant'; content: string }[];
+
 export async function streamChat(
   payload: {
     model_id: string;
@@ -140,13 +142,17 @@ export async function streamChat(
     temperature: number;
     max_tokens: number;
     runtime?: Record<string, unknown>;
+    history?: ChatHistory;
+    memory?: boolean;
   },
   onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(apiUrl('/api/chat/stream'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   });
   if (!response.ok || !response.body) {
     await readJson(response);
@@ -155,6 +161,8 @@ export async function streamChat(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let terminal = false;
+  try {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -166,8 +174,16 @@ export async function streamChat(
       if (!line) continue;
       const raw = line.slice(5).trim();
       if (!raw) continue;
-      onEvent(JSON.parse(raw) as ChatStreamEvent);
+      const event = JSON.parse(raw) as ChatStreamEvent;
+      if (event.type === 'done' || event.type === 'error') terminal = true;
+      onEvent(event);
+      if (event.type === 'error') throw new Error(event.message || 'Inference failed');
     }
+  }
+  if (!terminal) throw new Error('Соединение прервано до завершения ответа.');
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }
 
