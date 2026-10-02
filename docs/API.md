@@ -68,14 +68,59 @@ Tools/function calling, изображения, embeddings и Responses API не
 а не удаляет уже сгенерированный текст. Другие модели и Qwen-шаблоны без этой возможности сохраняют свой формат.
 Проверена Qwen3.5 4B; поведение иных GGUF зависит от их собственного шаблона.
 
-OpenAI-compatible API позволяет включить рассуждения для одного запроса:
+### Python-клиент: обычное общение без рассуждений
+
+```python
+from examples.client import LocalAI
+
+ai = LocalAI(
+    base_url="http://127.0.0.1:8765/v1",
+    model="Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",  # Точный ID из /v1/models
+    memory=True,
+    enable_thinking=False,  # Отключить рассуждения Qwen
+)
+print(ai.ask("Привет! Ответь одним коротким предложением."))
+```
+
+`enable_thinking=False` отключает рассуждения, `True` включает их, `None` или отсутствие параметра использует настройки сервера/модели. Значение передаётся при каждом `ask()`, включая `stream=True`.
+
+```bash
+python examples/client.py --model "Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf" --no-thinking --prompt "Привет!"
+```
+
+### OpenAI-compatible HTTP / curl
+
+Запрос без рассуждений:
+
+```bash
+curl http://127.0.0.1:8765/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf","messages":[{"role":"user","content":"Привет! Ответь кратко."}],"max_tokens":512,"chat_template_kwargs":{"enable_thinking":false}}'
+```
+
+Чтобы включить рассуждения, передайте `true` вместо `false`. Тело запроса:
 
 ```json
 {"model":"ID","messages":[{"role":"user","content":"What is two plus two?"}],"max_tokens":512,"chat_template_kwargs":{"enable_thinking":true}}
 ```
 
-В OpenAI SDK передайте `extra_body={"chat_template_kwargs":{"enable_thinking": false}}`.
-Native API принимает `runtime: {"enable_thinking": false}`.
+В Python OpenAI SDK передайте `extra_body={"chat_template_kwargs":{"enable_thinking": False}}`
+в `client.chat.completions.create(...)`. В Python используются `False`/`True`, в JSON — `false`/`true`.
+
+### Native API
+
+`POST /api/chat` (для SSE — тот же JSON на `/api/chat/stream`):
+
+```json
+{
+  "model_id": "Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",
+  "message": "Привет! Ответь кратко.",
+  "memory": true,
+  "max_tokens": 512,
+  "runtime": {"enable_thinking": false}
+}
+```
+
 Постоянная настройка: `settings.runtime.enable_thinking`; в интерфейсе — «Рассуждения Qwen».
 Изменение флага не перегружает веса. `/api/runtime/status` возвращает `model_adapter` и `enable_thinking`;
 у неподдерживаемого шаблона это `default` и `null`.
@@ -130,10 +175,41 @@ server.api_key защищает `/v1/*`: Authorization: Bearer KEY или X-API-
 
 ## Пример приложения и VetConsult
 
-`python examples/client.py --stream` — интерактивный чат с памятью, без сторонних библиотек.
+### Python: явный выбор модели
+
+Local AI должен уже работать, а GGUF — быть зарегистрирован. Получите точный ID из `GET /v1/models` и передайте его клиенту:
+
+```python
+from examples.client import LocalAI
+
+ai = LocalAI(
+    base_url="http://127.0.0.1:8765/v1",
+    model="Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",  # ID из /v1/models
+    memory=True,
+    enable_thinking=False,  # Обычный диалог Qwen без рассуждений
+)
+
+# Одна модель, продолжение одного диалога:
+print(ai.ask("Запомни: мой проект называется ORBIT."))
+print(ai.ask("Как называется мой проект?"))
+
+# Та же модель, отдельный клиент без памяти:
+other = LocalAI(base_url=ai.base_url, model=ai.model, memory=False, enable_thinking=False)
+print(other.ask("Сколько будет два плюс два?"))
+```
+
+Клиент передаёт `model=ai.model` при каждом `ask()`. Если веса ещё не загружены, сервер загружает их при первом запросе.
+Без аргумента `model` клиент получает `/v1/models` и выбирает **первую модель в списке**.
+Выбор модели в интерфейсе не меняет модель Python-клиента. Проверить выбранный ID можно через `print(ai.model)`.
+Для Docker замените base_url на `http://127.0.0.1:8080/v1` и возьмите ID из списка этого сервера.
+
+`python examples/client.py --model "ID из /v1/models" --stream` — интерактивный чат с памятью, без сторонних библиотек.
 --no-memory отключает историю; --base-url и --model выбирают подключение.
 --max-tokens задаёт лимит ответа (по умолчанию 512); клиент сообщает об обрезке и исключает рассуждения из истории.
+--no-thinking отключает рассуждения Qwen, --thinking включает; если флаг не указан, используются настройки сервера/модели.
 Для защищённого API задайте LOCAL_AI_API_KEY.
+
+### VetConsult
 
 VetConsult: provider **openai_compat**, base_url **http://127.0.0.1:8765/v1**,
 model — точный ID, timeout_sec=200, max_tokens=256.

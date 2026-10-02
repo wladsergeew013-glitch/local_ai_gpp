@@ -94,31 +94,46 @@ curl http://127.0.0.1:8765/v1/models
 ```bash
 curl http://127.0.0.1:8765/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf","messages":[{"role":"user","content":"Привет! Ответь кратко."}],"max_tokens":512,"memory":true,"stream":false}'
+  -d '{"model":"Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf","messages":[{"role":"user","content":"Привет! Ответь кратко."}],"max_tokens":512,"memory":true,"stream":false,"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
 Для Docker замените адрес на `http://127.0.0.1:8080`. ID берётся из `/v1/models`, имя файла в примере — для нашей проверочной модели. В PowerShell используйте `curl.exe` или готовый Python-клиент.
 
 ### Python · приложение с памятью
 
-[examples/client.py](examples/client.py) использует только стандартную библиотеку Python. Он получает список моделей, поддерживает SSE, хранит историю и сообщает о незавершённом ответе.
+[examples/client.py](examples/client.py) использует только стандартную библиотеку Python, поддерживает SSE, хранит историю и сообщает о незавершённом ответе.
+
+Сначала запустите Local AI и зарегистрируйте GGUF. Получите точный ID через `GET /v1/models` и передайте его в `model`:
 
 ```python
 from examples.client import LocalAI
 
-ai = LocalAI(base_url="http://127.0.0.1:8765/v1", memory=True)
+ai = LocalAI(
+    base_url="http://127.0.0.1:8765/v1",
+    model="Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf",  # Точный ID из /v1/models
+    memory=True,
+    enable_thinking=False,  # Qwen отвечает без режима рассуждений
+)
+
+# Обе реплики идут одной модели; клиент передаёт историю диалога.
 print(ai.ask("Запомни: мой проект называется ORBIT."))
 print(ai.ask("Как называется мой проект?"))
 
-# Отдельный диалог — отдельный экземпляр клиента:
-other = LocalAI(memory=False)
+# Та же модель и сервер, отдельный клиент без памяти:
+other = LocalAI(base_url=ai.base_url, model=ai.model, memory=False, enable_thinking=False)
 print(other.ask("Сколько будет два плюс два?"))
 ```
 
+Все `ai.ask()` используют ID, выбранный при создании клиента. Если модель ещё не загружена, сервер загрузит её при первом запросе. Для Docker укажите `base_url="http://127.0.0.1:8080/v1"`.
+
+Для Qwen `enable_thinking=False` явно отключает рассуждения, `True` включает их. Клиент передаёт этот флаг как `chat_template_kwargs.enable_thinking` при каждом запросе. Без параметра используется настройка модели/сервера; в Local AI она по умолчанию выключена. [Готовые примеры Python, curl и native API](docs/API.md#qwen-прямой-ответ-и-рассуждения).
+
+Если `model` опустить, Python-клиент сам запрашивает `/v1/models` и выбирает **первую модель в списке**. Текущий выбор в веб-чате или мини-помощнике на этот выбор не влияет. Посмотреть ID клиента: `print(ai.model)`. Для приложения с несколькими моделями указывайте `model` явно.
+
 ```bash
-python examples/client.py --stream
-python examples/client.py --no-memory --prompt "Привет!"
-python examples/client.py --base-url http://127.0.0.1:8080/v1 --max-tokens 512
+python examples/client.py --model "Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf" --no-thinking --stream
+python examples/client.py --model "Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf" --no-thinking --no-memory --prompt "Привет!"
+python examples/client.py --base-url http://127.0.0.1:8080/v1 --model "ID из /v1/models" --max-tokens 512
 ```
 
 API не хранит беседы: для продолжения передавайте предыдущие `messages`; `memory=false` исключает историю. При включённых рассуждениях Qwen в историю следует включать только финальный ответ — пример клиента это делает.

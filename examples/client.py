@@ -7,13 +7,17 @@ import re
 
 
 class LocalAI:
-    def __init__(self, base_url='http://127.0.0.1:8765/v1', model=None, memory=True, max_tokens=512):
+    def __init__(self, base_url='http://127.0.0.1:8765/v1', model=None, memory=True, max_tokens=512, enable_thinking=None):
+        """model=None selects the first model; enable_thinking=None uses server settings."""
         self.base_url = base_url.rstrip('/')
         self.headers = {'Content-Type': 'application/json'}
         if os.getenv('LOCAL_AI_API_KEY'):
             self.headers['Authorization'] = 'Bearer ' + os.environ['LOCAL_AI_API_KEY']
         self.history, self.memory = [], memory
         self.max_tokens = max_tokens
+        if enable_thinking is not None and not isinstance(enable_thinking, bool):
+            raise TypeError('enable_thinking must be True, False or None.')
+        self.enable_thinking = enable_thinking
         if model is None:
             request = urllib.request.Request(self.base_url + '/models', headers=self.headers)
             with urllib.request.urlopen(request, timeout=10) as response:
@@ -26,6 +30,8 @@ class LocalAI:
         messages = (self.history if self.memory else []) + [{'role':'user','content':text}]
         payload = {'model':self.model,'messages':messages,'memory':self.memory,
                    'temperature':0.2,'max_tokens':self.max_tokens,'stream':stream}
+        if self.enable_thinking is not None:
+            payload['chat_template_kwargs'] = {'enable_thinking': self.enable_thinking}
         request = urllib.request.Request(self.base_url + '/chat/completions',
                   data=json.dumps(payload).encode(), headers=self.headers, method='POST')
         with urllib.request.urlopen(request, timeout=200) as response:
@@ -70,9 +76,12 @@ def main():
     parser.add_argument('--no-memory', action='store_true')
     parser.add_argument('--stream', action='store_true')
     parser.add_argument('--max-tokens', type=int, default=512)
+    parser.add_argument('--thinking', action=argparse.BooleanOptionalAction, default=None,
+                        help='Qwen thinking on/off; omit to use server settings.')
     parser.add_argument('--prompt', help='One request, then exit; otherwise interactive.')
     args = parser.parse_args()
-    client = LocalAI(args.base_url, args.model, not args.no_memory, args.max_tokens)
+    client = LocalAI(args.base_url, args.model, not args.no_memory, args.max_tokens,
+                     enable_thinking=args.thinking)
     while True:
         try:
             text = args.prompt or input('You: ')
