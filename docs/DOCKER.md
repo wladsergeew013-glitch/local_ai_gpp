@@ -2,6 +2,8 @@
 
 Compose собирает React/Vite в Nginx и FastAPI с `llama-cpp-python 0.3.36`. По умолчанию backend использует Python 3.12 и CPU. Отдельный GPU-вариант использует NVIDIA CUDA 12.4.1, Ubuntu 22.04, Python 3.10 и точный официальный CUDA wheel `0.3.36/cu124`. Desktop-зависимости и EXE в образы не включаются.
 
+Первый CUDA build скачивает большой wheel (около 1.8 ГБ) несколькими соединениями, с возобновлением и проверкой SHA-256 из официального GitHub release. BuildKit сохраняет его в отдельном кеше для следующих сборок; этот кеш не входит в итоговый образ. При смене `LLAMA_CPP_VERSION` также обновите `LLAMA_CPP_WHEEL_SHA256` на digest соответствующего release asset.
+
 ## Запуск на CPU
 
 ```bash

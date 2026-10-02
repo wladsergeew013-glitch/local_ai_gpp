@@ -8,17 +8,26 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Ubuntu 22.04 supplies Python 3.10. All application dependencies support it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates libgomp1 \
+    && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates libgomp1 aria2 \
     && python3 -m venv /opt/venv \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements-base.txt /tmp/requirements-base.txt
 ARG LLAMA_CPP_VERSION=0.3.36
+ARG LLAMA_CPP_WHEEL_SHA256=3d53f94464d8d69028d993033d6120439c994108c04375a46205bd1935bc30ad
 # Use the exact CUDA wheel: pip must never choose a CPU wheel/source fallback.
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,id=local-ai-cu124-wheels,target=/root/.cache/local-ai-cuda,sharing=locked \
     python -m pip install -r /tmp/requirements-base.txt \
+    && task_wheel="llama_cpp_python-${LLAMA_CPP_VERSION}-py3-none-manylinux_2_35_x86_64.whl" \
+    && aria2c --max-connection-per-server=8 --split=8 --min-split-size=1M \
+       --continue=true --check-integrity=true --checksum="sha-256=${LLAMA_CPP_WHEEL_SHA256}" \
+       --max-tries=5 --retry-wait=3 --connect-timeout=30 --timeout=60 \
+       --summary-interval=15 --console-log-level=warn \
+       --dir=/root/.cache/local-ai-cuda --out="${task_wheel}" \
+       "https://github.com/abetlen/llama-cpp-python/releases/download/v${LLAMA_CPP_VERSION}-cu124/${task_wheel}" \
     && python -m pip install \
-       "https://github.com/abetlen/llama-cpp-python/releases/download/v${LLAMA_CPP_VERSION}-cu124/llama_cpp_python-${LLAMA_CPP_VERSION}-py3-none-manylinux_2_35_x86_64.whl"
+       "/root/.cache/local-ai-cuda/${task_wheel}"
 
 # The host driver (libcuda.so.1) is mounted by NVIDIA Container Toolkit at run
 # time, so importing the CUDA library during a GPU-less image build is invalid.
