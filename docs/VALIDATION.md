@@ -1,4 +1,4 @@
-# Проверки 1.4.0 — 2026-10-05
+# Проверки 1.4.1 — 2026-10-05
 
 Windows, NVIDIA Quadro T1000 (4 GiB), драйвер 573.91, `llama-cpp-python 0.3.36/cu124`. Переносимая сборка включает CUDA runtime и cuBLAS DLL; CUDA Toolkit на целевой машине не требуется.
 

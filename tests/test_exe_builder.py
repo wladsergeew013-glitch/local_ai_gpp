@@ -20,10 +20,13 @@ class ExeBuilderTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         root_patch = patch.object(builder, 'ROOT', self.root)
+        out_patch = patch.object(builder, 'OUT', self.root / 'out')
         log_patch = patch.object(builder, 'log')
         root_patch.start()
+        out_patch.start()
         log_patch.start()
         self.addCleanup(root_patch.stop)
+        self.addCleanup(out_patch.stop)
         self.addCleanup(log_patch.stop)
 
     def args(self, cpu=False, cuda=None):
