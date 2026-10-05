@@ -9,6 +9,7 @@ import traceback
 from typing import Any
 from backend.app.core import _filter_supported_kwargs, _float_value, _int_value, _split_mode, _tensor_split
 from backend.app.cuda_runtime import configure_cuda_dlls
+from backend.app.context_budget import validate_context, context_limit_message
 from backend.app.model_adapters import apply_model_adapter
 
 _output_lock = threading.Lock()
@@ -60,8 +61,7 @@ def llama_backend_details() -> dict:
 
 def fit_messages(runtime: Any, messages: list[dict], max_tokens: int, n_ctx: int, truncate: bool) -> tuple[list[dict], int]:
     """Conservative budget; llama.cpp also checks its exact chat template."""
-    if max_tokens >= n_ctx - 256:
-        raise ValueError('max_tokens must be smaller than context size minus 256.')
+    validate_context(n_ctx, max_tokens)
     kept, dropped = list(messages), 0
     while True:
         text = '\n'.join(str(m.get('content') or '') for m in kept)
@@ -70,7 +70,7 @@ def fit_messages(runtime: Any, messages: list[dict], max_tokens: int, n_ctx: int
         start = next((i for i, m in enumerate(kept) if m.get('role') == 'user'), -1)
         end = next((i for i in range(start + 1, len(kept)) if kept[i].get('role') == 'user'), -1)
         if not truncate or start < 0 or end < 0:
-            raise ValueError('Context window exceeded. Shorten the prompt/history or increase n_ctx.')
+            raise ValueError(context_limit_message(n_ctx, count, max_tokens, history=not truncate and end >= 0))
         dropped += end - start
         del kept[start:end]
 
@@ -115,10 +115,23 @@ def serve(payloads) -> int:
                 summary.update(apply_model_adapter(runtime, cfg))
                 write_event({'type': 'runtime', 'mode': summary['mode'], 'runtime': summary})
                 if payload.get('operation') == 'load':
+                    write_event({'type': 'worker_status', 'message': 'Веса загружены. Прогреваю вычисления.'})
+                    warm_started = time.perf_counter()
+                    try:
+                        # Exercise both prompt evaluation and the next-token
+                        # decode path; a one-token result never evaluates its token.
+                        runtime.create_completion(prompt='Кратко ответь на простой вопрос: чему равно два плюс два? ' * 4,
+                                                  max_tokens=2, temperature=0.0, stream=False)
+                    finally:
+                        runtime.reset()
+                    summary['warmup_elapsed_ms'] = round((time.perf_counter() - warm_started) * 1000)
+                    summary['warmed_up'] = True
                     write_event({'type': 'ready', 'runtime': summary})
                     continue
                 max_tokens = int(payload.get('max_tokens', 512))
                 messages, dropped = fit_messages(runtime, payload['messages'], max_tokens, int(cfg.get('n_ctx', 4096)), bool(payload.get('truncate_history')))
+                if dropped:
+                    write_event({'type': 'worker_status', 'message': f'Контекст заполнен: исключено {dropped} старых реплик. Полная история сохранена в диалоге.'})
                 chat_kwargs = {'messages': messages, 'max_tokens': max_tokens, 'temperature': float(payload.get('temperature', 0.2)),
                                'top_k': _int_value(cfg.get('top_k'), 40), 'top_p': _float_value(cfg.get('top_p'), 0.95),
                                'min_p': _float_value(cfg.get('min_p'), 0.05), 'repeat_penalty': _float_value(cfg.get('repeat_penalty'), 1.1),
@@ -146,7 +159,10 @@ def serve(payloads) -> int:
                                        'total_tokens': prompt_tokens+completion_tokens, 'estimated': True}})
             except Exception as exc:
                 traceback.print_exc(file=sys.stderr)
-                write_event({'type': 'error', 'message': str(exc), 'status_code': 400 if isinstance(exc, ValueError) else 500})
+                message = str(exc)
+                if 'exceed' in message.lower() and ('context' in message.lower() or 'token' in message.lower()):
+                    message = f'Запрос превышает контекст модели ({(payload.get("runtime") or {}).get("n_ctx", 4096)} токенов). Сократите сообщение, уменьшите длину ответа или увеличьте контекст в настройках.'
+                write_event({'type': 'error', 'message': message, 'status_code': 400 if isinstance(exc, ValueError) else 500})
             finally:
                 active.clear()
     finally:

@@ -73,7 +73,7 @@ echo [OK] embedded Python ._pth contains backend parent path.
 >>"%LOG%" echo [OK] python312._pth contains exact .. line.
 
 pushd "%DIST%" >nul
-"%WORKER%" -c "import sys,json,os; import backend.app.llama_worker, llama_cpp; print(json.dumps({'ok': True, 'python': sys.executable, 'cwd': os.getcwd(), 'llama_cpp': getattr(llama_cpp,'__version__','unknown'), 'path': sys.path[:10]}, ensure_ascii=False, indent=2))" >>"%LOG%" 2>&1
+"%WORKER%" -c "import sys,json,os; from backend.app.cuda_runtime import configure_cuda_dlls; configure_cuda_dlls(); import backend.app.llama_worker, llama_cpp; from llama_cpp import llama_cpp as lib; expected=json.load(open('runtime_info.json', encoding='utf-8')).get('effective','cpu'); gpu=bool(lib.llama_supports_gpu_offload()); assert not expected.startswith('cu') or gpu, 'CUDA package contains a CPU runtime'; print(json.dumps({'ok': True, 'python': sys.executable, 'cwd': os.getcwd(), 'llama_cpp': getattr(llama_cpp,'__version__','unknown'), 'supports_gpu_offload': gpu, 'path': sys.path[:10]}, ensure_ascii=False, indent=2))" >>"%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 popd >nul
 if not "%RC%"=="0" goto fail_with_log

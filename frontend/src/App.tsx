@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { API_BASE, fetchBootstrap, fetchRuntimeStatus, prewarmModel, registerModelPath, saveSettings, streamChat, unloadModel, uploadModel } from './api';
 import type { ChatMessage, EngineSettings, ModelRecord, RuntimeStatus } from './types';
 import { APP_VERSION } from './version';
+import { contextSettingsError, estimateContext } from './contextBudget';
 
 type Conversation = { id: string; title: string; createdAt: string; messages: ChatMessage[] };
 type ChatState = { activeConversationId: string; conversations: Conversation[]; updatedAt?: number };
@@ -57,6 +58,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [desktop, setDesktop] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showContext, setShowContext] = useState(false);
+  const [trimHistory, setTrimHistory] = useState(true);
   const [memory, setMemory] = useState(true);
   const [temperature, setTemperature] = useState(0.2);
   const [enableThinking, setEnableThinking] = useState(false);
@@ -79,13 +82,18 @@ export default function App() {
   const model = models.find(m => m.id === modelId);
   const loaded = runtime.find(r => r.model_id === modelId);
   const generating = busy || chat.conversations.some(c => c.messages.some(m => m.pending));
-  const runtimeOptions = { n_gpu_layers: gpuLayers, n_ctx: nCtx, warm_policy: warmPolicy, enable_thinking: enableThinking };
+  const runtimeOptions = { n_gpu_layers: gpuLayers, n_ctx: nCtx, context_overflow: trimHistory ? 'trim' as const : 'error' as const, warm_policy: warmPolicy, enable_thinking: enableThinking };
+  const history = active.messages.filter(m => !m.pending && m.phase !== 'error' && m.text.trim()).slice(-64).map(m => ({ role: m.role, content: m.answer || m.text }));
+  const estimatedContext = estimateContext([...systemPrompt.trim() ? [{ content: systemPrompt }] : [], ...memory ? history : [], { content: input.trim() }], maxTokens);
+  const budgetError = contextSettingsError(nCtx, maxTokens);
+  const contextFull = estimatedContext > nCtx;
 
   async function reload() {
     const data = await fetchBootstrap();
     setModels(data.models); setSettings(data.settings);
     setModelId(previous => data.models.some(m => m.id === previous && m.file_exists) ? previous : data.models.find(m => m.type === 'LLM' && m.file_exists)?.id || '');
-    setTemperature(data.settings.runtime.temperature); setMaxTokens(Math.min(data.settings.runtime.max_tokens, 1024));
+    setTemperature(data.settings.runtime.temperature); setMaxTokens(data.settings.runtime.max_tokens);
+    setTrimHistory(data.settings.runtime.context_overflow !== 'error');
     setEnableThinking(data.settings.runtime.enable_thinking ?? false);
     setGpuLayers(data.settings.runtime.n_gpu_layers); setNCtx(data.settings.runtime.n_ctx); setWarmPolicy(data.settings.runtime.warm_policy);
   }
@@ -160,12 +168,13 @@ export default function App() {
     event.preventDefault();
     const text = input.trim();
     if (!text || !modelId || generating) return;
+    if (budgetError) { setStatus(budgetError); setShowContext(true); return; }
     const target = active;
     const title = target.messages.length ? target.title : text.slice(0, 42);
     const assistantId = crypto.randomUUID();
     const payload = { model_id: modelId, message: text, system_prompt: systemPrompt, temperature,
       max_tokens: maxTokens, runtime: runtimeOptions, memory,
-      history: target.messages.filter(m => !m.pending && m.phase !== 'error' && m.text.trim()).slice(-64).map(m => ({ role: m.role, content: m.answer || m.text })) };
+      history };
     setBusy(true); setStatus('Модель отвечает…');
     if (desktop) {
       try {
@@ -194,8 +203,8 @@ export default function App() {
         else if (event.type === 'done') {
           updateMessage(target.id, assistantId, { text: event.answer || event.content || content,
             answer: event.answer, reasoning: event.reasoning, pending: false, phase: 'done',
-            elapsed_ms: event.elapsed_ms, usage: event.usage, finish_reason: event.finish_reason });
-          setStatus('Готово');
+            elapsed_ms: event.elapsed_ms, usage: event.usage, finish_reason: event.finish_reason, history_dropped: event.history_dropped });
+          setStatus(event.history_dropped ? `Готово · в запрос не вошло ${event.history_dropped} старых реплик; история сохранена.` : 'Готово');
         }
       }, abort.signal);
     } catch (e) {
@@ -215,6 +224,7 @@ export default function App() {
   async function modelAction(load: boolean) {
     if (!modelId || generating) return;
     setBusy(true);
+    setStatus(load ? 'Загружаю веса и прогреваю вычисления…' : 'Выгружаю модель…');
     try { if (load) await prewarmModel(modelId, runtimeOptions); else await unloadModel(modelId);
       setRuntime(await fetchRuntimeStatus()); setStatus(load ? 'Модель загружена' : 'Модель выгружена'); }
     catch (e) { setStatus(errorText(e)); }
@@ -234,6 +244,7 @@ export default function App() {
   }
   async function applySettings() {
     if (!settings) return;
+    if (budgetError) { setStatus(budgetError); setShowContext(true); return; }
     try {
       setSettings(await saveSettings({ ...settings, runtime: { ...settings.runtime, ...runtimeOptions,
         warm_policy: warmPolicy as EngineSettings['runtime']['warm_policy'], temperature, max_tokens: maxTokens } }));
@@ -254,15 +265,27 @@ export default function App() {
         <button disabled={!model || generating} onClick={() => void modelAction(!loaded)}>{loaded ? 'Выгрузить' : 'Загрузить'}</button>
         <span className="runtime-label">{loaded?.runtime_mode || 'По запросу'}</span>
         <label className="inline-check"><input type="checkbox" checked={memory} onChange={e => setMemory(e.target.checked)} />Память диалога</label>
+        <button aria-expanded={showContext} onClick={() => setShowContext(!showContext)}>Контекст · {nCtx}</button>
         <button disabled={generating || !active.messages.length} onClick={() => void clearConversation()}>Очистить</button></div>
+      {showContext && <section className="context-panel" aria-label="Контекст и длина ответа">
+        <div className="settings-fields">
+          <label>Контекст, токенов<select aria-label="Пресет контекста" value={[2048, 4096, 8192, 16384].includes(nCtx) ? nCtx : 'custom'} onChange={e => { if (e.target.value !== 'custom') { const value = Number(e.target.value); setNCtx(value); setMaxTokens(Math.min(maxTokens, value - 257)); } }}>
+            <option value={2048}>2048 · экономно</option><option value={4096}>4096 · стандарт</option><option value={8192}>8192 · длинный диалог</option><option value={16384}>16384 · больше памяти</option><option value="custom">Свой размер</option></select>
+            <input aria-label="Размер контекста" type="number" min="512" max="131072" step="512" value={nCtx} onChange={e => setNCtx(Number(e.target.value))} /></label>
+          <label>Максимум на ответ<input aria-label="Максимум токенов ответа" type="number" min="1" max={Math.min(32768, nCtx - 257)} step="128" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} /></label>
+          <label className="inline-check"><input type="checkbox" checked={trimHistory} onChange={e => setTrimHistory(e.target.checked)} />Автоматически сокращать старые реплики</label>
+          <button disabled={generating || !!budgetError} onClick={() => void applySettings()}>Сохранить</button>
+        </div>
+        <p>Контекст делят история, инструкция, вопрос и ответ. Полная история остаётся в диалогах; сокращается только то, что отправляем модели. Больший контекст занимает больше памяти. Изменение размера перезагрузит модель со следующим запросом.</p>
+        {budgetError && <p className="context-warning" role="alert">{budgetError}</p>}
+      </section>}
       {showSettings && <section className="compact-settings" aria-label="Настройки модели">
         <div className="settings-fields"><label>Температура<input type="number" min="0" max="2" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></label>
-          <label>Длина ответа<input type="number" min="1" max={Math.max(1, nCtx - 257)} value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} /></label>
           <label>Вычисления<select value={gpuLayers} onChange={e => setGpuLayers(Number(e.target.value))}><option value={-1}>GPU · CUDA</option><option value={16}>CPU + GPU</option><option value={0}>CPU</option>{![-1, 16, 0].includes(gpuLayers) && <option value={gpuLayers}>GPU · {gpuLayers} слоёв</option>}</select></label>
           <label>Разогрев<select value={warmPolicy} onChange={e => setWarmPolicy(e.target.value)}><option value="unload_after_idle">Выгружать после простоя</option><option value="keep_hot">Держать в памяти</option><option value="manual">Выгружать вручную</option></select></label>
           <label className="inline-check"><input type="checkbox" checked={enableThinking} onChange={e => setEnableThinking(e.target.checked)} />Рассуждения Qwen</label>
           <button disabled={generating} onClick={() => void applySettings()}>Сохранить</button></div>
-        <details><summary>Модели и дополнительные параметры</summary><label>Контекст<input type="number" min="512" max="131072" step="512" value={nCtx} onChange={e => setNCtx(Number(e.target.value))} /></label>
+        <details><summary>Модели и дополнительные параметры</summary>
           <label>Инструкция модели<textarea rows={2} value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)} /></label>
           <form className="model-import" onSubmit={addModel}><input aria-label="Имя модели" placeholder="Имя модели" value={modelName} onChange={e => setModelName(e.target.value)} />
             <input aria-label="Путь к GGUF" placeholder="Полный путь к .gguf на этом компьютере" value={modelPath} onChange={e => { setModelPath(e.target.value); setModelFile(null); }} />
@@ -283,12 +306,18 @@ export default function App() {
           <div>{message.text || (message.pending ? 'Модель готовит ответ…' : 'Пустой ответ')}</div>
           {message.reasoning && <details><summary>Рассуждение</summary><p>{message.reasoning}</p></details>}
           {message.elapsed_ms !== undefined && <small>{(message.elapsed_ms / 1000).toFixed(1)} с · {message.usage?.completion_tokens ?? '—'} токенов</small>}
+          {!!message.history_dropped && <small>В контекст не вошло {message.history_dropped} старых реплик. Полная история сохранена.</small>}
         </article>;
         })}
       </div>
       <form className="compact-composer" onSubmit={send}><textarea aria-label="Сообщение" placeholder="Напишите сообщение…" rows={3} value={input} onChange={e => setInput(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }} />
-        {generating ? <button type="button" onClick={() => void stop()}>Остановить</button> : <button className="primary" disabled={!input.trim() || !modelId}>Отправить</button>}</form>
+        {generating ? <button type="button" onClick={() => void stop()}>Остановить</button> : <button className="primary" disabled={!input.trim() || !modelId || !!budgetError}>Отправить</button>}</form>
+      <div className={`context-meter ${contextFull || budgetError ? 'context-warning' : ''}`}>
+        <progress aria-label="Примерная занятость контекста" max={Math.max(1, nCtx)} value={Math.min(estimatedContext, nCtx)} />
+        <span>≈ {estimatedContext.toLocaleString('ru-RU')} / {nCtx.toLocaleString('ru-RU')} ток. · под ответ {maxTokens}
+          {contextFull && (memory && trimHistory ? ' · старые реплики сократятся' : ' · запрос может не поместиться')}. Оценка; точная проверка перед генерацией.</span>
+      </div>
       <footer className="compact-status" role="status">{status}</footer>
     </main>
   </div>;

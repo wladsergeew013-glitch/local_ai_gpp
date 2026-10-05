@@ -49,6 +49,7 @@ export type BrandingSettings = {
 
 export type RuntimeSettings = {
   n_ctx: number;
+  context_overflow?: 'trim' | 'error';
   n_batch: number;
   n_threads: number;
   n_threads_batch: number;
@@ -151,6 +152,7 @@ export type ChatMessage = {
   answer_state?: string;
   reasoning_truncated?: boolean;
   finish_reason?: string | null;
+  history_dropped?: number;
   elapsed_ms?: number;
   request_id?: string;
   log_path?: string;

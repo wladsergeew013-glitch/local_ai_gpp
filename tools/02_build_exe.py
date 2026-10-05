@@ -481,8 +481,31 @@ def configure_embedded_python(worker_runtime: Path) -> None:
     log(f"[OK] Patched embedded Python path file: {pth}")
 
 
-def create_worker_runtime(runtime_kind: str) -> None:
-    dist = ROOT / "dist"
+def verify_worker_runtime(worker_py: Path, runtime_kind: str, dist: Path) -> dict[str, object]:
+    script = (
+        "import sys,json; "
+        "from backend.app.cuda_runtime import configure_cuda_dlls; configure_cuda_dlls(); "
+        "import backend.app.llama_worker, llama_cpp; "
+        "from llama_cpp import llama_cpp as lib; "
+        "print(json.dumps({'python':sys.executable,'llama_cpp':llama_cpp.__version__,"
+        "'supports_gpu_offload':bool(lib.llama_supports_gpu_offload()),"
+        "'system_info':lib.llama_print_system_info().decode('utf-8','replace')}))"
+    )
+    checked = subprocess.run([str(worker_py), "-c", script], cwd=str(dist),
+                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if checked.returncode:
+        raise SystemExit("[ERROR] Packaged runtime failed verification: " + (checked.stderr or checked.stdout))
+    details = json.loads(checked.stdout.strip().splitlines()[-1])
+    if runtime_kind.startswith("cu") and (
+        not details.get("supports_gpu_offload") or "CUDA" not in str(details.get("system_info", "")).upper()
+    ):
+        raise SystemExit("[ERROR] CUDA was selected, but the packaged worker has no CUDA offload. Build stopped.")
+    log("[OK] Verified packaged runtime: " + json.dumps(details, ensure_ascii=False))
+    return details
+
+
+def create_worker_runtime(runtime_kind: str, dist: Path | None = None) -> None:
+    dist = dist if dist is not None else ROOT / "dist"
     worker_runtime = dist / "worker_runtime"
     worker_py = worker_runtime / "python.exe"
     if worker_runtime.exists():
@@ -509,30 +532,44 @@ def create_worker_runtime(runtime_kind: str) -> None:
     runtime_kind = (runtime_kind or "cpu").lower()
     if runtime_kind.startswith("cu"):
         cached_wheel = os.environ.get("LOCAL_AI_GPP_CUDA_WHEEL")
-        package = [cached_wheel] if cached_wheel else [f"llama-cpp-python=={CUDA_VERSION}", "--extra-index-url", f"https://abetlen.github.io/llama-cpp-python/whl/{runtime_kind}"]
-        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--only-binary=:all:"] + package, cwd=dist)
+        if not cached_wheel:
+            wheel_dir = DOWNLOADS / f"llama-{CUDA_VERSION}-{runtime_kind}"
+            wheel_dir.mkdir(parents=True, exist_ok=True)
+            # Fetch only from the CUDA index; PyPI must not supply a CPU wheel.
+            run([str(worker_py), "-m", "pip", "download", "--no-deps", "--only-binary=:all:",
+                 "--index-url", f"https://abetlen.github.io/llama-cpp-python/whl/{runtime_kind}",
+                 "--dest", str(wheel_dir), f"llama-cpp-python=={CUDA_VERSION}"], cwd=dist)
+            wheels = list(wheel_dir.glob("llama_cpp_python-*.whl"))
+            if len(wheels) != 1:
+                raise SystemExit("[ERROR] Expected exactly one CUDA wheel in " + str(wheel_dir))
+            cached_wheel = str(wheels[0])
+        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--only-binary=:all:", cached_wheel], cwd=dist)
         dll_source = Path(os.environ.get("LOCAL_AI_GPP_CUDA_DLL_DIR", str(ROOT / "backend/.venv/cuda")))
         dlls = ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")
         if all((dll_source / name).is_file() for name in dlls):
             (worker_runtime / "cuda").mkdir(exist_ok=True)
             for name in dlls:
                 shutil.copy2(dll_source / name, worker_runtime / "cuda" / name)
+            for license_file in dll_source.glob('*LICENSE*.txt'):
+                shutil.copy2(license_file, worker_runtime / 'cuda' / license_file.name)
         else:
             run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "nvidia-cuda-runtime-cu12==12.4.127", "nvidia-cublas-cu12==12.4.5.8"], cwd=dist)
+        packaged_dll_dirs = [worker_runtime / "cuda",
+                             worker_runtime / "Lib/site-packages/nvidia/cuda_runtime/bin",
+                             worker_runtime / "Lib/site-packages/nvidia/cublas/bin"]
+        missing_dlls = [name for name in dlls if not any((folder / name).is_file() for folder in packaged_dll_dirs)]
+        if missing_dlls:
+            raise SystemExit("[ERROR] CUDA DLLs are missing from the portable worker: " + ", ".join(missing_dlls))
     else:
         run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "--force-reinstall", "--no-cache-dir", f"llama-cpp-python=={CPU_VERSION}", "--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cpu"], cwd=dist)
 
-    verify = (
-        "import sys,json; "
-        "from backend.app.cuda_runtime import configure_cuda_dlls; configure_cuda_dlls(); "
-        "import backend.app.llama_worker, llama_cpp; "
-        "print(json.dumps({'python':sys.executable,'sys_path':sys.path[:8],'llama_cpp':getattr(llama_cpp,'__version__','unknown')}, ensure_ascii=False))"
-    )
-    run([str(worker_py), "-c", verify], cwd=dist)
+    verified = verify_worker_runtime(worker_py, runtime_kind, dist)
     (dist / "runtime_info.json").write_text(
         json.dumps(
             {
                 "effective": runtime_kind,
+                "supports_gpu_offload": verified["supports_gpu_offload"],
+                "llama_cpp_version": verified["llama_cpp"],
                 "worker_python": "worker_runtime\\python.exe",
                 "python_embed_version": PY_EMBED_VERSION,
                 "backend_path_mode": "python._pth contains ..",
@@ -556,6 +593,7 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
     """
     dist = ROOT / "dist"
     readme = dist / "README_PORTABLE_DIST.txt"
+    shutil.copy2(ROOT / "models_storage/branding/icons/mini_agent_head_v2.ico", dist / "LocalAIGPP.ico")
     readme.write_text(
         "Local AI GPP portable dist\n"
         "==========================\n\n"
@@ -670,27 +708,48 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cpu", action="store_true", help="Build CPU worker runtime")
-    parser.add_argument("--cuda", nargs="?", const="auto", default=None, help="Build CUDA worker runtime, e.g. --cuda auto or --cuda cu124")
+    runtime = parser.add_mutually_exclusive_group()
+    runtime.add_argument("--cpu", action="store_true", help="Explicitly build CPU runtime; NVIDIA enables CUDA automatically otherwise")
+    runtime.add_argument("--cuda", nargs="?", const="auto", default=None, help="Require CUDA worker runtime, e.g. --cuda auto or --cuda cu124")
     parser.add_argument("--no-models", action="store_true", help="Do not copy registered model files into dist; keep metadata only")
     return parser.parse_args()
+
+
+def find_nvidia_smi() -> str:
+    candidates = [shutil.which("nvidia-smi")]
+    if os.name == "nt":
+        candidates += [str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/nvidia-smi.exe"),
+                       str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "NVIDIA Corporation/NVSMI/nvidia-smi.exe")]
+    return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), "")
 
 
 def choose_runtime_kind(args: argparse.Namespace) -> str:
     if args.cpu:
         return "cpu"
-    if not args.cuda:
+    if args.cuda is None and not find_nvidia_smi():
+        info_path = ROOT / "dist/runtime_info.json"
+        previous = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else {}
+        if str(previous.get("effective", "")).startswith("cu"):
+            return str(previous["effective"])
+        log("[INFO] NVIDIA was not detected. Building CPU runtime; --cuda cu124 forces a CUDA package.")
         return "cpu"
     requested = str(args.cuda or "auto").strip().lower()
     if requested in {"", "auto", "cuda", "gpu"}:
-        if shutil.which("nvidia-smi"):
-            return os.environ.get("LOCAL_AI_GPP_DEFAULT_CUDA_TAG", "cu124")
-        log("[WARN] --cuda auto was requested, but nvidia-smi was not found. Building CPU worker runtime.")
-        return "cpu"
-    if not requested.startswith("cu"):
-        log(f"[WARN] Unsupported CUDA tag '{requested}'. Expected cu124/cu125/etc. Building CPU worker runtime.")
-        return "cpu"
+        requested = os.environ.get("LOCAL_AI_GPP_DEFAULT_CUDA_TAG", "cu124")
+    if not requested.startswith("cu") or not requested[2:].isdigit():
+        raise SystemExit(f"[ERROR] Unsupported CUDA tag '{requested}'. Expected cu124/cu125/etc.")
     return requested
+
+
+def prepare_worker_runtime(runtime_kind: str) -> Path:
+    stage = OUT / "worker_stage"
+    if stage.exists():
+        remove_build_tree(stage)
+    shutil.copytree(ROOT / "backend/app", stage / "backend/app", ignore=ignore_junk)
+    (stage / "backend/__init__.py").write_text("", encoding="utf-8")
+    shutil.copy2(ROOT / "VERSION", stage / "VERSION")
+    create_worker_runtime(runtime_kind, stage)
+    return stage
 
 
 def main() -> int:
@@ -708,11 +767,17 @@ def main() -> int:
     venv_py = ensure_backend_venv(base_python)
     if getattr(args, "no_models", False):
         os.environ["LOCAL_AI_GPP_PACKAGE_MODELS"] = "0"
+    # Install and verify CUDA plus its DLLs before replacing the current EXE.
+    worker_stage = prepare_worker_runtime(runtime_kind)
     clean_python_caches()
     build_frontend()
     build_pyinstaller(venv_py)
     copy_portable_backend_and_metadata()
-    create_worker_runtime(runtime_kind)
+    worker_target = ROOT / "dist/worker_runtime"
+    if worker_target.exists():
+        remove_build_tree(worker_target)
+    shutil.move(str(worker_stage / "worker_runtime"), str(worker_target))
+    shutil.copy2(worker_stage / "runtime_info.json", ROOT / "dist/runtime_info.json")
     write_dist_portable_helpers(runtime_kind)
     log("")
     log("=" * 60)

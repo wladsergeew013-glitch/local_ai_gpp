@@ -82,6 +82,7 @@ export async function sendChat(payload: {
   answer_state?: string;
   reasoning_truncated?: boolean;
   finish_reason?: string | null;
+  history_dropped?: number;
   elapsed_ms?: number;
   usage?: {
     prompt_tokens?: number;
@@ -118,6 +119,7 @@ export type ChatStreamEvent = {
   answer_state?: string;
   reasoning_truncated?: boolean;
   finish_reason?: string | null;
+  history_dropped?: number;
   elapsed_ms?: number;
   usage?: Record<string, unknown>;
   request_id?: string;

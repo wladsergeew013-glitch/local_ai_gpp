@@ -4,6 +4,7 @@ import codecs
 import contextlib
 import json
 import os
+import queue
 import random
 import socket
 import subprocess
@@ -20,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import uvicorn
+from backend.app.context_budget import estimate_context, validate_context
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -37,6 +39,28 @@ assistant_agent: "NativeAssistantAgent | None" = None
 tray_icon: Any | None = None
 webview_module: Any | None = None
 quitting = False
+
+
+def monitor_work_area(x: int, y: int) -> tuple[int, int, int, int] | None:
+    if os.name != 'nt':
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [('cbSize', wintypes.DWORD), ('rcMonitor', wintypes.RECT),
+                    ('rcWork', wintypes.RECT), ('dwFlags', wintypes.DWORD)]
+
+    user32 = ctypes.windll.user32
+    user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    user32.MonitorFromPoint.restype = ctypes.c_void_p
+    user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MonitorInfo)]
+    monitor = user32.MonitorFromPoint(wintypes.POINT(x, y), 2)
+    info = MonitorInfo(cbSize=ctypes.sizeof(MonitorInfo))
+    if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        work = info.rcWork
+        return work.left, work.top, work.right, work.bottom
+    return None
 
 
 def runtime_dir() -> Path:
@@ -686,22 +710,26 @@ def upsert_shared_chat_message(payload: Any) -> dict[str, Any]:
     if not message.get("syncUpdatedAt"):
         message = dict(message)
         message["syncUpdatedAt"] = float(payload.get("updatedAt") or time.time() * 1000.0)
-    existing = read_chat_state_unlocked()
-    requested_id = str(payload.get("conversationId") or payload.get("activeConversationId") or "").strip()
-    active_id = str(existing.get("activeConversationId") or "")
-    conversation_id = requested_id or active_id or SHARED_CHAT_CONVERSATION_ID
-    conversation_title = str(payload.get("conversationTitle") or "").strip() or SHARED_CHAT_TITLE
-    created_at = str(payload.get("conversationCreatedAt") or time.strftime("%Y-%m-%dT%H:%M:%S"))
-    conv = _new_conversation(conversation_id=conversation_id, title=conversation_title, created_at=created_at, messages=[message])
-    state = {
-        "version": 0,
-        "updatedAt": time.time() * 1000.0,
-        "source": str(payload.get("source") or ""),
-        "activeConversationId": conversation_id,
-        "conversations": [conv],
-    }
     with chat_sync_lock:
-        merged = _merge_incoming_chat_state_unlocked(state, read_chat_state_unlocked())
+        existing = read_chat_state_unlocked()
+        requested_id = str(payload.get("conversationId") or payload.get("activeConversationId") or "").strip()
+        active_id = str(existing.get("activeConversationId") or "")
+        conversation_id = requested_id or active_id or SHARED_CHAT_CONVERSATION_ID
+        conversation_title = str(payload.get("conversationTitle") or "").strip() or SHARED_CHAT_TITLE
+        created_at = str(payload.get("conversationCreatedAt") or time.strftime("%Y-%m-%dT%H:%M:%S"))
+        conv = _new_conversation(conversation_id=conversation_id, title=conversation_title, created_at=created_at, messages=[message])
+        state = {
+            "version": 0,
+            "updatedAt": time.time() * 1000.0,
+            "source": str(payload.get("source") or ""),
+            "activeConversationId": conversation_id if payload.get("activateConversation", True) else active_id,
+            "conversations": [conv],
+        }
+        merged = _merge_incoming_chat_state_unlocked(state, existing)
+        # Partial updates contain only the answering dialog; normalization uses
+        # that dialog as its active fallback. Restore the viewer's selection.
+        if not payload.get('activateConversation', True) and _find_conversation(merged['conversations'], active_id):
+            merged['activeConversationId'] = active_id
         return _write_chat_state_raw(merged)
 
 
@@ -768,6 +796,7 @@ def append_shared_message(role: str, text: str, *, message_id: str | None = None
             "conversationId": target_id,
             "conversationTitle": title,
             "conversationCreatedAt": created_at,
+            "activateConversation": False,
             "message": message,
         }
     )
@@ -823,6 +852,7 @@ def _select_desktop_chat_config(payload: dict[str, Any]) -> dict[str, Any]:
         runtime.update(selected.get("runtime") or {})
     if isinstance(payload.get("runtime"), dict):
         runtime.update(payload.get("runtime") or {})
+    validate_context(int(runtime.get('n_ctx', 4096)), int(payload.get('max_tokens', runtime.get('max_tokens', 1024))))
     return {
         "model_id": str(selected.get("id") or ""),
         "temperature": float(payload.get("temperature", runtime.get("temperature", 0.2))),
@@ -898,6 +928,7 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
                             update_answer(final_answer, pending=False, phase="done", extra={
                                 "elapsed_ms": event.get("elapsed_ms"),
                                 "usage": event.get("usage"),
+                                "history_dropped": event.get("history_dropped", 0),
                                 "finish_reason": event.get("finish_reason"),
                                 "request_id": event.get("request_id"),
                                 "log_path": event.get("log_path"),
@@ -1212,6 +1243,7 @@ class NativeAssistantAgent:
     def __init__(self, get_port: Any) -> None:
         self.get_port = get_port
         self.root: Any | None = None
+        self.ui_events: queue.SimpleQueue = queue.SimpleQueue()
         self.chat: Any | None = None
         self.tail: Any | None = None
         self.tail_canvas: Any | None = None
@@ -1244,6 +1276,7 @@ class NativeAssistantAgent:
         self.temperature = 0.2
         self.max_tokens = 1024
         self.runtime: dict[str, Any] = {}
+        self.runtime_settings_stamp = 0
         self.settings = read_assistant_settings()
         self.avatar_w = int(self.settings["avatar_width"])
         self.avatar_h = int(self.settings["avatar_height"])
@@ -1262,7 +1295,7 @@ class NativeAssistantAgent:
         self.send_button: Any | None = None
         self.close_button: Any | None = None
         self.resize_edges: dict[str, Any] = {}
-        self.resize_start: dict[str, int | str] | None = None
+        self.resize_start: dict[str, Any] | None = None
         self.resize_poll_after: str | None = None
         self.chat_side = "left"
         self.tail_side: str | None = None
@@ -1287,6 +1320,8 @@ class NativeAssistantAgent:
         self.reveal_after: str | None = None
         self.input_var: Any | None = None
         self.settings_window: Any | None = None
+        self.context_window: Any | None = None
+        self.context_label: Any | None = None
         self._visible = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -1338,6 +1373,7 @@ class NativeAssistantAgent:
         self.avatar_menu.add_separator()
         self.avatar_menu.add_command(label="Поверх всех окон", command=self._menu_command(self._toggle_topmost))
         self.avatar_menu.add_command(label="Настройки помощника...", command=self._menu_command(self.show_settings))
+        self.avatar_menu.add_command(label="Контекст и длина ответа...", command=self._menu_command(self._show_context_dialog))
         self.avatar_menu.add_command(label="Обновить состояние модели", command=self._menu_command(lambda: threading.Thread(target=self._refresh_bootstrap, daemon=True).start()))
         self.avatar_menu.add_command(label="Выгрузить модели", command=self._menu_command(lambda: threading.Thread(target=unload_models_from_tray, daemon=True).start()))
         self.avatar_menu.add_separator()
@@ -1351,7 +1387,8 @@ class NativeAssistantAgent:
         self._render_shared_history(force=True)
         self._schedule_chat_sync_poll()
         self._load_frames()
-        self._refresh_bootstrap()
+        # HTTP can wait for a cold model/server. Keep Tk's event loop free.
+        threading.Thread(target=self._refresh_bootstrap, daemon=True).start()
         self._animate()
         self.root.mainloop()
 
@@ -1431,7 +1468,7 @@ class NativeAssistantAgent:
         bottom.pack(side="bottom", fill="x", pady=(12, 0))
         self.compose_frame = bottom
         self.input_var = tk.StringVar()
-        self.input_var.trace_add("write", lambda *_args: self._refresh_send_button())
+        self.input_var.trace_add("write", lambda *_args: (self._refresh_send_button(), self._refresh_context_hint()))
         self.entry_widget = tk.Entry(bottom, textvariable=self.input_var, font=("Segoe UI", max(11, self.font_size + 1)), relief="solid", bd=1, highlightthickness=2, highlightbackground="#b8d0ea", highlightcolor="#1d5fa8")
         self.entry_widget.pack(side="left", fill="x", expand=True, ipady=7)
         self.entry_widget.bind("<Return>", lambda _e: self._send_message())
@@ -1442,6 +1479,12 @@ class NativeAssistantAgent:
         self.send_button.pack(side="left", padx=(10, 0), ipadx=16, ipady=3)
         self.send_button.bind("<Button-1>", lambda _e: self._send_message())
         self._refresh_send_button()
+
+        context_bar = tk.Frame(body, bg="#fbfdff")
+        context_bar.pack(side="bottom", fill="x", pady=(6, 0))
+        self.context_label = tk.Label(context_bar, text="", bg="#fbfdff", fg="#66809e", anchor="w", font=("Segoe UI", 9))
+        self.context_label.pack(side="left", fill="x", expand=True)
+        tk.Button(context_bar, text="Контекст", command=self._show_context_dialog, bg="#edf4fb", fg="#155eb9", relief="flat", font=("Segoe UI", 9)).pack(side="right")
 
         self._create_snake_panel(tk, body)
         self.history_box.pack(fill="both", expand=True)
@@ -1472,6 +1515,7 @@ class NativeAssistantAgent:
 
         self.chat_menu = tk.Menu(self.chat, tearoff=0)
         self.chat_menu.add_command(label="Диалоги", command=self._menu_command(self._toggle_dialog_sidebar))
+        self.chat_menu.add_command(label="Контекст и длина ответа...", command=self._menu_command(self._show_context_dialog))
         self.chat_menu.add_command(label="Открыть полный интерфейс", command=self._menu_command(show_main_window))
         self.chat_menu.add_command(label="Скрыть чат", command=self._menu_command(self.hide_chat))
         self.chat_menu.add_command(label="Скрыть помощника", command=self._menu_command(self.hide))
@@ -1510,14 +1554,6 @@ class NativeAssistantAgent:
                 self.dialog_listbox.selection_set(index)
                 self.dialog_listbox.see(index)
 
-    def _can_switch_dialog(self, state: dict[str, Any]) -> bool:
-        if any(m.get("pending") for c in state.get("conversations", []) for m in c.get("messages", [])):
-            self.set_state("thinking", "Ответ в процессе", "Дождитесь завершения ответа")
-            self.dialog_list_signature = None
-            self._refresh_dialog_list(state)
-            return False
-        return True
-
     def _finish_dialog_switch(self) -> None:
         if self.reveal_after and self.root is not None:
             self.root.after_cancel(self.reveal_after)
@@ -1534,15 +1570,13 @@ class NativeAssistantAgent:
             return
         state = read_chat_state()
         target_id = self.dialog_ids[selected[0]]
-        if target_id == state.get("activeConversationId") or not self._can_switch_dialog(state):
+        if target_id == state.get("activeConversationId"):
             return
         write_chat_state({**state, "activeConversationId": target_id, "source": "assistant-dialog-select"})
         self._finish_dialog_switch()
 
     def _new_assistant_dialog(self) -> None:
         state = read_chat_state()
-        if not self._can_switch_dialog(state):
-            return
         conversation = _new_conversation(title="Новый диалог")
         write_chat_state({**state, "activeConversationId": conversation["id"],
                           "conversations": [conversation, *state["conversations"]], "source": "new-conversation"})
@@ -1551,8 +1585,15 @@ class NativeAssistantAgent:
     def _display_chat_height(self) -> int:
         height = max(self.chat_h, 430 if self.snake_active else 260)
         if self.root is not None:
-            height = min(height, max(260, self.root.winfo_screenheight() - 48))
+            _, top, _, bottom = self._monitor_work_area()
+            height = min(height, max(260, bottom - top - 24))
         return height
+
+    def _monitor_work_area(self) -> tuple[int, int, int, int]:
+        area = monitor_work_area(self.avatar_x + self.avatar_w // 2, self.avatar_y + self.avatar_h // 2)
+        if area is not None:
+            return area
+        return (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()) if self.root is not None else (0, 0, 1600, 900)
 
     def _place_resize_edges(self) -> None:
         if not self.resize_edges:
@@ -1582,6 +1623,7 @@ class NativeAssistantAgent:
             "height": self.chat.winfo_height(),
             "avatar_x": self.avatar_x,
             "side": self.chat_side,
+            "work_area": self._monitor_work_area(),
         }
         if os.name == "nt" and self.root is not None:
             self.resize_poll_after = self.root.after(30, self._poll_chat_resize)
@@ -1610,7 +1652,7 @@ class NativeAssistantAgent:
         start = self.resize_start
         edge = str(start["edge"])
         side = str(start["side"])
-        screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        left, top, right, bottom = start["work_area"]
         base_x, base_y = int(start["x"]), int(start["y"])
         base_w, base_h = int(start["width"]), int(start["height"])
         dx = pointer_x - int(start["pointer_x"])
@@ -1619,17 +1661,17 @@ class NativeAssistantAgent:
         x = base_x
         if "right" in edge:
             if side == "left":
-                max_width = min(760, screen_w - 24 - 24 - self.avatar_w)
+                max_width = min(760, right - left - 48 - self.avatar_w)
                 width = max(420, min(max_width, base_w + dx))
-                x = max(12, min(base_x, screen_w - width - self.avatar_w - 24 - 12))
+                x = max(left + 12, min(base_x, right - width - self.avatar_w - 36))
                 self.avatar_x = x + width + 24
                 self.root.geometry(f"{self.avatar_w}x{self.avatar_h}+{self.avatar_x}+{self.avatar_y}")
             else:
-                max_width = min(760, screen_w - base_x - 12)
+                max_width = min(760, right - base_x - 12)
                 width = max(420, min(max_width, base_w + dx))
         if "bottom" in edge:
             minimum = 430 if self.snake_active else 260
-            max_height = min(900, screen_h - base_y - 12)
+            max_height = min(900, bottom - base_y - 12)
             height = max(minimum, min(max_height, base_h + dy))
         if width == self.chat_w and height == self.chat_h and x == self.chat.winfo_rootx():
             return
@@ -1638,7 +1680,7 @@ class NativeAssistantAgent:
         if self.close_button is not None:
             self.close_button.place(x=width - 46, y=11, width=34, height=34)
         self._place_resize_edges()
-        self._place_tail(x, base_y, side, screen_w, screen_h)
+        self._place_tail(x, base_y, side)
 
     def _finish_chat_resize(self) -> None:
         if self.resize_start is None:
@@ -1651,7 +1693,6 @@ class NativeAssistantAgent:
         if self.chat is not None and self.root is not None:
             self._place_tail(
                 self.chat.winfo_rootx(), self.chat.winfo_rooty(), self.chat_side,
-                self.root.winfo_screenwidth(), self.root.winfo_screenheight(),
             )
             if self.tail is not None:
                 self.tail.lift()
@@ -1880,6 +1921,117 @@ class NativeAssistantAgent:
     def show_settings(self) -> None:
         if self.root is not None:
             self.root.after(0, self._show_settings_dialog)
+
+    def _refresh_context_hint(self) -> None:
+        if self.context_label is None:
+            return
+        state = read_chat_state()
+        conversation = _find_conversation(state.get('conversations') or [], state.get('activeConversationId')) or {}
+        history = [{'content': str(m.get('answer') or m.get('text') or '')} for m in (conversation.get('messages') or [])[-64:]
+                   if not m.get('pending') and m.get('phase') != 'error']
+        messages = [{'content': 'Ты локальный корпоративный помощник Local AI GPP. Отвечай кратко и по делу на русском языке.'},
+                    *history, {'content': self.input_var.get() if self.input_var is not None else ''}]
+        context = int(self.runtime.get('n_ctx', 4096))
+        estimate = estimate_context(messages, self.max_tokens)
+        warning = estimate > context
+        self.context_label.configure(text=f'≈ {estimate} / {context} ток. · ответ {self.max_tokens}' + (' · история сократится' if warning and self.runtime.get('context_overflow', 'trim') == 'trim' else ' · лимит!' if warning else ''),
+                                     fg='#a55d10' if warning else '#66809e')
+
+    def _show_context_dialog(self) -> None:
+        if self.root is None or self.tk is None:
+            return
+        if self.context_window is not None and self.context_window.winfo_exists():
+            self.context_window.lift()
+            return
+        tk = self.tk
+        from tkinter import ttk
+        win = tk.Toplevel(self.root)
+        self.context_window = win
+        win.title('Контекст и длина ответа')
+        win.attributes('-topmost', self.always_on_top)
+        win.configure(bg='#f7fbff')
+        left, top, right, bottom = self._monitor_work_area()
+        x, y = max(left + 12, min(right - 462, self.avatar_x - 220)), max(top + 12, min(bottom - 440, self.avatar_y))
+        win.geometry(f'450x425+{x}+{y}')
+        win.resizable(False, False)
+        context_var = tk.StringVar(value=str(self.runtime.get('n_ctx', 4096)))
+        answer_var = tk.StringVar(value=str(self.max_tokens))
+        trim_var = tk.BooleanVar(value=self.runtime.get('context_overflow', 'trim') == 'trim')
+        tk.Label(win, text='Контекст включает историю, вопрос и ответ.', bg='#f7fbff', fg='#17324d', font=('Segoe UI', 10, 'bold')).pack(anchor='w', padx=18, pady=(18, 10))
+        fields = tk.Frame(win, bg='#f7fbff')
+        fields.pack(fill='x', padx=18)
+        for row, label, variable, presets in ((0, 'Контекст, токенов', context_var, (2048, 4096, 8192, 16384)),
+                                              (1, 'Максимум на ответ', answer_var, (256, 512, 1024, 2048))):
+            tk.Label(fields, text=label, bg='#f7fbff', fg='#17324d', font=('Segoe UI', 10)).grid(row=row, column=0, sticky='w', pady=8)
+            ttk.Combobox(fields, textvariable=variable, values=presets, width=14).grid(row=row, column=1, padx=(26, 0), pady=8)
+        tk.Checkbutton(win, text='Автоматически сокращать старые реплики', variable=trim_var, bg='#f7fbff', fg='#17324d', font=('Segoe UI', 10)).pack(anchor='w', padx=14, pady=8)
+        tk.Label(win, text='Полная история остаётся в диалогах. Модель получает последние реплики, которые помещаются. Больший контекст требует больше памяти; для этой видеокарты начните с 4096.', wraplength=408, justify='left', bg='#f7fbff', fg='#5b6d82', font=('Segoe UI', 9)).pack(fill='x', padx=18)
+        hint = tk.Label(win, text='', wraplength=408, justify='left', bg='#f7fbff', fg='#5b6d82', font=('Segoe UI', 9))
+        hint.pack(fill='x', padx=18, pady=12)
+
+        def validate(*_args: Any) -> bool:
+            try:
+                context, answer = int(context_var.get()), int(answer_var.get())
+                validate_context(context, answer)
+                hint.configure(text=f'На вопрос и историю остаётся до {context - answer - 128} токенов (до учёта оформления). При изменении контекста модель перезагрузится со следующим запросом.', fg='#5b6d82')
+                return True
+            except ValueError as exc:
+                hint.configure(text=str(exc) if 'токен' in str(exc) else 'Введите целое число токенов.', fg='#ba3c32')
+                return False
+
+        def save() -> None:
+            if not validate():
+                return
+            patch_runtime = {'n_ctx': int(context_var.get()), 'max_tokens': int(answer_var.get()),
+                             'context_overflow': 'trim' if trim_var.get() else 'error'}
+            save_button.configure(state='disabled')
+            hint.configure(text='Сохраняю настройки…')
+
+            def worker() -> None:
+                try:
+                    settings = self._json_request('GET', '/api/settings')
+                    settings.setdefault('runtime', {}).update(patch_runtime)
+                    self._json_request('PUT', '/api/settings', settings)
+                except Exception as exc:
+                    error = str(exc)
+                    def failed() -> None:
+                        if win.winfo_exists():
+                            hint.configure(text=f'Не удалось сохранить: {error}', fg='#ba3c32')
+                            save_button.configure(state='normal')
+                    self.ui_events.put(failed)
+                else:
+                    def saved() -> None:
+                        self.runtime = {**self.runtime, **patch_runtime}
+                        self.max_tokens = patch_runtime['max_tokens']
+                        self._refresh_context_hint()
+                        if win.winfo_exists():
+                            win.destroy()
+                        self.context_window = None
+                    self.ui_events.put(saved)
+            threading.Thread(target=worker, daemon=True).start()
+
+        for variable in (context_var, answer_var):
+            variable.trace_add('write', validate)
+        validate()
+        buttons = tk.Frame(win, bg='#f7fbff')
+        buttons.pack(side='bottom', fill='x', padx=18, pady=16)
+        save_button = tk.Button(buttons, text='Сохранить', command=save, bg='#1d5fa8', fg='white', relief='flat', padx=14, pady=7)
+        save_button.pack(side='right')
+        tk.Button(buttons, text='Закрыть', command=win.destroy, bg='#dbe8f6', fg='#17324d', relief='flat', padx=14, pady=7).pack(side='right', padx=8)
+
+    def _refresh_runtime_settings(self) -> None:
+        path = MODELS_DIR / 'settings.json'
+        try:
+            stamp = path.stat().st_mtime_ns
+            if stamp == self.runtime_settings_stamp:
+                return
+            runtime = _read_json_file(path, {}).get('runtime') or {}
+            self.runtime = dict(runtime)
+            self.max_tokens = int(runtime.get('max_tokens', 1024))
+            self.temperature = float(runtime.get('temperature', 0.2))
+            self.runtime_settings_stamp = stamp
+        except (OSError, ValueError, TypeError):
+            pass
 
     def _show_settings_dialog(self) -> None:
         if self.root is None or self.tk is None:
@@ -2262,40 +2414,36 @@ class NativeAssistantAgent:
     def _place_chat(self) -> None:
         if self.chat is None or self.root is None:
             return
-        try:
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-        except Exception:
-            screen_w, screen_h = 1600, 900
+        left, top, right, bottom = self._monitor_work_area()
 
         gap = 24
         left_x = self.avatar_x - self.chat_w - gap
         right_x = self.avatar_x + self.avatar_w + gap
-        if left_x >= 12:
+        if left_x >= left + 12:
             x = left_x
             side = "left"
-        elif right_x + self.chat_w <= screen_w - 12:
+        elif right_x + self.chat_w <= right - 12:
             x = right_x
             side = "right"
         else:
             # Keep the chat visible, and prefer the side with more space.
-            if self.avatar_x > screen_w / 2:
-                x = max(12, min(screen_w - self.chat_w - 12, left_x))
+            if self.avatar_x > (left + right) / 2:
+                x = max(left + 12, min(right - self.chat_w - 12, left_x))
                 side = "left"
             else:
-                x = max(12, min(screen_w - self.chat_w - 12, right_x))
+                x = max(left + 12, min(right - self.chat_w - 12, right_x))
                 side = "right"
 
         displayed_height = self._display_chat_height()
-        y = max(12, min(screen_h - displayed_height - 48, self.avatar_y + 8))
+        y = max(top + 12, min(bottom - displayed_height - 12, self.avatar_y + 8))
         self.chat_side = side
         self.chat.geometry(f"{self.chat_w}x{displayed_height}+{x}+{y}")
         self._place_resize_edges()
         if self.close_button is not None:
             self.close_button.place(x=self.chat_w - 46, y=11, width=34, height=34)
-        self._place_tail(x, y, side, screen_w, screen_h)
+        self._place_tail(x, y, side)
 
-    def _place_tail(self, chat_x: int, chat_y: int, side: str, screen_w: int, screen_h: int) -> None:
+    def _place_tail(self, chat_x: int, chat_y: int, side: str) -> None:
         if self.tail is None or self.tail_canvas is None or self.chat is None:
             return
         if self.drag_start is not None or not self.bubble_open:
@@ -2407,8 +2555,8 @@ class NativeAssistantAgent:
             pass
 
     def set_state(self, state: str, title: str, status: str) -> None:
-        if self.root is not None:
-            self.root.after(0, lambda: self._set_state(state, title, status))
+        # Workers never call Tcl/Tk, including after(). Tk drains this queue.
+        self.ui_events.put(lambda: self._set_state(state, title, status))
 
     def _set_state(self, state: str, title: str, status: str) -> None:
         next_state = state if state in {"ready", "thinking", "speaking", "error"} else "ready"
@@ -2450,6 +2598,8 @@ class NativeAssistantAgent:
         else:
             self.history_box.insert("end", "Помощник: ", "assistant")
         self.history_box.insert("end", clean + "\n\n", f"body-{role}")
+        if message.get('history_dropped'):
+            self.history_box.insert('end', f"В контекст не вошло {message['history_dropped']} старых реплик. Полная история сохранена.\n\n", 'timestamp-assistant')
 
     def _render_shared_history(self, force: bool = False) -> None:
         if self.history_box is None:
@@ -2500,7 +2650,7 @@ class NativeAssistantAgent:
                     if not isinstance(item, dict):
                         continue
                     role = "user" if item.get("role") == "user" else "assistant"
-                    text = "Готовлю ответ..." if role == "assistant" and item.get("pending") else str(item.get("answer") or item.get("text") or "").strip()
+                    text = str(item.get("answer") or item.get("text") or "Готовлю ответ...").strip()
                     if reveal_id and str(item.get("id") or "") == reveal_id:
                         reveal_text = self._strip_prefix("assistant", text)
                         self.history_box.insert("end", format_message_time(item) + "\n", "timestamp-assistant")
@@ -2555,7 +2705,7 @@ class NativeAssistantAgent:
             assistant_messages = [item for item in messages if isinstance(item, dict) and item.get("role") == "assistant"]
             last = assistant_messages[-1] if assistant_messages else None
             if isinstance(last, dict) and last.get("pending"):
-                self._set_state("thinking", "Думаю", "Готовлю ответ")
+                self._set_state("thinking", "Думаю", str(last.get('text') or 'Готовлю ответ')[:100])
             elif self.state in {"thinking", "speaking"}:
                 self._set_state("ready", "На связи", "Готов помочь")
         except Exception:
@@ -2564,7 +2714,11 @@ class NativeAssistantAgent:
     def _schedule_chat_sync_poll(self) -> None:
         if self.root is None:
             return
+        while not self.ui_events.empty():
+            self.ui_events.get_nowait()()
+        self._refresh_runtime_settings()
         self._render_shared_history(force=False)
+        self._refresh_context_hint()
         self.sync_poll_after = self.root.after(500, self._schedule_chat_sync_poll)
 
     def _append_history(self, role: str, text: str, persist: bool = True) -> None:
@@ -2627,18 +2781,27 @@ class NativeAssistantAgent:
         text = self.input_var.get().strip()
         if not text:
             return
+        if generation_lock.locked():
+            self._set_state('thinking', 'Ответ в процессе', 'Дождитесь ответа; диалоги можно просматривать')
+            return
+        try:
+            validate_context(int(self.runtime.get('n_ctx', 4096)), self.max_tokens)
+        except ValueError as exc:
+            self._set_state('error', 'Настройки контекста', str(exc))
+            self._show_context_dialog()
+            return
         self.input_var.set("")
         if not self.bubble_open:
             self.show_chat()
         self._set_state("thinking", "Думаю", "Отправил запрос в общий диалог")
         self.awaiting_answer = True
         self.busy_request = True
-        threading.Thread(target=self._send_message_worker, args=(text,), daemon=True).start()
+        state = read_chat_state()
+        conversation_id = str(state.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
+        threading.Thread(target=self._send_message_worker, args=(text, conversation_id), daemon=True).start()
 
-    def _send_message_worker(self, text: str) -> None:
+    def _send_message_worker(self, text: str, conversation_id: str) -> None:
         try:
-            state = read_chat_state_unlocked()
-            conversation_id = str(state.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
             payload = {
                 "source": "assistant",
                 "message": text,
@@ -2648,7 +2811,9 @@ class NativeAssistantAgent:
                 "system_prompt": "Ты локальный корпоративный помощник Local AI GPP. Отвечай кратко и по делу на русском языке.",
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
-                "runtime": self.runtime,
+                # Keep the model's load profile (threads/batch/GPU layers), so
+                # asking from the mini helper reuses a manually warmed worker.
+                "runtime": {key: self.runtime[key] for key in ('n_ctx', 'context_overflow', 'enable_thinking', 'warm_policy') if key in self.runtime},
             }
             result = self._json_request("POST", "/api/desktop/chat-send", payload, timeout=20)
             if not result.get("ok"):
@@ -2656,7 +2821,7 @@ class NativeAssistantAgent:
             # No Tk calls from this worker thread. The assistant window polls shared_chat_v65.json.
         except Exception as exc:
             message = str(exc)
-            append_shared_message("assistant", f"Ошибка: {message}", message_id=f"native-error-{int(time.time() * 1000)}", pending=False, phase="error")
+            append_shared_message("assistant", f"Ошибка: {message}", message_id=f"native-error-{int(time.time() * 1000)}", conversation_id=conversation_id, pending=False, phase="error")
             # No Tk calls from this worker thread. The assistant window polls shared_chat_v65.json.
         finally:
             self.busy_request = False

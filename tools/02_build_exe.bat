@@ -18,6 +18,8 @@ REM   tools\02_build_exe.bat --cuda cu124
 REM   tools\02_build_exe.bat --cpu --no-models
 REM By default v67.4 copies registered local GGUF/BIN/SAFETENSORS files into dist.
 REM Use --no-models to build a lightweight shell without packaging models.
+REM NVIDIA enables CUDA automatically. CUDA DLLs are packaged and verified
+REM before replacing the current EXE. Use --cpu only for an explicit CPU build.
 REM ============================================================
 
 cd /d "%~dp0.."

@@ -1,10 +1,27 @@
 """Creation timestamps survive desktop stream updates and legacy history reads."""
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from tools import exe_launcher as desktop
 
 
 class DesktopHistoryTests(unittest.TestCase):
+    def test_background_answer_does_not_switch_the_dialog_being_viewed(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'assistant_state_dir', return_value=Path(folder)):
+            desktop.write_chat_state({'source': 'new-conversation', 'activeConversationId': 'loading', 'conversations': [
+                {'id': 'loading', 'title': 'Loading model', 'messages': []},
+                {'id': 'reading', 'title': 'Saved history', 'messages': []}]})
+            desktop.append_shared_message('assistant', 'Loading...', message_id='answer', conversation_id='loading', pending=True)
+            state = desktop.read_chat_state()
+            desktop.write_chat_state({**state, 'activeConversationId': 'reading', 'source': 'assistant-dialog-select'})
+            for pending, text in ((True, 'Streaming'), (False, 'Done')):
+                state = desktop.append_shared_message('assistant', text, message_id='answer', conversation_id='loading', pending=pending)
+                self.assertEqual(state['activeConversationId'], 'reading')
+            original = next(c for c in state['conversations'] if c['id'] == 'loading')
+            self.assertEqual(original['messages'][0]['text'], 'Done')
+            self.assertFalse(original['messages'][0]['pending'])
+
     def test_assistant_update_preserves_conversation_title_and_date(self):
         state = {'activeConversationId': 'dialog', 'conversations': [
             {'id': 'dialog', 'title': 'Question about CUDA', 'createdAt': '2026-10-02T17:00:00Z'}]}

@@ -141,6 +141,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "runtime": {
         "n_ctx": 4096,
+        "context_overflow": "trim",
         "n_batch": 512,
         "n_threads": max(1, os.cpu_count() or 4),
         "n_threads_batch": 0,
@@ -997,12 +998,17 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
         _, model, _ = find_model(model_id)
         settings = load_settings()
         cfg = _merge_runtime(model, settings, runtime_override)
+        from backend.app.context_budget import validate_context
+        try:
+            validate_context(_int_value(cfg.get('n_ctx'), 4096), max_tokens)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         worker = _get_runtime(model, settings, request_log_path, runtime_override, prewarm=False)
         entry = RUNTIMES[model_id]
         entry.update(state="generating", last_used_at=now_iso(), last_used_ts=time.time())
         append_request_log(request_log_path, "generation_start", {"message_count": len(messages), "worker_pid": worker.process.pid})
         events = _worker_events(worker, _worker_payload(model, cfg, messages=messages, temperature=temperature,
-                                max_tokens=max_tokens, stream=stream, truncate_history=truncate_history))
+                                max_tokens=max_tokens, stream=stream, truncate_history=truncate_history and cfg.get('context_overflow', 'trim') == 'trim'))
         try:
             for event in events:
                 if event.get("type") == "error":
