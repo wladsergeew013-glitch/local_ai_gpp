@@ -91,7 +91,7 @@ class FileBoundaryTests(unittest.TestCase):
             self.assertEqual(error.exception.status_code,409)
         finally:core.RUNTIME_LOCK.release()
         self.assertEqual(Path(first['path']).read_bytes(),b'old')
-        self.assertEqual(core.load_models()[0]['path'],first['path'])
+        self.assertEqual(Path(core.load_models()[0]['path']).resolve(),Path(first['path']).resolve())
 
     def test_external_read_only_registration_is_supported(self):
         external=self.root/'external.gguf';external.write_bytes(b'GGUF')
