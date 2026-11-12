@@ -328,7 +328,7 @@ def remove_build_tree(target: Path) -> None:
         shutil.rmtree(target)
 
 
-def _copy_portable_model_registry(models_src: Path, models_dst: Path) -> None:
+def _copy_portable_model_registry(models_src: Path, models_dst: Path, *, package_models: bool | None = None) -> None:
     src_registry = models_src / "models.json"
     dst_registry = models_dst / "models.json"
     if not src_registry.exists():
@@ -348,7 +348,8 @@ def _copy_portable_model_registry(models_src: Path, models_dst: Path) -> None:
         log("[WARN] models.json is not a list. Wrote empty portable registry.")
         return
 
-    package_models = os.environ.get("LOCAL_AI_GPP_PACKAGE_MODELS", "1").strip().lower() not in {"0", "false", "no", "off"}
+    if package_models is None:
+        package_models = os.environ.get("LOCAL_AI_GPP_PACKAGE_MODELS", "1").strip().lower() not in {"0", "false", "no", "off"}
     portable: list[dict[str, object]] = []
     copied = 0
     missing = 0
@@ -425,26 +426,45 @@ def copy_portable_backend_and_metadata() -> None:
             shutil.copy2(src, backend_dst / name)
 
     models_dst = dist / "models_storage"
-    if models_dst.exists():
-        # Keep packaged models only through the explicit registry copy below.
-        remove_build_tree(models_dst)
+    new_store = not models_dst.exists()
     (models_dst / "branding").mkdir(parents=True, exist_ok=True)
     models_src = Path(os.environ.get("LOCAL_AI_GPP_DATA_DIR", str(ROOT))) / "models_storage"
     settings_src = models_src / "settings.json"
-    if settings_src.exists():
-        shutil.copy2(settings_src, models_dst / "settings.json")
-    else:
-        (models_dst / "settings.json").write_text("{}", encoding="utf-8")
-    branding_src = models_src / "branding"
-    if branding_src.exists():
-        shutil.copytree(branding_src, models_dst / "branding", dirs_exist_ok=True, ignore=ignore_junk)
-    _copy_portable_model_registry(models_src, models_dst)
+    settings_dst = models_dst / "settings.json"
+    if not settings_dst.exists():
+        if settings_src.exists() and settings_src.resolve() != settings_dst.resolve():
+            shutil.copy2(settings_src, settings_dst)
+        else:
+            settings_dst.write_text("{}", encoding="utf-8")
+    for branding_src in (models_src / "branding", ROOT / "models_storage/branding"):
+        if branding_src.exists() and branding_src.resolve() != (models_dst / "branding").resolve():
+            for source in branding_src.rglob("*"):
+                if source.is_file():
+                    target = models_dst / "branding" / source.relative_to(branding_src)
+                    if not target.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+    if not (models_dst / "models.json").exists():
+        # Existing stores may contain unregistered files: never overwrite them
+        # while bootstrapping a missing registry. Source == destination is safe.
+        if models_src.resolve() == models_dst.resolve():
+            (models_dst / "models.json").write_text("[]", encoding="utf-8")
+        else:
+            _copy_portable_model_registry(models_src, models_dst, package_models=None if new_store else False)
 
     if (ROOT / "README.md").exists():
         shutil.copy2(ROOT / "README.md", dist / "README.md")
     for folder in ("docs", "examples"):
         if (ROOT / folder).is_dir():
             shutil.copytree(ROOT / folder, dist / folder, dirs_exist_ok=True, ignore=ignore_junk)
+    api_check = ROOT / "examples/check_api.py"
+    if api_check.is_file():
+        shutil.copy2(api_check, dist / "check_api.py")
+        (dist / "CHECK_API.bat").write_text(
+            '@echo off\nsetlocal\nchcp 65001 >nul\nset "PYTHONUTF8=1"\n'
+            '"%~dp0worker_runtime\\python.exe" "%~dp0check_api.py" %*\n'
+            'set "CHECK_RESULT=%ERRORLEVEL%"\nif "%~1"=="" pause\nexit /b %CHECK_RESULT%\n',
+            encoding="utf-8", newline="\r\n")
     log("[OK] Copied portable backend, settings, branding and model registry into dist")
 
 
@@ -712,6 +732,8 @@ def parse_args() -> argparse.Namespace:
     runtime.add_argument("--cpu", action="store_true", help="Explicitly build CPU runtime; NVIDIA enables CUDA automatically otherwise")
     runtime.add_argument("--cuda", nargs="?", const="auto", default=None, help="Require CUDA worker runtime, e.g. --cuda auto or --cuda cu124")
     parser.add_argument("--no-models", action="store_true", help="Do not copy registered model files into dist; keep metadata only")
+    parser.add_argument("--reuse-worker-runtime", type=Path,
+                        help="Reuse a previously verified worker_runtime directory; it is copied and checked before use")
     return parser.parse_args()
 
 
@@ -741,14 +763,28 @@ def choose_runtime_kind(args: argparse.Namespace) -> str:
     return requested
 
 
-def prepare_worker_runtime(runtime_kind: str) -> Path:
+def prepare_worker_runtime(runtime_kind: str, reuse_source: Path | None = None) -> Path:
     stage = OUT / "worker_stage"
+    if reuse_source is not None and reuse_source.resolve().is_relative_to(stage.resolve()):
+        raise SystemExit("[ERROR] Reused runtime overlaps the disposable worker staging directory.")
     if stage.exists():
         remove_build_tree(stage)
     shutil.copytree(ROOT / "backend/app", stage / "backend/app", ignore=ignore_junk)
     (stage / "backend/__init__.py").write_text("", encoding="utf-8")
     shutil.copy2(ROOT / "VERSION", stage / "VERSION")
-    create_worker_runtime(runtime_kind, stage)
+    if reuse_source is None:
+        create_worker_runtime(runtime_kind, stage)
+    else:
+        source = reuse_source.resolve()
+        info_path = source.parent / "runtime_info.json"
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        if info.get("effective") != runtime_kind or not (source / "python.exe").is_file():
+            raise SystemExit("[ERROR] Reused runtime does not match the requested CPU/CUDA variant.")
+        shutil.copytree(source, stage / "worker_runtime", ignore=ignore_junk)
+        details = verify_worker_runtime(stage / "worker_runtime/python.exe", runtime_kind, stage)
+        if details.get("llama_cpp") != (CUDA_VERSION if runtime_kind.startswith("cu") else CPU_VERSION):
+            raise SystemExit("[ERROR] Reused runtime has an unexpected llama-cpp-python version.")
+        shutil.copy2(info_path, stage / "runtime_info.json")
     return stage
 
 
@@ -768,7 +804,7 @@ def main() -> int:
     if getattr(args, "no_models", False):
         os.environ["LOCAL_AI_GPP_PACKAGE_MODELS"] = "0"
     # Install and verify CUDA plus its DLLs before replacing the current EXE.
-    worker_stage = prepare_worker_runtime(runtime_kind)
+    worker_stage = prepare_worker_runtime(runtime_kind, getattr(args, "reuse_worker_runtime", None))
     clean_python_caches()
     build_frontend()
     build_pyinstaller(venv_py)

@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from backend.app.core import get_logo_url, load_models, load_settings
 from backend.app.version import APP_VERSION
+from backend.app.storage_paths import MAX_MODEL_UPLOAD_BYTES
 
 router = APIRouter(tags=["bootstrap"])
 
@@ -17,4 +18,5 @@ def health() -> dict[str, str]:
 def bootstrap() -> dict:
     settings = load_settings()
     settings["branding"]["logo_url"] = get_logo_url()
-    return {"models": load_models(), "settings": settings, "version": APP_VERSION}
+    return {"models": load_models(), "settings": settings, "version": APP_VERSION,
+            "limits": {"model_upload_max_bytes": MAX_MODEL_UPLOAD_BYTES}}

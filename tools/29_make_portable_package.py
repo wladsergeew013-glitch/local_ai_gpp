@@ -24,6 +24,7 @@ REQUIRED = [
 EXCLUDE_DIR_NAMES = {"logs", "assistant_state", "__pycache__"}
 EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".tmp", ".log"}
 RELEASE_ROOT_FILES = {'LocalAIGPP.exe', 'LocalAIGPP.ico', 'VERSION', 'runtime_info.json',
+                      'check_api.py', 'CHECK_API.bat',
                       'CHECK_DIST_HEALTH.bat', 'RUN_LocalAIGPP.bat', 'README_PORTABLE_DIST.txt', '_dist_health_check.py'}
 
 

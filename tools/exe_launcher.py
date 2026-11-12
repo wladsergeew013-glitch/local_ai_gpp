@@ -462,7 +462,7 @@ def _normalize_chat_conversation(item: Any, fallback_index: int) -> dict[str, An
             normalized = _normalize_chat_message(raw_message, fallback_index * 10000 + msg_index)
             if normalized:
                 messages = _upsert_message_list(messages, normalized)
-    return _new_conversation(conversation_id=conversation_id, title=title, created_at=created_at, messages=messages[-120:])
+    return _new_conversation(conversation_id=conversation_id, title=title, created_at=created_at, messages=messages)
 
 
 def _message_count(state: dict[str, Any]) -> int:
@@ -523,7 +523,7 @@ def _normalize_chat_state(payload: Any, *, touch: bool = False) -> dict[str, Any
         "updatedAt": updated_at,
         "source": str(payload.get("source") or ""),
         "activeConversationId": active_id,
-        "conversations": conversations[-40:],
+        "conversations": conversations,
     }
 
 
@@ -618,7 +618,7 @@ def _upsert_message_list(messages: list[dict[str, Any]], incoming_message: dict[
             next_messages.append(existing)
     if not replaced:
         next_messages.append(normalized)
-    return next_messages[-120:]
+    return next_messages
 
 
 def _merge_message_lists(current: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -626,7 +626,7 @@ def _merge_message_lists(current: list[dict[str, Any]], incoming: list[dict[str,
     for raw_message in incoming:
         if isinstance(raw_message, dict):
             messages = _upsert_message_list(messages, raw_message)
-    return messages[-120:]
+    return messages
 
 
 def _find_conversation(conversations: list[dict[str, Any]], conversation_id: str) -> dict[str, Any] | None:
@@ -697,7 +697,7 @@ def _merge_incoming_chat_state_unlocked(incoming: dict[str, Any], existing: dict
         "updatedAt": time.time() * 1000.0,
         "source": source,
         "activeConversationId": active_id,
-        "conversations": result_conversations[:40],
+        "conversations": result_conversations,
     }
 
 
@@ -924,12 +924,19 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
                         elif event_type == "runtime":
                             append_shared_message("assistant", "Модель запущена, готовлю ответ.", message_id=assistant_id, conversation_id=conversation_id, pending=True, phase="thinking", runtime_mode=event.get("mode") or (event.get("runtime") or {}).get("mode"))
                         elif event_type == "done":
-                            final_answer = str(event.get("answer") or event.get("content") or content or "Ответ не сформировался.")
-                            update_answer(final_answer, pending=False, phase="done", extra={
+                            final_answer = str(event.get("answer") or "") if "answer" in event else str(event.get("content") or content)
+                            incomplete = (event.get("finish_reason") == "length" or event.get("reasoning_truncated")
+                                          or event.get("answer_state") == "missing_after_reasoning" or not final_answer.strip())
+                            update_answer(final_answer or "Финальный ответ не получен. Увеличьте лимит ответа и повторите запрос.",
+                                          pending=False, phase="error" if incomplete else "done", extra={
                                 "elapsed_ms": event.get("elapsed_ms"),
                                 "usage": event.get("usage"),
                                 "history_dropped": event.get("history_dropped", 0),
                                 "finish_reason": event.get("finish_reason"),
+                                "reasoning": event.get("reasoning"),
+                                "reasoning_truncated": event.get("reasoning_truncated", False),
+                                "answer_state": event.get("answer_state"),
+                                "error": "Ответ не завершён; он не включён в память." if incomplete else None,
                                 "request_id": event.get("request_id"),
                                 "log_path": event.get("log_path"),
                                 "log_excerpt": event.get("log_excerpt"),
@@ -938,10 +945,7 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
                             return
                         elif event_type == "error":
                             raise RuntimeError(str(event.get("message") or "Ошибка генерации"))
-        if content:
-            update_answer(content, pending=False, phase="done")
-        else:
-            update_answer("Ответ не сформировался.", pending=False, phase="done")
+        raise RuntimeError("Поток завершился без финального события done. Ответ не завершён.")
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", "replace")
         message = raw or str(exc)
@@ -952,9 +956,11 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
                 message = str(detail.get("message") or json.dumps(detail, ensure_ascii=False))
             else:
                 message = str(detail)
-        append_shared_message("assistant", f"Ошибка: {message}", message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
+        partial = locals().get("content", "")
+        append_shared_message("assistant", f"{partial}\n\nОшибка: {message}".strip(), message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
     except Exception as exc:
-        append_shared_message("assistant", f"Ошибка: {exc}", message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
+        partial = locals().get("content", "")
+        append_shared_message("assistant", f"{partial}\n\nОшибка: {exc}".strip(), message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
     finally:
         if lock_already_acquired:
             with contextlib.suppress(Exception):
@@ -1170,20 +1176,27 @@ def api_exit():
     threading.Thread(target=request_exit, daemon=True).start()
     return {"ok": True}
 
-if FRONTEND_DIST.exists():
+def frontend_index():
+    return frontend_spa("index.html")
 
-    @app.get("/")
-    def frontend_index():
-        return FileResponse(FRONTEND_DIST / "index.html")
 
-    @app.get("/{full_path:path}")
-    def frontend_spa(full_path: str):
-        requested = FRONTEND_DIST / full_path
-        if requested.is_file():
-            return FileResponse(requested)
+def frontend_spa(full_path: str):
+    from backend.app.storage_paths import frontend_path
+    try:
+        requested = frontend_path(FRONTEND_DIST, full_path)
         if full_path.startswith(("api/", "v1/", "assets/")):
             return JSONResponse({"detail": "Not found"}, status_code=404)
-        return FileResponse(FRONTEND_DIST / "index.html")
+        selected = requested if requested.is_file() else frontend_path(FRONTEND_DIST, "index.html")
+        if selected.is_file():
+            return FileResponse(selected)
+    except (ValueError, OSError):
+        pass
+    return JSONResponse({"detail": "Not found"}, status_code=404)
+
+
+if FRONTEND_DIST.exists():
+    app.add_api_route("/", frontend_index)
+    app.add_api_route("/{full_path:path}", frontend_spa)
 
 
 def clamp_int(value: Any, min_value: int, max_value: int, default: int) -> int:

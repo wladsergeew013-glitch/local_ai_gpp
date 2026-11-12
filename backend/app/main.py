@@ -91,7 +91,7 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-app.mount('/assets', StaticFiles(directory=MODELS_DIR), name='assets')
+app.mount('/assets/branding', StaticFiles(directory=MODELS_DIR / 'branding'), name='branding')
 
 app.include_router(bootstrap_router)
 app.include_router(models_router)
