@@ -119,6 +119,7 @@ export type BootstrapPayload = {
   models: ModelRecord[];
   settings: EngineSettings;
   version: string;
+  limits?: { model_upload_max_bytes: number };
 };
 
 export type StatusTone = 'idle' | 'busy' | 'success' | 'warning' | 'error';

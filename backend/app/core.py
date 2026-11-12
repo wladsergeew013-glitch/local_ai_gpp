@@ -12,12 +12,17 @@ import sys
 import threading
 import time
 import uuid
+import tempfile
+import logging
+from urllib.parse import unquote, urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
+import anyio
 from fastapi import HTTPException
+from backend.app.storage_paths import MAX_MODEL_UPLOAD_BYTES, checked_filename, contained_path
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else APP_DIR.parent.parent
@@ -438,9 +443,17 @@ def upload_logo_file(file_obj: Any, filename: str) -> str:
 
 
 def sanitize_model_name(name: str) -> str:
+    if not isinstance(name, str):
+        raise HTTPException(status_code=400, detail="model_name must be a string")
     cleaned = (name or "").strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="model_name is required")
+    try:
+        cleaned.encode("utf-8")
+    except UnicodeError:
+        raise HTTPException(status_code=400, detail="Invalid model_name") from None
+    if not cleaned.strip(' .') or len(cleaned) > 240 or any(ord(ch) < 32 for ch in cleaned):
+        raise HTTPException(status_code=400, detail="Invalid model_name")
     for ch in ('/', '\\', ':', '*', '?', '"', '<', '>', '|'):
         if ch in cleaned:
             raise HTTPException(status_code=400, detail="model_name contains unsupported characters")
@@ -488,6 +501,9 @@ def delete_model(model_id: str) -> None:
             raise HTTPException(status_code=404, detail="Model not found")
         _unload_runtime(model_id)
         save_models(next_models)
+        for removed in models:
+            if removed.get("id") == model_id:
+                _retire_managed_upload(removed.get("path"))
 
 
 def find_model(model_id: str) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
@@ -498,20 +514,128 @@ def find_model(model_id: str) -> tuple[list[dict[str, Any]], dict[str, Any], int
     raise HTTPException(status_code=404, detail="Model not found")
 
 
-def copy_uploaded_model(name: str, incoming_filename: str, file_obj: Any) -> dict[str, Any]:
+def _retire_managed_upload(value: Any) -> None:
+    """Collect only our unreferenced, unmapped upload blobs; never external files."""
+    if not value:
+        return
+    namespace = MODELS_DIR.resolve() / "uploads"
+    if namespace.resolve() != namespace:
+        return
+    candidate = Path(str(value))
+    candidate = (candidate if candidate.is_absolute() else PROJECT_ROOT / candidate).resolve()
+    try:
+        relative = candidate.relative_to(namespace)
+    except ValueError:
+        return
+    if len(relative.parts) != 2 or not re.fullmatch(r"[0-9a-f]{32}", relative.parts[0]):
+        return
+    marker = namespace / (relative.parts[0] + ".json")
+    try:
+        with marker.open(encoding="utf-8") as handle:
+            ownership = json.loads(handle.read(2048))
+        if ownership != {"contract": "LOCAL_AI_UPLOAD_V1", "filename": candidate.name}:
+            return
+    except (OSError, ValueError):
+        return
+    references = [row.get("path") for row in load_models()]
+    references += [(entry.get("load_config") or {}).get("model_path") for entry in RUNTIMES.values()]
+    for reference in references:
+        if not reference:
+            continue
+        path = Path(str(reference))
+        path = path if path.is_absolute() else PROJECT_ROOT / path
+        if path.resolve() == candidate:
+            return
+    try:
+        candidate.unlink(missing_ok=True)
+        candidate.parent.rmdir()
+        marker.unlink()
+    except OSError:
+        logging.getLogger(__name__).warning("Old managed upload retained because it is still in use.")
+
+
+def _commit_model_file(record: dict[str, Any], temporary: Path, target: Path) -> dict[str, Any]:
+    # New immutable paths preserve existing mmap readers, including aliases.
+    with JSON_LOCK:
+        exists = any(model.get("id") == record["id"] for model in load_models())
+        if not exists:
+            os.replace(temporary, target)
+            return upsert_model(record)
+    # Never wait for runtime while holding the registry lock.
+    with runtime_operation(), JSON_LOCK:
+        previous = next((model for model in load_models() if model.get("id") == record["id"]), None)
+        _unload_runtime(record["id"])
+        os.replace(temporary, target)
+        result = upsert_model(record)
+        if previous:
+            _retire_managed_upload(previous.get("path"))
+        return result
+
+
+def copy_uploaded_model(name: str, incoming_filename: str, file_obj: Any, *,
+                        model_type: str = "LLM", source: str = "upload",
+                        expected_bytes: int | None = None) -> dict[str, Any]:
     safe_name = sanitize_model_name(name)
-    model_dir = MODELS_DIR / safe_name
-    model_dir.mkdir(parents=True, exist_ok=True)
-    target = model_dir / Path(incoming_filename or "model.bin").name
-    with target.open("wb") as handle:
-        shutil.copyfileobj(file_obj, handle)
-    return make_model_record(
-        name=safe_name,
-        model_type="LLM",
-        filename=target.name,
-        path=str(target),
-        source="copied_file",
-    )
+    try:
+        filename = checked_filename(incoming_filename)
+        namespace = contained_path(MODELS_DIR, "uploads")
+        if namespace != MODELS_DIR.resolve() / "uploads":
+            raise ValueError("Upload namespace must not be a filesystem alias")
+        namespace.mkdir(parents=True, exist_ok=True)
+        model_dir = contained_path(MODELS_DIR, "uploads", uuid.uuid4().hex)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, "Недопустимое имя или каталог модели.") from exc
+    if expected_bytes is not None and expected_bytes > MAX_MODEL_UPLOAD_BYTES:
+        raise HTTPException(413, "Размер модели превышает 16 ГиБ.")
+    if expected_bytes and shutil.disk_usage(namespace).free < expected_bytes + 8 * 1024**2:
+        raise HTTPException(507, "Недостаточно места для сохранения модели.")
+    model_dir.mkdir()
+    marker = namespace / (model_dir.name + ".json")
+    marker_owned = False
+    temporary = None
+    target = model_dir / filename
+    committed = False
+    try:
+        fd, temporary_name = tempfile.mkstemp(prefix=".upload-", dir=model_dir)
+        temporary = Path(temporary_name)
+        with os.fdopen(fd, "wb") as handle:
+            copied = 0
+            while chunk := file_obj.read(1024**2):
+                copied += len(chunk)
+                if copied > MAX_MODEL_UPLOAD_BYTES:
+                    raise HTTPException(413, "Размер модели превышает 16 ГиБ.")
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        record = make_model_record(name=safe_name, model_type=model_type,
+                                   filename=filename, path=str(target), source=source)
+        record["copy_to_storage"] = True
+        with marker.open("x", encoding="utf-8") as handle:
+            marker_owned = True
+            json.dump({"contract": "LOCAL_AI_UPLOAD_V1", "filename": filename}, handle)
+        record = _commit_model_file(record, temporary, target)
+        committed = True
+        return record
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if not committed:
+            target.unlink(missing_ok=True)
+            if marker_owned:
+                marker.unlink(missing_ok=True)
+            model_dir.rmdir()
+
+
+def update_model_fields(model_id: str, *, expected_path: str | None = None, **fields: Any) -> dict[str, Any]:
+    with JSON_LOCK:
+        models, model, idx = find_model(model_id)
+        if expected_path is not None and model.get("path") != expected_path:
+            _unload_runtime(model_id)
+            raise HTTPException(409, "Model changed while loading; retry with its current registration.")
+        model.update(fields)
+        models[idx] = model
+        save_models(models)
+        return model
 
 
 def register_model_path(
@@ -522,18 +646,19 @@ def register_model_path(
     runtime: dict[str, Any] | None = None,
     source: str = "server_path",
 ) -> dict[str, Any]:
-    path_obj = Path(model_path)
-    if not path_obj.exists() or not path_obj.is_file():
-        raise HTTPException(status_code=400, detail="Указанный путь не существует или не является файлом")
-    record = make_model_record(
-        name=name,
-        model_type=model_type,
-        filename=path_obj.name,
-        path=str(path_obj),
-        source=source,
-        runtime=runtime,
-    )
-    return upsert_model(record)
+    with JSON_LOCK:
+        path_obj = Path(model_path)
+        if not path_obj.exists() or not path_obj.is_file():
+            raise HTTPException(status_code=400, detail="Указанный путь не существует или не является файлом")
+        record = make_model_record(
+            name=name,
+            model_type=model_type,
+            filename=path_obj.name,
+            path=str(path_obj),
+            source=source,
+            runtime=runtime,
+        )
+        return upsert_model(record)
 
 
 def _merge_runtime(
@@ -1044,13 +1169,11 @@ def stream_chat_completion(**kwargs):
 
 def prewarm_runtime(model_id, runtime_override=None):
     with runtime_operation():
-        models, model, idx = find_model(model_id)
+        _, model, _ = find_model(model_id)
         request_id, log_path = create_request_log(model_id, "prewarm")
         _get_runtime(model, load_settings(), log_path, runtime_override)
-        model.update(status="warm", started_at=now_iso(), last_log_path=str(log_path))
-        models[idx] = model
-        save_models(models)
-        return model
+        return update_model_fields(model_id, expected_path=model.get("path"), status="warm",
+                                   started_at=now_iso(), last_log_path=str(log_path))
 
 
 def _unload_runtime(model_id):
@@ -1149,24 +1272,28 @@ async def import_from_hub(payload: dict[str, Any], settings: dict[str, Any]) -> 
         )
     if isinstance(result, dict) and result.get("file_url"):
         file_url = str(result["file_url"])
-        filename = result.get("filename") or Path(file_url).name or "hub_model.gguf"
+        filename = result.get("filename") or unquote(Path(urlsplit(file_url).path).name) or "hub_model.gguf"
         target_name = sanitize_model_name(result.get("name") or payload.get("name") or "hub_model")
-        target_dir = MODELS_DIR / target_name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / filename
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            stream = await client.get(file_url)
-            stream.raise_for_status()
-            target_path.write_bytes(stream.content)
-        return upsert_model(
-            make_model_record(
-                name=target_name,
-                model_type=result.get("type") or "LLM",
-                filename=target_path.name,
-                path=str(target_path),
-                source="hub_file",
-            )
-        )
+        try:
+            checked_filename(filename)
+        except ValueError:
+            raise HTTPException(400, "Недопустимое имя файла от hub.") from None
+        # Keep memory bounded; the eventual model write shares upload validation
+        # and runtime coordination. Temporary downloads are removed on failure.
+        with tempfile.SpooledTemporaryFile(max_size=1024**2, dir=MODELS_DIR) as download:
+            size = 0
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                async with client.stream("GET", file_url) as response:
+                    response.raise_for_status()
+                    async for chunk in response.aiter_bytes(1024**2):
+                        size += len(chunk)
+                        if size > MAX_MODEL_UPLOAD_BYTES:
+                            raise HTTPException(413, "Размер модели превышает 16 ГиБ.")
+                        await anyio.to_thread.run_sync(download.write, chunk)
+            download.seek(0)
+            return await anyio.to_thread.run_sync(lambda: copy_uploaded_model(
+                target_name, filename, download, model_type=result.get("type") or "LLM",
+                source="hub_file", expected_bytes=size))
     return upsert_model(
         make_model_record(
             name=payload.get("name") or "hub_model",

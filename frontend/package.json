@@ -1,11 +1,12 @@
 {
   "name": "local-ai-gpp-frontend",
   "private": true,
-  "version": "1.4.1",
+  "version": "1.4.2",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "tsc -b && vite build --config vite.config.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
     "preview": "vite preview --host 127.0.0.1 --port 4173"
   },
   "dependencies": {

@@ -20,6 +20,7 @@ from backend.app.core import (
     save_models,
     unload_runtime,
     upsert_model,
+    update_model_fields,
     validate_model_registry,
 )
 
@@ -51,11 +52,8 @@ def upload_model(
                 "Если модель уже лежит на сервере, используй регистрацию пути."
             ),
         )
-    record = copy_uploaded_model(model_name, model_file.filename or "model.bin", model_file.file)
-    record["type"] = model_type
-    record["copy_to_storage"] = True
-    record["source"] = "upload"
-    return upsert_model(record)
+    return copy_uploaded_model(model_name, model_file.filename or "model.bin", model_file.file,
+                               model_type=model_type, expected_bytes=model_file.size)
 
 
 @router.post("/api/models/register-path")
@@ -84,12 +82,7 @@ def remove_model(model_id: str) -> dict[str, bool]:
 def start_model(model_id: str, payload: dict | None = None) -> dict:
     runtime = payload.get("runtime") if isinstance(payload, dict) and isinstance(payload.get("runtime"), dict) else None
     prewarm_runtime(model_id, runtime_override=runtime)
-    models, model, idx = find_model(model_id)
-    model["status"] = "running"
-    model["started_at"] = now_iso()
-    models[idx] = model
-    save_models(models)
-    return model
+    return update_model_fields(model_id, status="running", started_at=now_iso())
 
 
 @router.post("/api/models/{model_id}/prewarm")
@@ -100,11 +93,9 @@ def prewarm_model(model_id: str, payload: dict | None = None) -> dict:
 
 @router.post("/api/models/{model_id}/unload")
 def unload_model(model_id: str) -> dict:
-    models, model, idx = find_model(model_id)
+    find_model(model_id)
     unloaded = unload_runtime(model_id)
-    model["status"] = "saved"
-    models[idx] = model
-    save_models(models)
+    update_model_fields(model_id, status="saved")
     return {"model_id": model_id, "unloaded": unloaded}
 
 

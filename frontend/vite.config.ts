@@ -8,4 +8,11 @@ export default defineConfig({
   build: {
     assetsDir: 'ui-assets',
   },
+  server: {
+    proxy: Object.fromEntries(['/api', '/v1', '/assets', '/docs', '/openapi.json'].map(path => [path, {
+      target: process.env.LOCAL_AI_GPP_API_TARGET || 'http://127.0.0.1:8765',
+      changeOrigin: true,
+      proxyTimeout: 210000,
+    }])),
+  },
 })

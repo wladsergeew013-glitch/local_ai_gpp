@@ -3,6 +3,7 @@ import { API_BASE, fetchBootstrap, fetchRuntimeStatus, prewarmModel, registerMod
 import type { ChatMessage, EngineSettings, ModelRecord, RuntimeStatus } from './types';
 import { APP_VERSION } from './version';
 import { contextSettingsError, estimateContext } from './contextBudget';
+import { completedAnswer, requestHistory } from './chatCompletion';
 
 type Conversation = { id: string; title: string; createdAt: string; messages: ChatMessage[] };
 type ChatState = { activeConversationId: string; conversations: Conversation[]; updatedAt?: number };
@@ -71,6 +72,7 @@ export default function App() {
   const [modelName, setModelName] = useState('');
   const [modelPath, setModelPath] = useState('');
   const [modelFile, setModelFile] = useState<File | null>(null);
+  const [uploadLimit, setUploadLimit] = useState(16 * 1024 ** 3);
   const controller = useRef<AbortController | null>(null);
   const chatRef = useRef(chat);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -83,7 +85,7 @@ export default function App() {
   const loaded = runtime.find(r => r.model_id === modelId);
   const generating = busy || chat.conversations.some(c => c.messages.some(m => m.pending));
   const runtimeOptions = { n_gpu_layers: gpuLayers, n_ctx: nCtx, context_overflow: trimHistory ? 'trim' as const : 'error' as const, warm_policy: warmPolicy, enable_thinking: enableThinking };
-  const history = active.messages.filter(m => !m.pending && m.phase !== 'error' && m.text.trim()).slice(-64).map(m => ({ role: m.role, content: m.answer || m.text }));
+  const history = requestHistory(active.messages);
   const estimatedContext = estimateContext([...systemPrompt.trim() ? [{ content: systemPrompt }] : [], ...memory ? history : [], { content: input.trim() }], maxTokens);
   const budgetError = contextSettingsError(nCtx, maxTokens);
   const contextFull = estimatedContext > nCtx;
@@ -91,6 +93,7 @@ export default function App() {
   async function reload() {
     const data = await fetchBootstrap();
     setModels(data.models); setSettings(data.settings);
+    setUploadLimit(data.limits?.model_upload_max_bytes ?? 16 * 1024 ** 3);
     setModelId(previous => data.models.some(m => m.id === previous && m.file_exists) ? previous : data.models.find(m => m.type === 'LLM' && m.file_exists)?.id || '');
     setTemperature(data.settings.runtime.temperature); setMaxTokens(data.settings.runtime.max_tokens);
     setTrimHistory(data.settings.runtime.context_overflow !== 'error');
@@ -201,10 +204,10 @@ export default function App() {
         } else if (event.type === 'worker_status') setStatus(event.message || 'Загружаю модель…');
         else if (event.type === 'runtime') setStatus(`${event.mode || event.runtime?.mode || ''} · модель отвечает…`);
         else if (event.type === 'done') {
-          updateMessage(target.id, assistantId, { text: event.answer || event.content || content,
-            answer: event.answer, reasoning: event.reasoning, pending: false, phase: 'done',
+          const completion = completedAnswer(event, content);
+          updateMessage(target.id, assistantId, { ...completion,
             elapsed_ms: event.elapsed_ms, usage: event.usage, finish_reason: event.finish_reason, history_dropped: event.history_dropped });
-          setStatus(event.history_dropped ? `Готово · в запрос не вошло ${event.history_dropped} старых реплик; история сохранена.` : 'Готово');
+          setStatus(completion.phase === 'error' ? completion.status : event.history_dropped ? `Готово · в запрос не вошло ${event.history_dropped} старых реплик; история сохранена.` : 'Готово');
         }
       }, abort.signal);
     } catch (e) {
@@ -233,6 +236,7 @@ export default function App() {
   async function addModel(event: FormEvent) {
     event.preventDefault(); setBusy(true);
     try {
+      if (modelFile && modelFile.size > uploadLimit) throw new Error(`Файл модели превышает лимит ${uploadLimit / 1024 ** 3} ГиБ.`);
       const form = new FormData(); form.append('model_name', modelName || modelFile?.name || modelPath.split(/[\\/]/).pop() || 'LLM');
       form.append('model_type', 'LLM');
       let added: ModelRecord;
