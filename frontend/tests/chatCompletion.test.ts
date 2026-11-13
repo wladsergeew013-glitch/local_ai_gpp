@@ -22,7 +22,19 @@ test('old incorrectly completed reasoning and truncated text stay out of memory'
   assert.deepEqual(requestHistory([
     { role: 'assistant', text: 'unfinished reasoning', answer: '', phase: 'done' },
     { role: 'assistant', text: 'partial', phase: 'done', reasoning_truncated: true },
+    { role: 'assistant', text: 'saved in 1.4.1', phase: 'done', finish_reason: 'length' },
   ]), []);
   assert.equal(completedAnswer({ answer: 'partial', finish_reason: 'length' }, '').phase, 'error');
   assert.equal(completedAnswer({ content: 'legacy final answer' }, '').text, 'legacy final answer');
+});
+
+test('done-only streams retain final content and truncated partials retain their marker', () => {
+  const final = completedAnswer({ content: 'Four', finish_reason: 'stop' }, '');
+  assert.equal(final.answer, 'Four');
+  assert.equal(final.phase, 'done');
+  const partial = completedAnswer({ answer: 'partial', finish_reason: 'length' }, 'partial');
+  assert.equal(partial.answer, 'partial');
+  assert.equal(partial.finish_reason, 'length');
+  assert.equal(partial.phase, 'error');
+  assert.deepEqual(requestHistory([{ role: 'assistant', ...partial }]), []);
 });

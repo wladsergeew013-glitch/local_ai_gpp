@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import copy
 import json
 import os
 import queue
@@ -409,6 +410,39 @@ def _default_chat_state() -> dict[str, Any]:
 
 chat_sync_lock = threading.Lock()
 generation_lock = threading.Lock()
+_chat_state_cache: tuple[Any, dict[str, Any]] | None = None
+
+
+def _chat_file_signature(path: Path | None = None) -> Any:
+    path = path if path is not None else chat_sync_file()
+    try:
+        info = path.stat()
+        return (path, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    except FileNotFoundError:
+        return None
+
+
+def _read_cached_chat_state(path: Path) -> dict[str, Any]:
+    """Called under chat_sync_lock; callers receive their own mutable state."""
+    global _chat_state_cache
+    signature = _chat_file_signature(path)
+    if _chat_state_cache is not None and _chat_state_cache[0] == signature:
+        return copy.deepcopy(_chat_state_cache[1])
+    state = _normalize_chat_state(json.loads(path.read_text(encoding='utf-8')), touch=False)
+    if signature == _chat_file_signature(path):
+        _chat_state_cache = (signature, copy.deepcopy(state))
+    else:
+        _chat_state_cache = None
+    return state
+
+
+def message_completion_error(message: dict[str, Any]) -> str:
+    if message.get('error'):
+        return str(message['error'])
+    if (message.get('phase') == 'error' or message.get('finish_reason') == 'length'
+            or message.get('reasoning_truncated') or message.get('answer_state') == 'missing_after_reasoning'):
+        return 'Ответ не завершён; он не включён в память.'
+    return ''
 
 
 def message_created_at(item: dict[str, Any]) -> str:
@@ -461,7 +495,8 @@ def _normalize_chat_conversation(item: Any, fallback_index: int) -> dict[str, An
         for msg_index, raw_message in enumerate(raw_messages):
             normalized = _normalize_chat_message(raw_message, fallback_index * 10000 + msg_index)
             if normalized:
-                messages = _upsert_message_list(messages, normalized)
+                messages.append(normalized)
+        messages = _merge_message_lists([], messages)
     return _new_conversation(conversation_id=conversation_id, title=title, created_at=created_at, messages=messages)
 
 
@@ -529,10 +564,12 @@ def _normalize_chat_state(payload: Any, *, touch: bool = False) -> dict[str, Any
 
 def _write_chat_state_raw(state: dict[str, Any]) -> dict[str, Any]:
     # V64+: file write only. Do NOT call Tk or WebView from FastAPI/worker threads.
+    global _chat_state_cache
     path = chat_sync_file()
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+    _chat_state_cache = None
     return state
 
 
@@ -549,8 +586,7 @@ def read_chat_state() -> dict[str, Any]:
             _write_chat_state_raw(state)
             return state
         try:
-            state = _normalize_chat_state(json.loads(path.read_text(encoding="utf-8")), touch=False)
-            return state
+            return _read_cached_chat_state(path)
         except Exception:
             # Keep the damaged history for recovery instead of overwriting it.
             path.replace(path.with_name(path.name + f'.corrupt-{time.time_ns()}'))
@@ -566,7 +602,9 @@ def recover_interrupted_chat() -> None:
         for conversation in state.get('conversations', []):
             for message in conversation.get('messages', []):
                 if message.get('pending'):
-                    message.update(pending=False, phase='error', text='Генерация прервалась при закрытии приложения. Отправьте запрос снова.')
+                    partial = str(message.get('answer') or message.get('text') or 'Ответ не получен.')
+                    message.update(pending=False, phase='error', text=partial, answer=partial,
+                                   error='Генерация прервалась при закрытии приложения. Отправьте запрос снова.')
                     changed = True
         if changed:
             _write_chat_state_raw(state)
@@ -593,39 +631,30 @@ def _message_sync_stamp(message: dict[str, Any]) -> float:
 
 
 def _upsert_message_list(messages: list[dict[str, Any]], incoming_message: dict[str, Any]) -> list[dict[str, Any]]:
-    normalized = _normalize_chat_message(incoming_message, len(messages))
-    if not normalized:
-        return messages
-    message_id = str(normalized.get("id") or "")
-    next_messages: list[dict[str, Any]] = []
-    replaced = False
-    for existing in messages:
-        if not isinstance(existing, dict):
-            continue
-        existing_id = str(existing.get("id") or "")
-        if existing_id and existing_id == message_id:
-            if _message_sync_stamp(normalized) < _message_sync_stamp(existing):
-                next_messages.append(existing)
-            else:
-                merged = dict(existing)
-                merged.update(normalized)
-                created_at = message_created_at(existing)
-                if created_at:
-                    merged["createdAt"] = created_at
-                next_messages.append(merged)
-            replaced = True
-        else:
-            next_messages.append(existing)
-    if not replaced:
-        next_messages.append(normalized)
-    return next_messages
+    return _merge_message_lists(messages, [incoming_message])
 
 
 def _merge_message_lists(current: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
     messages = [item for item in current if isinstance(item, dict)]
+    positions = {str(item.get('id') or ''): index for index, item in enumerate(messages) if item.get('id')}
     for raw_message in incoming:
-        if isinstance(raw_message, dict):
-            messages = _upsert_message_list(messages, raw_message)
+        normalized = _normalize_chat_message(raw_message, len(messages))
+        if not normalized:
+            continue
+        message_id = normalized['id']
+        index = positions.get(message_id)
+        if index is None:
+            positions[message_id] = len(messages)
+            messages.append(normalized)
+        else:
+            existing = messages[index]
+            if _message_sync_stamp(normalized) < _message_sync_stamp(existing):
+                continue
+            merged = {**existing, **normalized}
+            created_at = message_created_at(existing)
+            if created_at:
+                merged['createdAt'] = created_at
+            messages[index] = merged
     return messages
 
 
@@ -746,7 +775,7 @@ def read_chat_state_unlocked() -> dict[str, Any]:
     if not path.exists():
         return _default_chat_state()
     try:
-        return _normalize_chat_state(json.loads(path.read_text(encoding="utf-8")), touch=False)
+        return _read_cached_chat_state(path)
     except Exception:
         path.replace(path.with_name(path.name + f'.corrupt-{time.time_ns()}'))
         return _default_chat_state()
@@ -957,10 +986,12 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
             else:
                 message = str(detail)
         partial = locals().get("content", "")
-        append_shared_message("assistant", f"{partial}\n\nОшибка: {message}".strip(), message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
+        append_shared_message("assistant", partial or 'Ответ не получен.', answer=partial or 'Ответ не получен.',
+                              error=message, message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
     except Exception as exc:
         partial = locals().get("content", "")
-        append_shared_message("assistant", f"{partial}\n\nОшибка: {exc}".strip(), message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
+        append_shared_message("assistant", partial or 'Ответ не получен.', answer=partial or 'Ответ не получен.',
+                              error=str(exc), message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
     finally:
         if lock_already_acquired:
             with contextlib.suppress(Exception):
@@ -986,7 +1017,7 @@ def submit_shared_chat_message(payload: dict[str, Any]) -> dict[str, Any] | JSON
         {'role': item['role'], 'content': str(item.get('answer') or item.get('text') or '')}
         for item in (conversation.get('messages') or [])[-64:]
         if item.get('role') in {'user', 'assistant'} and not item.get('pending')
-        and item.get('phase') != 'error' and (item.get('answer') or item.get('text'))
+        and not message_completion_error(item) and (item.get('answer') or item.get('text'))
     ]
     try:
         # Validate model config before writing the user message, so a bad config does not create a half-dialog.
@@ -1468,6 +1499,7 @@ class NativeAssistantAgent:
         self.history_box = Text(body, wrap="word", bg="#fbfdff", fg="#0b1b33", relief="flat", borderwidth=0, highlightthickness=0, font=("Segoe UI", self.font_size), height=9)
         self.history_box.tag_configure("user", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"), justify="right", lmargin1=40, lmargin2=40, rmargin=4)
         self.history_box.tag_configure("assistant", foreground="#155eb9", font=("Segoe UI", self.font_size, "bold"), justify="left", lmargin1=4, lmargin2=4, rmargin=40)
+        self.history_box.tag_configure('error', foreground='#ba3c32', justify='left', lmargin1=4, lmargin2=4, rmargin=40)
         for role in ("user", "assistant"):
             alignment = "right" if role == "user" else "left"
             self.history_box.tag_configure(f"body-{role}", justify=alignment, lmargin1=40 if role == "user" else 4, lmargin2=40 if role == "user" else 4, rmargin=4 if role == "user" else 40)
@@ -1938,17 +1970,23 @@ class NativeAssistantAgent:
     def _refresh_context_hint(self) -> None:
         if self.context_label is None:
             return
+        input_text = self.input_var.get() if self.input_var is not None else ''
+        signature = (_chat_file_signature(), input_text, self.runtime.get('n_ctx'),
+                     self.max_tokens, self.runtime.get('context_overflow'))
+        if signature == getattr(self, '_context_hint_signature', None):
+            return
         state = read_chat_state()
         conversation = _find_conversation(state.get('conversations') or [], state.get('activeConversationId')) or {}
         history = [{'content': str(m.get('answer') or m.get('text') or '')} for m in (conversation.get('messages') or [])[-64:]
-                   if not m.get('pending') and m.get('phase') != 'error']
+                   if not m.get('pending') and not message_completion_error(m)]
         messages = [{'content': 'Ты локальный корпоративный помощник Local AI GPP. Отвечай кратко и по делу на русском языке.'},
-                    *history, {'content': self.input_var.get() if self.input_var is not None else ''}]
+                    *history, {'content': input_text}]
         context = int(self.runtime.get('n_ctx', 4096))
         estimate = estimate_context(messages, self.max_tokens)
         warning = estimate > context
         self.context_label.configure(text=f'≈ {estimate} / {context} ток. · ответ {self.max_tokens}' + (' · история сократится' if warning and self.runtime.get('context_overflow', 'trim') == 'trim' else ' · лимит!' if warning else ''),
                                      fg='#a55d10' if warning else '#66809e')
+        self._context_hint_signature = signature
 
     def _show_context_dialog(self) -> None:
         if self.root is None or self.tk is None:
@@ -2601,9 +2639,10 @@ class NativeAssistantAgent:
             self.history_box.insert("end", "История очищена.\n")
             self.history_box.configure(state="disabled")
 
-    def _insert_history_line(self, role: str, text: str, message: dict[str, Any]) -> None:
+    def _insert_history_line(self, role: str, text: str, message: dict[str, Any] | None = None) -> None:
         if self.history_box is None:
             return
+        message = message or {}
         clean = self._strip_prefix(role, text)
         self.history_box.insert("end", format_message_time(message) + "\n", f"timestamp-{role}")
         if role == "user":
@@ -2611,6 +2650,9 @@ class NativeAssistantAgent:
         else:
             self.history_box.insert("end", "Помощник: ", "assistant")
         self.history_box.insert("end", clean + "\n\n", f"body-{role}")
+        error = message_completion_error(message)
+        if error:
+            self.history_box.insert('end', f'Ошибка: {error}\n\n', 'error')
         if message.get('history_dropped'):
             self.history_box.insert('end', f"В контекст не вошло {message['history_dropped']} старых реплик. Полная история сохранена.\n\n", 'timestamp-assistant')
 
@@ -2618,13 +2660,15 @@ class NativeAssistantAgent:
         if self.history_box is None:
             return
         try:
+            signature = _chat_file_signature()
+            if not force and signature is not None and signature == getattr(self, '_last_chat_file_signature', None):
+                return
+            if self.reveal_message_id:
+                return
             state = read_chat_state()
             self._refresh_dialog_list(state)
             updated_at = float(state.get("updatedAt") or 0.0)
-            if self.reveal_message_id:
-                return
-            if not force and updated_at <= self.last_chat_sync_updated_at:
-                return
+            self._last_chat_file_signature = signature
             self.last_chat_sync_updated_at = updated_at
             conversations = state.get("conversations") if isinstance(state.get("conversations"), list) else []
             active_id = str(state.get("activeConversationId") or "")
@@ -2649,7 +2693,7 @@ class NativeAssistantAgent:
                 self.awaiting_answer = False
                 self.pending_answer_id = ""
             reveal_id = ""
-            if isinstance(last, dict) and not last.get("pending") and str(last.get("phase") or "") == "done":
+            if isinstance(last, dict) and not last.get("pending") and str(last.get("phase") or "") == "done" and not message_completion_error(last):
                 candidate_id = str(last.get("id") or "")
                 if self.awaiting_answer and candidate_id and candidate_id != self.last_revealed_answer_id:
                     reveal_id = candidate_id
@@ -2719,7 +2763,9 @@ class NativeAssistantAgent:
             last = assistant_messages[-1] if assistant_messages else None
             if isinstance(last, dict) and last.get("pending"):
                 self._set_state("thinking", "Думаю", str(last.get('text') or 'Готовлю ответ')[:100])
-            elif self.state in {"thinking", "speaking"}:
+            elif isinstance(last, dict) and message_completion_error(last):
+                self._set_state('error', 'Ответ не завершён', message_completion_error(last)[:100])
+            elif self.state in {"thinking", "speaking", "error"}:
                 self._set_state("ready", "На связи", "Готов помочь")
         except Exception:
             pass

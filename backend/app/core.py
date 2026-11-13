@@ -377,13 +377,14 @@ def validate_model_record(model: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_model_registry(*, save: bool = False) -> list[dict[str, Any]]:
-    data = _read_json(MODELS_FILE, [])
-    if not isinstance(data, list):
-        return []
-    models = [validate_model_record(item) for item in data if isinstance(item, dict)]
-    if save:
-        save_models(models)
-    return models
+    with JSON_LOCK:
+        data = _read_json(MODELS_FILE, [])
+        if not isinstance(data, list):
+            return []
+        models = [validate_model_record(item) for item in data if isinstance(item, dict)]
+        if save:
+            save_models(models)
+        return models
 
 
 def load_models() -> list[dict[str, Any]]:

@@ -33,7 +33,8 @@ class DesktopStreamTests(unittest.TestCase):
         self.assertEqual(message['phase'],'error')
         self.assertFalse(message['pending'])
         self.assertIn('partial answer',message['text'])
-        self.assertIn('done',message['text'])
+        self.assertIn('done',message['error'])
+        self.assertEqual(message['answer'], message['text'])
 
     def test_incomplete_reasoning_is_not_saved_as_final_answer(self):
         message=self.run_stream([{'type':'delta','text':'private thoughts'},
