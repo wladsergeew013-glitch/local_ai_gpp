@@ -267,6 +267,11 @@ body.assistant-overlay-body #root {
   color: #1762be;
 }
 
+.agent-v12-message [role="alert"] {
+  grid-column: 1 / -1;
+  color: #ba3c32;
+}
+
 .agent-v12-message.pending span::after {
   content: ' ▍';
   color: #1767bd;

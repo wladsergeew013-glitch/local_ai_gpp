@@ -1,0 +1,26 @@
+{
+  "scope": "normalization only; median of 3; same Windows machine; no file I/O or rendering",
+  "results": [
+    {
+      "messages": 1000,
+      "milliseconds": {
+        "1.4.2": 30.492,
+        "1.4.3": 0.85
+      }
+    },
+    {
+      "messages": 3000,
+      "milliseconds": {
+        "1.4.2": 260.22,
+        "1.4.3": 2.49
+      }
+    },
+    {
+      "messages": 5000,
+      "milliseconds": {
+        "1.4.2": 709.784,
+        "1.4.3": 4.065
+      }
+    }
+  ]
+}

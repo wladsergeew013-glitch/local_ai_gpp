@@ -1,16 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { fetchBootstrap, fetchRuntimeStatus, streamChat } from './api';
+import { completedAnswer, requestHistory } from './chatCompletion';
 import SnakeGame from './SnakeGame';
-import type { EngineSettings, ModelRecord, RuntimeSettings, RuntimeStatus } from './types';
+import type { ChatMessage, EngineSettings, ModelRecord, RuntimeSettings, RuntimeStatus } from './types';
 
 type AgentState = 'ready' | 'thinking' | 'speaking' | 'error';
 
-type AgentMessage = {
+type AgentMessage = ChatMessage & {
   id: string;
-  role: 'user' | 'assistant';
-  text: string;
-  pending?: boolean;
+  status?: string;
 };
 
 type Point = { x: number; y: number };
@@ -362,7 +361,6 @@ export default function AssistantOverlayApp() {
     setAgentState('thinking');
 
     let answer = '';
-    let sawDelta = false;
     try {
       await streamChat(
         {
@@ -372,12 +370,11 @@ export default function AssistantOverlayApp() {
           temperature: Number(runtime.temperature ?? 0.2),
           max_tokens: Number(runtime.max_tokens ?? 1024),
           runtime: runtime as unknown as Record<string, unknown>,
-          history: messages.filter(item => !item.pending && item.text).map(item => ({ role: item.role, content: item.text })),
+          history: requestHistory(messages),
           memory: true,
         },
         (chunk) => {
           if (chunk.type === 'delta') {
-            sawDelta = true;
             answer += chunk.text || '';
             setAgentState('speaking');
             setMessages((prev) => prev.map((item) => (
@@ -388,16 +385,14 @@ export default function AssistantOverlayApp() {
             return;
           }
           if (chunk.type === 'done') {
-            const finalAnswer = normalizeMessageText(
-              'assistant',
-              chunk.answer || stripThinking(chunk.content || answer) || 'Ответ не сформировался.',
-            );
+            const completion = completedAnswer(chunk, answer);
+            const finalAnswer = normalizeMessageText('assistant', completion.answer);
             setMessages((prev) => prev.map((item) => (
               item.id === assistantId
-                ? { ...item, text: finalAnswer, pending: false }
+                ? { ...item, ...completion, text: finalAnswer, answer: finalAnswer }
                 : item
             )));
-            setAgentState('ready');
+            setAgentState(completion.phase === 'error' ? 'error' : 'ready');
             return;
           }
           if (chunk.type === 'error') {
@@ -406,19 +401,11 @@ export default function AssistantOverlayApp() {
         },
       );
 
-      if (!sawDelta && !answer) {
-        setMessages((prev) => prev.map((item) => (
-          item.id === assistantId
-            ? { ...item, text: 'Ответ не сформировался.', pending: false }
-            : item
-        )));
-        setAgentState('ready');
-      }
     } catch (error) {
       const message = getErrorMessage(error);
       setMessages((prev) => prev.map((item) => (
         item.id === assistantId
-          ? { ...item, text: `Ошибка: ${message}`, pending: false }
+          ? { ...item, pending: false, phase: 'error', status: `Ошибка: ${message}` }
           : item
       )));
       setAgentState('error');
@@ -475,6 +462,7 @@ export default function AssistantOverlayApp() {
                   <article key={message.id} className={`agent-v12-message ${message.role} ${message.pending ? 'pending' : ''}`}>
                     <strong>{message.role === 'user' ? 'Вы' : 'Помощник'}:</strong>
                     <span>{text || (message.pending ? '...' : '')}</span>
+                    {message.phase === 'error' && <small role="alert">{message.status || 'Ответ не завершён.'}</small>}
                   </article>
                 );
               })

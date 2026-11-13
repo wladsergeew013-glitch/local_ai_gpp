@@ -76,6 +76,16 @@ def main():
                     desktop.append_shared_message('assistant', 'New reply', conversation_id='first')
                     agent._render_shared_history(force=True)
                     assert agent.history_box.index('@0,0') == before
+                    desktop.append_shared_message('assistant', 'Partial reply', answer='Partial reply',
+                        conversation_id='first', pending=False, phase='error', error='Stream ended before done')
+                    agent._render_shared_history(force=True)
+                    rendered = agent.history_box.get('1.0', 'end')
+                    assert 'Partial reply' in rendered and 'Stream ended before done' in rendered
+                    assert agent.state == 'error'
+                    agent._refresh_context_hint()
+                    with patch.object(desktop, 'read_chat_state', side_effect=AssertionError('Idle polling read history')):
+                        agent._render_shared_history()
+                        agent._refresh_context_hint()
                     agent._toggle_dialog_sidebar()
                     assert not agent.dialog_sidebar_open and not agent.dialog_sidebar.winfo_manager()
                     agent._show_context_dialog()
@@ -89,7 +99,8 @@ def main():
                     results.update(passed=True, created_dialog=True, selected_existing=True,
                                    history_preserved=True, timestamps_visible=True, menu_hidden=True, manual_scroll_preserved=True,
                                    responsive_during_bootstrap=True, drag_during_load=True, browse_during_load=True,
-                                   background_reply_preserves_view=True, context_menu=True, negative_monitor_coordinates=True)
+                                   background_reply_preserves_view=True, context_menu=True, negative_monitor_coordinates=True,
+                                   incomplete_answer_visible=True, idle_history_skipped=True)
                 except BaseException as error:
                     errors.append(error)
                 finally:
