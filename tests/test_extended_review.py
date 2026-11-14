@@ -59,6 +59,42 @@ class ExtendedReviewTests(unittest.TestCase):
             self.assertEqual(agent.input_var.get(), 'draft')
             self.assertFalse(agent.busy_request or agent.awaiting_answer)
 
+    def test_R12_native_poll_is_rescheduled_after_settings_or_callback_error(self):
+        callbacks, scheduled = [], []
+        agent=desktop.NativeAssistantAgent.__new__(desktop.NativeAssistantAgent)
+        agent.root=SimpleNamespace(after=lambda delay,callback: scheduled.append(delay))
+        agent.ui_events=queue.SimpleQueue()
+        agent.ui_events.put(lambda: (_ for _ in ()).throw(OSError('callback failed')))
+        agent.ui_events.put(lambda: callbacks.append('second callback'))
+        agent._refresh_runtime_settings=lambda: (_ for _ in ()).throw(AttributeError('bad settings'))
+        agent._schedule_chat_sync_poll()
+        self.assertEqual(callbacks,['second callback']); self.assertEqual(scheduled,[500])
+
+    def test_R13_resize_keeps_saved_topmost_choice(self):
+        agent=desktop.NativeAssistantAgent.__new__(desktop.NativeAssistantAgent)
+        agent.root=SimpleNamespace(attributes=lambda *_: True)
+        agent.chat=agent.tail=None
+        agent.settings={'always_on_top':True}
+        with patch.object(desktop,'assistant_state_dir',return_value=self.root):
+            agent._toggle_topmost()
+            self.assertFalse(agent.settings['always_on_top'])
+            agent.resize_start={'avatar_x':0}; agent.avatar_x=0
+            agent.resize_poll_after=None; agent.chat_w=540; agent.chat_h=320
+            agent._finish_chat_resize()
+            saved=desktop.read_assistant_settings()
+            self.assertFalse(saved['always_on_top']); self.assertEqual(saved['chat_width'],540)
+
+    def test_R47_tray_does_not_report_success_after_busy_409(self):
+        import urllib.error
+        calls=[]
+        status=contextlib.closing(io.BytesIO(b'[{"model_id":"m"}]'))
+        error=urllib.error.HTTPError('http://127.0.0.1',409,'busy',None,None)
+        with patch.object(desktop,'server_port',12345), \
+             patch.object(desktop,'assistant_agent',SimpleNamespace(set_state=lambda *args:calls.append(args))), \
+             patch('urllib.request.urlopen',side_effect=[status,error]):
+            desktop.unload_models_from_tray()
+        self.assertEqual(calls[0][0],'error')
+
     def test_R18_orphan_assistant_can_be_trimmed_without_losing_latest_user(self):
         tokenizer = SimpleNamespace(tokenize=lambda value, **_: list(value))
         messages = [{'role':'system','content':'rules'}, {'role':'assistant','content':'x'*1000}, {'role':'user','content':'hello'}]
