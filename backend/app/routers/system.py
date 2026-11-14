@@ -13,7 +13,7 @@ router = APIRouter(tags=['system'])
 
 @router.post('/api/runtime/cancel')
 def cancel_generation() -> dict[str, int]:
-    workers = [entry['runtime'] for entry in list(RUNTIMES.values()) if entry.get('state') == 'generating']
+    workers = [entry['runtime'] for entry in list(RUNTIMES.values()) if entry.get('state') in {'generating', 'loading'}]
     for worker in workers:
         worker.close()
     return {'cancelled': len(workers)}

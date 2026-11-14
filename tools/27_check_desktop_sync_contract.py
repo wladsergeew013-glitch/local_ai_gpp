@@ -116,47 +116,10 @@ def main() -> int:
         print("[HINT] Close all LocalAIGPP.exe processes, rebuild, start dist\\LocalAIGPP.exe again, then rerun this check.")
         return 2
 
-    stamp = int(time.time() * 1000)
-    message_id = f"sync-contract-user-{stamp}"
-    message_text = f"SYNC_CONTRACT_TEST_{stamp}"
-    payload = {
-        "source": "sync-contract-test",
-        "updatedAt": stamp,
-        "activeConversationId": "conv-shared",
-        "conversationId": "conv-shared",
-        "conversationTitle": "Тестовый диалог",
-        "conversationCreatedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "message": {
-            "id": message_id,
-            "role": "user",
-            "text": message_text,
-            "syncUpdatedAt": stamp,
-        },
-    }
-
-    status, _headers, posted = request_json("POST", message_url, payload)
-    if status != 200:
-        print(f"[ERROR] POST /api/desktop/chat-message failed: HTTP {status}")
-        print(posted)
+    if not isinstance(original, dict) or not isinstance(original.get('conversations'), list):
+        print('[ERROR] Invalid shared history response')
         return 3
-
-    status, headers, state = request_json("GET", f"{sync_url}?t={int(time.time() * 1000)}")
-    marker = get_header(headers, "X-Local-AI-GPP-Sync")
-    if status != 200 or marker != MARKER:
-        print(f"[ERROR] GET after POST lost canonical marker: status={status}, marker={marker!r}")
-        return 4
-
-    if not find_message(state, message_id):
-        print("[ERROR] Posted message was not found in shared desktop chat state.")
-        return 5
-
-    # Restore previous state so the smoke check does not pollute user's chat.
-    if isinstance(original, dict):
-        original["source"] = "sync-contract-restore"
-        original["updatedAt"] = time.time() * 1000.0
-        request_json("POST", sync_url, original)
-
-    print("[OK] Desktop sync contract is canonical and round-trips through one shared store.")
+    print('[OK] Canonical sync marker and history schema verified (read-only; no user history changed).')
     return 0
 
 

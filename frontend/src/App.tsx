@@ -3,14 +3,12 @@ import { API_BASE, fetchBootstrap, fetchRuntimeStatus, prewarmModel, registerMod
 import type { ChatMessage, EngineSettings, ModelRecord, RuntimeStatus } from './types';
 import { APP_VERSION } from './version';
 import { contextSettingsError, estimateContext } from './contextBudget';
-import { completedAnswer, requestHistory } from './chatCompletion';
+import { messageError, requestHistory } from './chatCompletion';
+import { acceptsRemote, fresh, initialState, normalizeState, stateStatus, STORE } from './chatState';
+import type { ChatState } from './chatState';
 
-type Conversation = { id: string; title: string; createdAt: string; messages: ChatMessage[] };
-type ChatState = { activeConversationId: string; conversations: Conversation[]; updatedAt?: number };
-const STORE = 'local-ai-gpp-chats-v1';
 const MARKER = 'V67_4_DESKTOP_SYNC_MULTI_CONVERSATION';
 const url = (path: string) => `${API_BASE}${path}`;
-const fresh = (): Conversation => ({ id: crypto.randomUUID(), title: 'Новый диалог', createdAt: new Date().toISOString(), messages: [] });
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 function messageDate(message: ChatMessage): Date | null {
   const value = message.createdAt || message.syncUpdatedAt;
@@ -22,23 +20,6 @@ const messageTime = new Intl.DateTimeFormat('ru-RU', {
   day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
 });
 
-function initialState(): ChatState {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORE) || 'null') as ChatState | null;
-    if (saved?.conversations?.length && saved.conversations.every(c => typeof c.id === 'string' && Array.isArray(c.messages))) {
-      saved.conversations.forEach(c => c.messages.forEach(m => {
-        if (m.pending) Object.assign(m, { pending: false, phase: 'error', text: `${m.text || ''}\nОтвет прерван при закрытии страницы.` });
-      }));
-      return saved;
-    }
-  } catch {
-    try { localStorage.setItem(`${STORE}-corrupt-${Date.now()}`, localStorage.getItem(STORE) || ''); }
-    catch { /* Storage may be unavailable or full. */ }
-  }
-  const conversation = fresh();
-  return { activeConversationId: conversation.id, conversations: [conversation] };
-}
-
 async function jsonRequest(path: string, body?: unknown, method = 'POST') {
   const response = await fetch(url(path), { method: body === undefined && method === 'GET' ? 'GET' : method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
@@ -49,7 +30,7 @@ async function jsonRequest(path: string, body?: unknown, method = 'POST') {
 }
 
 export default function App() {
-  const [chat, setChat] = useState<ChatState>(initialState);
+  const [chat, setChat] = useState<ChatState>(() => initialState());
   const [models, setModels] = useState<ModelRecord[]>([]);
   const [settings, setSettings] = useState<EngineSettings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus[]>([]);
@@ -58,6 +39,8 @@ export default function App() {
   const [status, setStatus] = useState('Подключаюсь к Local AI…');
   const [busy, setBusy] = useState(false);
   const [desktop, setDesktop] = useState(false);
+  const [syncReady, setSyncReady] = useState(false);
+  const [networkErrors, setNetworkErrors] = useState<Record<string, string>>({});
   const [showSettings, setShowSettings] = useState(false);
   const [showContext, setShowContext] = useState(false);
   const [trimHistory, setTrimHistory] = useState(true);
@@ -78,7 +61,9 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const scrollConversation = useRef('');
-  const remoteStamp = useRef(0);
+  const remoteState = useRef<ChatState | null>(null);
+  const browserHistory = useRef(chat);
+  const bootReady = useRef(false);
   chatRef.current = chat;
   const active = chat.conversations.find(c => c.id === chat.activeConversationId) || chat.conversations[0];
   const model = models.find(m => m.id === modelId);
@@ -99,42 +84,52 @@ export default function App() {
     setTrimHistory(data.settings.runtime.context_overflow !== 'error');
     setEnableThinking(data.settings.runtime.enable_thinking ?? false);
     setGpuLayers(data.settings.runtime.n_gpu_layers); setNCtx(data.settings.runtime.n_ctx); setWarmPolicy(data.settings.runtime.warm_policy);
+    bootReady.current = true;
+  }
+
+  function applyRemote(value: unknown, authoritative = false) {
+    const state = normalizeState(value);
+    if (!acceptsRemote(remoteState.current, state, authoritative)) return false;
+    remoteState.current = state; chatRef.current = state; setChat(state); setStatus(stateStatus(state));
+    return true;
   }
 
   useEffect(() => {
     let stopped = false;
-    void reload().then(() => { if (!stopped) setStatus('Готово'); }).catch(e => setStatus(errorText(e)));
-    let syncEnabled = true;
-    let timer: number;
-    async function poll() {
+    const timers = { sync: 0, runtime: 0 };
+    const network = (kind: string, value: string) => { if (!stopped) setNetworkErrors(previous => ({ ...previous, [kind]: value })); };
+    async function pollSync() {
       try {
-        const statuses = await fetchRuntimeStatus();
-        if (!stopped) setRuntime(statuses);
-        if (syncEnabled) {
-          const response = await fetch(url('/api/desktop/chat-sync'), { cache: 'no-store', signal: AbortSignal.timeout(5000) });
-          if (response.status === 404 || response.headers.get('X-Local-AI-GPP-Sync') !== MARKER) syncEnabled = false;
-          else if (response.ok) {
-            const state = await response.json() as ChatState;
-            if (!stopped && state.conversations?.length && ((state.updatedAt || 0) > remoteStamp.current || remoteStamp.current === 0)) {
-              const wasPending = chatRef.current.conversations.some(c => c.messages.some(m => m.pending));
-              const pending = state.conversations.some(c => c.messages.some(m => m.pending));
-              if (wasPending && !pending) setStatus('Готово');
-              remoteStamp.current = state.updatedAt || 0; setDesktop(true); setChat(state);
-            }
+        const response = await fetch(url('/api/desktop/chat-sync'), { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+        if (!response.ok || response.headers.get('X-Local-AI-GPP-Sync') !== MARKER) throw new Error('Обновите сервер Local AI: требуется общий протокол диалогов.');
+        let state = normalizeState(await response.json());
+        if (!remoteState.current) {
+          const imported = `${STORE}-imported-${state.storeId || 'legacy'}`;
+          let migrated = false;
+          try { migrated = !!localStorage.getItem(imported); } catch { /* Server storage remains available. */ }
+          if (!migrated && !state.resetVersion && browserHistory.current.conversations.some(c => c.messages.length)) {
+            const copy = structuredClone(browserHistory.current);
+            copy.conversations.forEach(c => c.messages.forEach(m => { if (m.pending) Object.assign(m, { pending: false, phase: 'error', error: 'Ответ прерван при закрытии старой страницы.' }); }));
+            state = normalizeState(await jsonRequest('/api/desktop/chat-sync', { ...copy, version: state.version, source: 'import-browser' }));
           }
+          try { localStorage.setItem(imported, '1'); } catch { /* The server owns persisted dialogs. */ }
         }
-      } catch (e) { if (!stopped) setStatus(errorText(e)); }
-      if (!stopped) timer = window.setTimeout(() => void poll(), chatRef.current.conversations.some(c => c.messages.some(m => m.pending)) ? 500 : 2500);
+        if (!stopped) { applyRemote(state, true); setSyncReady(true); setDesktop(response.headers.get('X-Local-AI-GPP-Desktop') !== '0'); }
+        network('sync', '');
+      } catch (e) { network('sync', errorText(e)); }
+      if (!stopped) timers.sync = window.setTimeout(() => void pollSync(), chatRef.current.conversations.some(c => c.messages.some(m => m.pending)) ? 500 : 2000);
     }
-    void poll();
-    return () => { stopped = true; window.clearTimeout(timer); controller.current?.abort(); };
+    async function pollRuntime() {
+      if (!bootReady.current) {
+        try { await reload(); network('boot', ''); } catch (e) { network('boot', errorText(e)); }
+      }
+      try { const statuses = await fetchRuntimeStatus(); if (!stopped) setRuntime(statuses); network('runtime', ''); }
+      catch (e) { network('runtime', errorText(e)); }
+      if (!stopped) timers.runtime = window.setTimeout(() => void pollRuntime(), 2500);
+    }
+    void pollSync(); void pollRuntime();
+    return () => { stopped = true; Object.values(timers).forEach(window.clearTimeout); controller.current?.abort(); };
   }, []);
-
-  useEffect(() => {
-    if (desktop) return;
-    try { localStorage.setItem(STORE, JSON.stringify(chat)); }
-    catch { setStatus('История не сохранена: хранилище браузера заполнено.'); }
-  }, [chat, desktop]);
   useEffect(() => {
     const list = scrollRef.current;
     if (!list) return;
@@ -145,32 +140,22 @@ export default function App() {
     if (followLatest.current) list.scrollTop = list.scrollHeight;
   }, [active.id, active.messages]);
 
-  function editConversation(id: string, edit: (conversation: Conversation) => Conversation) {
-    setChat(previous => ({ ...previous, conversations: previous.conversations.map(c => c.id === id ? edit(c) : c) }));
-  }
-  function updateMessage(conversationId: string, messageId: string, patch: Partial<ChatMessage>) {
-    editConversation(conversationId, c => ({ ...c, messages: c.messages.map(m => m.id === messageId ? { ...m, ...patch } : m) }));
-  }
   async function selectConversation(id: string, next = chat) {
     const state = { ...next, activeConversationId: id, updatedAt: Date.now() };
     setChat(state);
-    if (desktop) {
-      try { setChat(await jsonRequest('/api/desktop/chat-sync', { ...state, source: 'main-ui' })); }
-      catch (e) { setStatus(errorText(e)); }
-    }
+    try { applyRemote(await jsonRequest('/api/desktop/chat-sync', { ...state, source: 'main-ui' })); }
+    catch (e) { if (remoteState.current) { chatRef.current = remoteState.current; setChat(remoteState.current); } setStatus(errorText(e)); }
   }
   async function clearConversation() {
     if (generating) return;
-    if (desktop) {
-      try { setChat(await jsonRequest('/api/desktop/chat-clear', { conversationId: active.id })); }
-      catch (e) { setStatus(errorText(e)); }
-    } else editConversation(active.id, c => ({ ...c, messages: [] }));
+    try { applyRemote(await jsonRequest('/api/desktop/chat-clear', { conversationId: active.id })); }
+    catch (e) { setStatus(errorText(e)); }
   }
 
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = input.trim();
-    if (!text || !modelId || generating) return;
+    if (!text || !modelId || generating || !syncReady) return;
     if (budgetError) { setStatus(budgetError); setShowContext(true); return; }
     const target = active;
     const title = target.messages.length ? target.title : text.slice(0, 42);
@@ -179,69 +164,44 @@ export default function App() {
       max_tokens: maxTokens, runtime: runtimeOptions, memory,
       history };
     setBusy(true); setStatus('Модель отвечает…');
-    if (desktop) {
+    if (syncReady) {
       try {
         const result = await jsonRequest('/api/desktop/chat-send', { ...payload, conversationId: target.id,
-          conversationTitle: title, conversationCreatedAt: target.createdAt, assistant_id: assistantId, source: 'main-ui' });
-        if (result.state) setChat(result.state);
-        setInput(''); setStatus('Модель отвечает…');
+          conversationTitle: title, conversationCreatedAt: target.createdAt, assistant_id: assistantId, source: 'main-ui', baseVersion: remoteState.current?.version });
+        if (result.state) applyRemote(result.state);
+        setInput(current => current === text ? '' : current); setStatus(stateStatus(chatRef.current));
       } catch (e) { setStatus(errorText(e)); }
       finally { setBusy(false); }
       return;
     }
-    editConversation(target.id, c => ({ ...c, title, messages: [...c.messages,
-      { id: crypto.randomUUID(), role: 'user', text, createdAt: new Date().toISOString() },
-      { id: assistantId, role: 'assistant', text: '', createdAt: new Date().toISOString(), pending: true, phase: 'thinking' }] }));
-    setInput('');
-    const abort = new AbortController(); controller.current = abort;
-    const timeout = window.setTimeout(() => abort.abort(), 210000);
-    let content = '';
-    try {
-      await streamChat(payload, event => {
-        if (event.type === 'delta') {
-          content += event.text || '';
-          updateMessage(target.id, assistantId, { text: content, phase: 'typing' });
-        } else if (event.type === 'worker_status') setStatus(event.message || 'Загружаю модель…');
-        else if (event.type === 'runtime') setStatus(`${event.mode || event.runtime?.mode || ''} · модель отвечает…`);
-        else if (event.type === 'done') {
-          const completion = completedAnswer(event, content);
-          updateMessage(target.id, assistantId, { ...completion,
-            elapsed_ms: event.elapsed_ms, usage: event.usage, finish_reason: event.finish_reason, history_dropped: event.history_dropped });
-          setStatus(completion.phase === 'error' ? completion.status : event.history_dropped ? `Готово · в запрос не вошло ${event.history_dropped} старых реплик; история сохранена.` : 'Готово');
-        }
-      }, abort.signal);
-    } catch (e) {
-      const message = abort.signal.aborted ? 'Генерация остановлена.' : errorText(e);
-      updateMessage(target.id, assistantId, { text: content || message, pending: false, phase: 'error' });
-      setStatus(message);
-    } finally { window.clearTimeout(timeout); controller.current = null; setBusy(false); }
   }
 
   async function stop() {
     controller.current?.abort();
-    if (desktop) {
+    {
       try { await jsonRequest('/api/runtime/cancel'); setStatus('Генерация остановлена.'); }
       catch (e) { setStatus(errorText(e)); }
     }
   }
   async function modelAction(load: boolean) {
     if (!modelId || generating) return;
+    const abort = new AbortController(); controller.current = abort;
     setBusy(true);
     setStatus(load ? 'Загружаю веса и прогреваю вычисления…' : 'Выгружаю модель…');
-    try { if (load) await prewarmModel(modelId, runtimeOptions); else await unloadModel(modelId);
+    try { if (load) await prewarmModel(modelId, runtimeOptions, abort.signal); else await unloadModel(modelId);
       setRuntime(await fetchRuntimeStatus()); setStatus(load ? 'Модель загружена' : 'Модель выгружена'); }
     catch (e) { setStatus(errorText(e)); }
     finally { setBusy(false); }
   }
   async function addModel(event: FormEvent) {
-    event.preventDefault(); setBusy(true);
+    event.preventDefault(); const abort = new AbortController(); controller.current = abort; setBusy(true);
     try {
       if (modelFile && modelFile.size > uploadLimit) throw new Error(`Файл модели превышает лимит ${uploadLimit / 1024 ** 3} ГиБ.`);
       const form = new FormData(); form.append('model_name', modelName || modelFile?.name || modelPath.split(/[\\/]/).pop() || 'LLM');
       form.append('model_type', 'LLM');
       let added: ModelRecord;
-      if (modelFile) { form.append('model_file', modelFile); added = await uploadModel(form); }
-      else { form.append('model_path', modelPath); added = await registerModelPath(form); }
+      if (modelFile) { form.append('model_file', modelFile); added = await uploadModel(form, abort.signal); }
+      else { form.append('model_path', modelPath); added = await registerModelPath(form, abort.signal); }
       await reload(); setModelId(added.id); setModelFile(null); setModelPath(''); setModelName(''); setStatus('Модель подключена');
     } catch (e) { setStatus(errorText(e)); }
     finally { setBusy(false); }
@@ -260,7 +220,7 @@ export default function App() {
     <header className="compact-header"><strong>Local AI GPP <small>{APP_VERSION}</small></strong>
       <div>{desktop && <button onClick={() => void jsonRequest('/api/desktop/show-assistant').catch(e => setStatus(errorText(e)))}>Мини-помощник</button>}
         <button aria-expanded={showSettings} onClick={() => setShowSettings(!showSettings)}>Настройки</button></div></header>
-    <aside className="dialog-list"><button className="primary" onClick={() => { const c = fresh(); void selectConversation(c.id, { ...chat, conversations: [c, ...chat.conversations] }); }}>+ Новый диалог</button>
+    <aside className="dialog-list"><button className="primary" disabled={!syncReady} onClick={() => { const c = fresh(); void selectConversation(c.id, { ...chat, conversations: [c, ...chat.conversations] }); }}>+ Новый диалог</button>
       <nav aria-label="Диалоги">{chat.conversations.map(c => <button className={c.id === active.id ? 'selected' : ''} key={c.id} onClick={() => void selectConversation(c.id)}>{c.title}<small>{c.messages.length} сообщений</small></button>)}</nav>
       <a href={url('/docs')} target="_blank" rel="noreferrer">API · документация</a></aside>
     <main className="compact-chat">
@@ -308,6 +268,7 @@ export default function App() {
           <header className="message-header"><strong>{message.role === 'user' ? 'Вы' : 'Local AI'}</strong>
             {date ? <time dateTime={date.toISOString()}>{messageTime.format(date)}</time> : <span className="message-time-unknown">Время не сохранено</span>}</header>
           <div>{message.text || (message.pending ? 'Модель готовит ответ…' : 'Пустой ответ')}</div>
+          {messageError(message) && <p className="context-warning" role="alert">{messageError(message)}</p>}
           {message.reasoning && <details><summary>Рассуждение</summary><p>{message.reasoning}</p></details>}
           {message.elapsed_ms !== undefined && <small>{(message.elapsed_ms / 1000).toFixed(1)} с · {message.usage?.completion_tokens ?? '—'} токенов</small>}
           {!!message.history_dropped && <small>В контекст не вошло {message.history_dropped} старых реплик. Полная история сохранена.</small>}
@@ -316,13 +277,13 @@ export default function App() {
       </div>
       <form className="compact-composer" onSubmit={send}><textarea aria-label="Сообщение" placeholder="Напишите сообщение…" rows={3} value={input} onChange={e => setInput(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }} />
-        {generating ? <button type="button" onClick={() => void stop()}>Остановить</button> : <button className="primary" disabled={!input.trim() || !modelId || !!budgetError}>Отправить</button>}</form>
+        {generating ? <button type="button" onClick={() => void stop()}>Остановить</button> : <button className="primary" disabled={!input.trim() || !modelId || !syncReady || !!budgetError}>Отправить</button>}</form>
       <div className={`context-meter ${contextFull || budgetError ? 'context-warning' : ''}`}>
         <progress aria-label="Примерная занятость контекста" max={Math.max(1, nCtx)} value={Math.min(estimatedContext, nCtx)} />
         <span>≈ {estimatedContext.toLocaleString('ru-RU')} / {nCtx.toLocaleString('ru-RU')} ток. · под ответ {maxTokens}
           {contextFull && (memory && trimHistory ? ' · старые реплики сократятся' : ' · запрос может не поместиться')}. Оценка; точная проверка перед генерацией.</span>
       </div>
-      <footer className="compact-status" role="status">{status}</footer>
+      <footer className="compact-status" role="status">{Object.values(networkErrors).filter(Boolean).join(' · ') || status}</footer>
     </main>
   </div>;
 }

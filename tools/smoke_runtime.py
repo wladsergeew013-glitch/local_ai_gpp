@@ -1,4 +1,5 @@
 """Live checks against a running Local AI. Uses the registered test GGUF."""
+import re
 import argparse
 import json
 import time
@@ -35,7 +36,7 @@ def status(): return client.get('/api/runtime/status').json()
 def recover():
     response, _ = chat('What is two plus two? Answer briefly.')
     assert response.status_code == 200, response.text
-    assert '4' in response.json()['answer'], response.text
+    assert re.search(r'\b(4|four)\b', response.json()['answer'], re.I), response.text
     return status()[0]['worker_pid']
 
 

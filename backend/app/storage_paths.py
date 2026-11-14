@@ -12,7 +12,7 @@ def checked_filename(value: str) -> str:
     if value.strip(' .') == '' or value.endswith((' ', '.')):
         raise ValueError("Invalid model filename")
     try:
-        if len(value.encode('utf-16-le')) // 2 > 240:
+        if len(value.encode('utf-16-le')) // 2 > 240 or len(value.encode('utf-8')) > 240:
             raise ValueError("Invalid model filename")
     except UnicodeError:
         raise ValueError("Invalid model filename") from None

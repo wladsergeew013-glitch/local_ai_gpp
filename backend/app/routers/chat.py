@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import time
 import json
 from typing import Any, Literal
@@ -11,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.core import append_request_log, create_chat_completion, create_request_log, read_log_tail, stream_chat_completion
 from backend.app.streaming import event_response
+from backend.app.reasoning import split_reasoning, uses_reasoning
 
 router = APIRouter(tags=["chat"])
 
@@ -28,7 +28,7 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(default=512, ge=1, le=32768)
     runtime: dict[str, Any] = Field(default_factory=dict)
     memory: bool = Field(default=True, description='Include supplied history. No history is stored on the API server.')
-    history: list[HistoryMessage] = Field(default_factory=list, max_length=256)
+    history: list[HistoryMessage] = Field(default_factory=list, max_length=8192)
 
 
 def chat_messages(payload: ChatRequest) -> list[dict[str, str]]:
@@ -39,66 +39,6 @@ def chat_messages(payload: ChatRequest) -> list[dict[str, str]]:
         messages.extend(item.model_dump() for item in payload.history)
     messages.append({'role': 'user', 'content': payload.message.strip()})
     return messages
-
-
-THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
-OPEN_THINK_RE = re.compile(r"<think>", re.IGNORECASE)
-FINAL_MARKER_RE = re.compile(
-    r"(?:финальный ответ|итоговый ответ|ответ должен быть|final answer|answer|ответ)\s*[:：]\s*(.+)$",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def split_reasoning(content: str) -> dict:
-    text = content or ""
-    match = THINK_BLOCK_RE.search(text)
-    if match:
-        before = text[: match.start()].strip()
-        reasoning = match.group(1).strip()
-        after = text[match.end() :].strip()
-        answer = "\n\n".join(part for part in (before, after) if part).strip()
-        return {
-            "answer": answer,
-            "reasoning": reasoning,
-            "answer_state": "final_answer" if answer else "missing_after_reasoning",
-            "reasoning_truncated": False,
-        }
-
-    open_match = OPEN_THINK_RE.search(text)
-    if open_match:
-        before = text[: open_match.start()].strip()
-        reasoning = text[open_match.end() :].strip()
-        candidate = extract_answer_candidate(reasoning)
-        return {
-            "answer": before or candidate,
-            "reasoning": reasoning,
-            "answer_state": "final_answer" if before else ("extracted_from_reasoning" if candidate else "missing_after_reasoning"),
-            "reasoning_truncated": True,
-        }
-
-    # Some GGUF templates put the opening <think> in the prompt, so the
-    # completion contains only its closing tag and the final answer.
-    close_match = re.search(r'</think\s*>', text, re.IGNORECASE)
-    if close_match:
-        answer = text[close_match.end():].strip()
-        return {'answer': answer, 'reasoning': text[:close_match.start()].strip(),
-                'answer_state': 'final_answer' if answer else 'missing_after_reasoning',
-                'reasoning_truncated': False}
-
-    return {
-        "answer": text.strip(),
-        "reasoning": "",
-        "answer_state": "final_answer" if text.strip() else "empty",
-        "reasoning_truncated": False,
-    }
-
-
-def extract_answer_candidate(reasoning: str) -> str:
-    match = FINAL_MARKER_RE.search(reasoning or "")
-    if not match:
-        return ""
-    candidate = match.group(1).strip()
-    return candidate[:4000].strip()
 
 
 @router.post("/api/chat")
@@ -132,9 +72,9 @@ def chat(payload: ChatRequest) -> dict:
     choice = (result.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     content = str(message.get("content") or "")
-    parsed = split_reasoning(content)
     usage = result.get("usage") or {}
     local_runtime = result.get("_local_ai_gpp", {}) if isinstance(result.get("_local_ai_gpp"), dict) else {}
+    parsed = split_reasoning(content, uses_reasoning(local_runtime.get("runtime", {})))
     append_request_log(
         log_path,
         "api_chat_response",
@@ -199,7 +139,7 @@ def response_events(stream, log_path, request_id, started):
             if item.get("type") == "delta":
                 full_text += str(item.get("text") or "")
             if item.get("type") == "done":
-                parsed = split_reasoning(str(item.get("content") or full_text))
+                parsed = split_reasoning(str(item.get("content") or full_text), uses_reasoning(item.get("runtime") or {}))
                 elapsed_ms = item.get("elapsed_ms")
                 if not isinstance(elapsed_ms, (int, float)):
                     elapsed_ms = round((time.perf_counter() - started) * 1000)

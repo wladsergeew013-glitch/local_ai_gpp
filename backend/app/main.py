@@ -25,6 +25,7 @@ from backend.app.routers.models import router as models_router
 from backend.app.routers.settings import router as settings_router
 from backend.app.routers.system import router as system_router
 from backend.app.version import APP_VERSION
+from backend.app.browser_boundary import LocalBrowserBoundaryMiddleware
 
 
 def _normalize_origins(value: Any) -> list[str]:
@@ -40,13 +41,16 @@ def _normalize_origins(value: Any) -> list[str]:
 async def lifespan(app: FastAPI):
     settings = load_settings()
     runtime_settings = settings.get('runtime', {})
-    if runtime_settings.get('preload_on_start'):
-        for model in load_models():
-            if model.get('type') == 'LLM' and not str(model.get('path', '')).startswith('HUB::'):
-                try:
+    async def preload_one() -> None:
+        if runtime_settings.get('preload_on_start'):
+            try:
+                candidates = [m for m in load_models() if m.get('type') == 'LLM' and m.get('file_exists')]
+                model = next((m for m in candidates if m.get('status') in {'running', 'warm'}), candidates[0] if candidates else None)
+                if model:
                     await asyncio.to_thread(prewarm_runtime, str(model['id']))
-                except Exception:
-                    pass
+            except Exception:
+                pass
+    preload = asyncio.create_task(preload_one())
 
     stop_event = asyncio.Event()
 
@@ -66,8 +70,20 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         stop_event.set()
+        if not preload.done():
+            from backend.app.routers.system import cancel_generation
+            await asyncio.to_thread(cancel_generation)
+            preload.cancel()
+        await asyncio.gather(preload, return_exceptions=True)
         await task
-        await asyncio.to_thread(unload_all_runtimes)
+        from backend.app.routers.system import cancel_generation
+        await asyncio.to_thread(cancel_generation)
+        for _ in range(100):
+            try:
+                await asyncio.to_thread(unload_all_runtimes)
+                break
+            except Exception:
+                await asyncio.sleep(.05)
 
 
 settings = load_settings()
@@ -89,7 +105,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
+    expose_headers=['X-Local-AI-GPP-Sync', 'X-Local-AI-GPP-Desktop'],
 )
+app.add_middleware(LocalBrowserBoundaryMiddleware, allowed_origins=cors_origins)
 
 app.mount('/assets/branding', StaticFiles(directory=MODELS_DIR / 'branding'), name='branding')
 
@@ -101,11 +119,7 @@ app.include_router(compat_router)
 app.include_router(system_router)
 
 
-# Desktop integration routes are owned by tools/exe_launcher.py only.
-# The plain backend deliberately has no /api/desktop/* routes, so the EXE
-# cannot accidentally read the old LocalAppData shared_chat_v23 store.
-
-
-frontend_dist = PROJECT_ROOT / 'frontend' / 'dist'
-if frontend_dist.exists():
-    app.mount('/', StaticFiles(directory=frontend_dist, html=True), name='frontend')
+# Browser, Docker and EXE use the same versioned store and generation owner.
+# The launcher module is import-safe: Tk/WebView start only in its main().
+import importlib
+importlib.import_module('tools.exe_launcher')

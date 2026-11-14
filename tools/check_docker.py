@@ -1,5 +1,6 @@
 """Check Docker web/proxy/API and optionally verify CPU, mixed or CUDA inference."""
 import argparse
+import uuid
 import json
 import re
 import time
@@ -11,13 +12,13 @@ from pathlib import Path
 def run(base_url, model_path=None, gpu_layers=0):
     base = base_url.rstrip('/')
 
-    def request(path, payload=None, form=False, timeout=10):
+    def request(path, payload=None, form=False, timeout=10, method=None):
         data = None
         headers = {}
         if payload is not None:
             data = (urllib.parse.urlencode(payload) if form else json.dumps(payload)).encode()
             headers['Content-Type'] = 'application/x-www-form-urlencoded' if form else 'application/json'
-        with urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=headers), timeout=timeout) as response:
+        with urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=headers, method=method), timeout=timeout) as response:
             return response.read(), response.headers.get('Content-Type', '')
 
     results = {'base_url': base, 'checks': [], 'inference': None}
@@ -44,45 +45,49 @@ def run(base_url, model_path=None, gpu_layers=0):
 
     if model_path:
         runtime = {'n_ctx': 1024, 'n_batch': 64, 'n_threads': 8, 'n_gpu_layers': gpu_layers,
-                   'gpu_fallback_to_cpu': False, 'warm_policy': 'keep_loaded',
+                   'gpu_fallback_to_cpu': False, 'warm_policy': 'keep_hot',
                    'worker_idle_timeout_sec': 60, 'request_timeout_sec': 180,
                    'enable_thinking': False}
         raw, _ = request('/api/models/register-path', {
-            'model_name': 'Docker Qwen3.5 4B', 'model_type': 'LLM',
+            'model_name': 'LOCAL_AI_DOCKER_CHECK_' + uuid.uuid4().hex, 'model_type': 'LLM',
             'model_path': model_path, 'runtime_json': json.dumps(runtime)}, form=True)
         model = json.loads(raw)
-        started = time.monotonic()
-        raw, _ = request('/api/chat', {
-            'model_id': model['id'], 'message': 'What is two plus two? Answer with one word.',
-            'max_tokens': 512, 'temperature': 0, 'memory': False, 'runtime': runtime}, timeout=200)
-        answer = json.loads(raw)
-        assert answer['finish_reason'] == 'stop', answer['finish_reason']
-        assert re.search(r'\b(four|4)\b', answer['answer'], re.IGNORECASE), answer['answer']
-        raw, _ = request('/api/runtime/status')
-        status = next(item for item in json.loads(raw) if item['model_id'] == model['id'])
-        assert status['worker_pid'], status
-        assert status['model_adapter'] == 'qwen' and status['enable_thinking'] is False, status
-        assert not answer.get('reasoning'), 'No-thinking adapter produced a reasoning block'
-        offloaded, total = status.get('gpu_offloaded_layers', 0), status.get('model_layers', 0)
-        if gpu_layers == 0:
-            assert status['mode'] == 'CPU' and offloaded == 0, status
-        elif gpu_layers == -1:
-            assert status['mode'] == 'CUDA' and total > 0 and offloaded == total, status
-        else:
-            assert total > gpu_layers > 0 and offloaded == gpu_layers, status
-            assert status['mode'] == 'CPU + CUDA', status
-        if gpu_layers:
-            assert status['backend']['supports_gpu_offload'], status
-        assert not status.get('fallback_reason'), status
-        results['inference'] = {'model': model['id'], 'answer': answer['answer'],
-                                'finish_reason': answer['finish_reason'], 'mode': status['mode'],
-                                'seconds': round(time.monotonic() - started, 3),
-                                'worker_pid': status['worker_pid'], 'usage': answer['usage'],
-                                'requested_gpu_layers': gpu_layers,
-                                'gpu_offloaded_layers': offloaded, 'model_layers': total,
-                                'fallback_reason': status.get('fallback_reason', ''),
-                                'model_adapter': status['model_adapter'], 'enable_thinking': status['enable_thinking'],
-                                'reasoning_chars': len(answer.get('reasoning', ''))}
+        try:
+            started = time.monotonic()
+            raw, _ = request('/api/chat', {
+                'model_id': model['id'], 'message': 'What is two plus two? Answer with one word.',
+                'max_tokens': 512, 'temperature': 0, 'memory': False, 'runtime': runtime}, timeout=200)
+            answer = json.loads(raw)
+            assert answer['finish_reason'] == 'stop', answer['finish_reason']
+            assert re.search(r'\b(four|4)\b', answer['answer'], re.IGNORECASE), answer['answer']
+            raw, _ = request('/api/runtime/status')
+            status = next(item for item in json.loads(raw) if item['model_id'] == model['id'])
+            assert status['worker_pid'], status
+            assert status['model_adapter'] == 'qwen' and status['enable_thinking'] is False, status
+            assert not answer.get('reasoning'), 'No-thinking adapter produced a reasoning block'
+            offloaded, total = status.get('gpu_offloaded_layers', 0), status.get('model_layers', 0)
+            if gpu_layers == 0:
+                assert status['mode'] == 'CPU' and offloaded == 0, status
+            elif gpu_layers == -1:
+                assert status['mode'] == 'CUDA' and total > 0 and offloaded == total, status
+            else:
+                assert total > gpu_layers > 0 and offloaded == gpu_layers, status
+                assert status['mode'] == 'CPU + CUDA', status
+            if gpu_layers:
+                assert status['backend']['supports_gpu_offload'], status
+            assert not status.get('fallback_reason'), status
+            results['inference'] = {'model': model['id'], 'answer': answer['answer'],
+                                    'finish_reason': answer['finish_reason'], 'mode': status['mode'],
+                                    'seconds': round(time.monotonic() - started, 3),
+                                    'worker_pid': status['worker_pid'], 'usage': answer['usage'],
+                                    'requested_gpu_layers': gpu_layers,
+                                    'gpu_offloaded_layers': offloaded, 'model_layers': total,
+                                    'fallback_reason': status.get('fallback_reason', ''),
+                                    'model_adapter': status['model_adapter'], 'enable_thinking': status['enable_thinking'],
+                                    'reasoning_chars': len(answer.get('reasoning', ''))}
+        finally:
+            request('/api/models/' + urllib.parse.quote(model['id'], safe=''), method='DELETE')
+
     return results
 
 

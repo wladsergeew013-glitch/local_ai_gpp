@@ -22,12 +22,14 @@ from typing import Any
 import httpx
 import anyio
 from fastapi import HTTPException
+from backend.app.model_paths import data_root, model_path
+from backend.app.settings_schema import validate_settings
 from backend.app.storage_paths import MAX_MODEL_UPLOAD_BYTES, checked_filename, contained_path
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else APP_DIR.parent.parent
-MODELS_DIR = Path(os.getenv("LOCAL_AI_GPP_DATA_DIR", str(PROJECT_ROOT))) / "models_storage"
-LOGS_DIR = Path(os.getenv("LOCAL_AI_GPP_DATA_DIR", str(PROJECT_ROOT))) / "logs"
+MODELS_DIR = data_root(PROJECT_ROOT) / "models_storage"
+LOGS_DIR = data_root(PROJECT_ROOT) / "logs"
 BRANDING_DIR = MODELS_DIR / "branding"
 MODELS_FILE = MODELS_DIR / "models.json"
 SETTINGS_FILE = MODELS_DIR / "settings.json"
@@ -92,19 +94,22 @@ def _clean_subprocess_dll_search_path():
     if os.name != "nt" or not getattr(sys, "frozen", False):
         yield
         return
+    previous = None
+    kernel32 = None
     try:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32
         previous = getattr(sys, "_MEIPASS", None)
         kernel32.SetDllDirectoryW(None)
-        try:
-            yield
-        finally:
-            if previous:
-                kernel32.SetDllDirectoryW(str(previous))
     except Exception:
+        kernel32 = None
+    try:
         yield
+    finally:
+        if kernel32 is not None and previous:
+            with contextlib.suppress(Exception):
+                kernel32.SetDllDirectoryW(str(previous))
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "branding": {
@@ -228,7 +233,7 @@ def create_request_log(model_id: str, kind: str = "chat") -> tuple[str, Path]:
     return request_id, path
 
 
-def append_request_log(path: Path | str | None, title: str, data: Any | None = None) -> None:
+def _append_request_log(path: Path | str | None, title: str, data: Any | None = None) -> None:
     if not path:
         return
     log_path = Path(path)
@@ -243,6 +248,13 @@ def append_request_log(path: Path | str | None, title: str, data: Any | None = N
             else:
                 handle.write(json.dumps(data, ensure_ascii=False, indent=2, default=str))
                 handle.write("\n")
+
+
+def append_request_log(path: Path | str | None, title: str, data: Any | None = None) -> None:
+    try:
+        _append_request_log(path, title, data)
+    except (OSError, ValueError, TypeError):
+        logging.getLogger(__name__).warning('Request diagnostics could not be written.')
 
 
 def read_log_tail(path: Path | str | None, max_lines: int = 160) -> list[str]:
@@ -308,17 +320,35 @@ def get_logo_url() -> str:
 
 
 def load_settings() -> dict[str, Any]:
-    raw = _read_json(SETTINGS_FILE, DEFAULT_SETTINGS)
-    merged = merge_dict(DEFAULT_SETTINGS, raw if isinstance(raw, dict) else {})
-    merged["branding"]["logo_url"] = get_logo_url()
+    try:
+        raw = _read_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+        if not isinstance(raw, dict):
+            raise HTTPException(422, 'Settings must be an object')
+        merged = validate_settings(merge_dict(DEFAULT_SETTINGS, raw), DEFAULT_SETTINGS)
+    except HTTPException as exc:
+        logging.getLogger(__name__).warning('Settings preserved; using defaults: %s', exc.detail)
+        merged = merge_dict(DEFAULT_SETTINGS, {})
+        merged['settings_warning'] = str(exc.detail)
+    merged['branding']['logo_url'] = get_logo_url()
     return merged
 
 
 def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
-    merged = merge_dict(DEFAULT_SETTINGS, payload if isinstance(payload, dict) else {})
-    merged["branding"]["logo_url"] = get_logo_url()
-    _write_json(SETTINGS_FILE, merged)
-    return merged
+    if not isinstance(payload, dict):
+        raise HTTPException(422, 'Settings must be an object')
+    with JSON_LOCK:
+        # Partial writes merge with the current file under the same lock.
+        current = load_settings()
+        current.pop('settings_warning', None)
+        merged = validate_settings(merge_dict(current, payload), DEFAULT_SETTINGS)
+        merged['branding']['logo_url'] = get_logo_url()
+        if SETTINGS_FILE.exists():
+            try:
+                validate_settings(merge_dict(DEFAULT_SETTINGS, json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))), DEFAULT_SETTINGS)
+            except (HTTPException, ValueError, TypeError, AttributeError):
+                shutil.copy2(SETTINGS_FILE, SETTINGS_FILE.with_name(SETTINGS_FILE.name + '.invalid-' + uuid.uuid4().hex))
+        _write_json(SETTINGS_FILE, merged)
+        return merged
 
 
 def _is_hub_model_path(path_value: str) -> bool:
@@ -326,21 +356,7 @@ def _is_hub_model_path(path_value: str) -> bool:
 
 
 def resolve_model_file_path(path_value: Any) -> Path:
-    raw = str(path_value or "").strip().strip('"')
-    path_obj = Path(raw)
-    if path_obj.is_absolute():
-        return path_obj
-    normalized = raw.replace('\\', '/')
-    candidates: list[Path] = []
-    if normalized.startswith('models_storage/'):
-        candidates.append(MODELS_DIR.parent / path_obj)
-    else:
-        candidates.append(MODELS_DIR / path_obj)
-        candidates.append(PROJECT_ROOT / path_obj)
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0] if candidates else path_obj
+    return model_path(path_value, MODELS_DIR, PROJECT_ROOT)
 
 
 def validate_model_record(model: dict[str, Any]) -> dict[str, Any]:
@@ -379,8 +395,8 @@ def validate_model_record(model: dict[str, Any]) -> dict[str, Any]:
 def validate_model_registry(*, save: bool = False) -> list[dict[str, Any]]:
     with JSON_LOCK:
         data = _read_json(MODELS_FILE, [])
-        if not isinstance(data, list):
-            return []
+        if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+            raise HTTPException(503, 'Invalid models.json structure; original registry preserved. Restore its backup before registering models.')
         models = [validate_model_record(item) for item in data if isinstance(item, dict)]
         if save:
             save_models(models)
@@ -408,39 +424,35 @@ def save_models(models: list[dict[str, Any]]) -> None:
 
 
 def upload_logo_file(file_obj: Any, filename: str) -> str:
-    # LOGO_UPLOAD_SAFE_V61: logo and EXE icon are separate assets.
-    # Logo lives as models_storage/branding/logo.<ext>.
-    # EXE icon lives as models_storage/branding/icons/local_ai_gpp.ico.
-    ext = Path(filename or "logo.png").suffix.lower()
-    if ext not in {".svg", ".png", ".jpg", ".jpeg", ".webp"}:
-        raise HTTPException(status_code=400, detail="Поддерживаются SVG, PNG, JPG, JPEG, WEBP")
-
+    ext = Path(filename or 'logo.png').suffix.lower()
+    if ext not in {'.svg', '.png', '.jpg', '.jpeg', '.webp'}:
+        raise HTTPException(400, 'Supported logos: SVG, PNG, JPG, JPEG, WEBP')
     BRANDING_DIR.mkdir(parents=True, exist_ok=True)
-    target = BRANDING_DIR / f"logo{ext}"
-    tmp_target = BRANDING_DIR / f"logo_upload_tmp{ext}"
-
+    temporary = BRANDING_DIR / ('.logo-' + uuid.uuid4().hex + ext)
+    target = BRANDING_DIR / ('logo' + ext)
     try:
-        if tmp_target.exists():
-            tmp_target.unlink()
-        with tmp_target.open("wb") as handle:
-            shutil.copyfileobj(file_obj, handle)
-        if not tmp_target.exists() or tmp_target.stat().st_size <= 0:
-            raise HTTPException(status_code=400, detail="Файл логотипа пустой или не прочитан.")
-
-        for item in BRANDING_DIR.iterdir():
-            if item.is_file() and item.stem.lower() == "logo" and item.name != tmp_target.name:
-                item.unlink()
-        tmp_target.replace(target)
-        return get_logo_url()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        try:
-            if tmp_target.exists():
-                tmp_target.unlink()
-        except Exception:
-            pass
-        raise HTTPException(status_code=400, detail=f"Не удалось загрузить логотип: {exc}") from exc
+        with temporary.open('xb') as handle:
+            size = 0
+            while chunk := file_obj.read(65536):
+                size += len(chunk)
+                if size > 16 * 1024**2:
+                    raise HTTPException(413, 'Logo exceeds 16 MiB')
+                handle.write(chunk)
+            if not size:
+                raise HTTPException(400, 'Empty logo')
+        with JSON_LOCK:
+            temporary.replace(target)
+            for item in BRANDING_DIR.glob('logo.*'):
+                if item != target and item.is_file():
+                    try:
+                        item.unlink()
+                    except OSError:
+                        logging.getLogger(__name__).warning('Old logo retained: %s', item.name)
+            return get_logo_url()
+    except OSError as exc:
+        raise HTTPException(500, 'Cannot save logo; previous logo retained') from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def sanitize_model_name(name: str) -> str:
@@ -522,8 +534,7 @@ def _retire_managed_upload(value: Any) -> None:
     namespace = MODELS_DIR.resolve() / "uploads"
     if namespace.resolve() != namespace:
         return
-    candidate = Path(str(value))
-    candidate = (candidate if candidate.is_absolute() else PROJECT_ROOT / candidate).resolve()
+    candidate = resolve_model_file_path(value).resolve()
     try:
         relative = candidate.relative_to(namespace)
     except ValueError:
@@ -543,8 +554,7 @@ def _retire_managed_upload(value: Any) -> None:
     for reference in references:
         if not reference:
             continue
-        path = Path(str(reference))
-        path = path if path.is_absolute() else PROJECT_ROOT / path
+        path = resolve_model_file_path(reference)
         if path.resolve() == candidate:
             return
     try:
@@ -575,7 +585,7 @@ def _commit_model_file(record: dict[str, Any], temporary: Path, target: Path) ->
 
 def copy_uploaded_model(name: str, incoming_filename: str, file_obj: Any, *,
                         model_type: str = "LLM", source: str = "upload",
-                        expected_bytes: int | None = None) -> dict[str, Any]:
+                        expected_bytes: int | None = None, cancel_event=None) -> dict[str, Any]:
     safe_name = sanitize_model_name(name)
     try:
         filename = checked_filename(incoming_filename)
@@ -602,6 +612,8 @@ def copy_uploaded_model(name: str, incoming_filename: str, file_obj: Any, *,
         with os.fdopen(fd, "wb") as handle:
             copied = 0
             while chunk := file_obj.read(1024**2):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise HTTPException(499, 'Model upload cancelled')
                 copied += len(chunk)
                 if copied > MAX_MODEL_UPLOAD_BYTES:
                     raise HTTPException(413, "Размер модели превышает 16 ГиБ.")
@@ -614,6 +626,8 @@ def copy_uploaded_model(name: str, incoming_filename: str, file_obj: Any, *,
         with marker.open("x", encoding="utf-8") as handle:
             marker_owned = True
             json.dump({"contract": "LOCAL_AI_UPLOAD_V1", "filename": filename}, handle)
+        if cancel_event is not None and cancel_event.is_set():
+            raise HTTPException(499, 'Model upload cancelled')
         record = _commit_model_file(record, temporary, target)
         committed = True
         return record
@@ -647,19 +661,22 @@ def register_model_path(
     runtime: dict[str, Any] | None = None,
     source: str = "server_path",
 ) -> dict[str, Any]:
+    path_obj = resolve_model_file_path(model_path)
+    if not path_obj.is_file():
+        raise HTTPException(400, 'Model path must reference a file')
+    record = make_model_record(name=name, model_type=model_type, filename=path_obj.name,
+                               path=str(path_obj), source=source, runtime=runtime)
     with JSON_LOCK:
-        path_obj = Path(model_path)
-        if not path_obj.exists() or not path_obj.is_file():
-            raise HTTPException(status_code=400, detail="Указанный путь не существует или не является файлом")
-        record = make_model_record(
-            name=name,
-            model_type=model_type,
-            filename=path_obj.name,
-            path=str(path_obj),
-            source=source,
-            runtime=runtime,
-        )
-        return upsert_model(record)
+        exists = any(row.get('id') == record['id'] for row in load_models())
+        if not exists:
+            return upsert_model(record)
+    with runtime_operation(), JSON_LOCK:
+        previous = next((row for row in load_models() if row.get('id') == record['id']), None)
+        _unload_runtime(record['id'])
+        result = upsert_model(record)
+        if previous:
+            _retire_managed_upload(previous.get('path'))
+        return result
 
 
 def _merge_runtime(
@@ -884,93 +901,15 @@ print(json.dumps(result, ensure_ascii=False, default=str))
 
 
 def get_runtime_diagnostics() -> dict[str, Any]:
-    from backend.app.cuda_runtime import configure_cuda_dlls
-    configure_cuda_dlls()
-    supported_parameters: list[str] = []
-    gpu_related_supported: list[str] = []
-    package_installed = False
-    package_version = ""
-    package_path = ""
-    supports_gpu_offload: bool | None = None
-    system_info = ""
-    gpu_backend_flags: list[str] = []
-
-    try:
-        import llama_cpp
-        from llama_cpp import Llama
-
-        package_installed = True
-        package_version = str(getattr(llama_cpp, "__version__", "unknown"))
-        package_path = str(Path(getattr(llama_cpp, "__file__", "")).resolve())
-        try:
-            params = inspect.signature(Llama).parameters
-            supported_parameters = sorted(params.keys())
-        except (TypeError, ValueError):
-            supported_parameters = []
-        gpu_names = {
-            "n_gpu_layers",
-            "main_gpu",
-            "split_mode",
-            "tensor_split",
-            "offload_kqv",
-            "flash_attn",
-            "op_offload",
-            "swa_full",
-        }
-        gpu_related_supported = [name for name in supported_parameters if name in gpu_names]
-        try:
-            from llama_cpp import llama_cpp as llama_cpp_lib
-
-            supports_fn = getattr(llama_cpp_lib, "llama_supports_gpu_offload", None)
-            supports_gpu_offload = bool(supports_fn()) if callable(supports_fn) else None
-            system_info_fn = getattr(llama_cpp_lib, "llama_print_system_info", None)
-            if callable(system_info_fn):
-                raw_system_info = system_info_fn()
-                if isinstance(raw_system_info, bytes):
-                    system_info = raw_system_info.decode("utf-8", "replace")
-                else:
-                    system_info = str(raw_system_info or "")
-            upper_info = system_info.upper()
-            gpu_backend_flags = [
-                token
-                for token in ("CUDA", "VULKAN", "CLBLAST", "METAL", "HIP", "SYCL", "KOMPUTE")
-                if token in upper_info
-            ]
-            if supports_gpu_offload is None and system_info:
-                positive = any(
-                    f"{token} = 1" in upper_info
-                    or f"{token}=1" in upper_info
-                    or f"{token} : 1" in upper_info
-                    or f"{token}:1" in upper_info
-                    for token in ("CUDA", "VULKAN", "CLBLAST", "METAL", "HIP", "SYCL", "KOMPUTE")
-                )
-                negative = any(
-                    f"{token} = 0" in upper_info
-                    or f"{token}=0" in upper_info
-                    or f"{token} : 0" in upper_info
-                    or f"{token}:0" in upper_info
-                    for token in ("CUDA", "VULKAN", "CLBLAST", "METAL", "HIP", "SYCL", "KOMPUTE")
-                )
-                if positive:
-                    supports_gpu_offload = True
-                elif negative:
-                    supports_gpu_offload = False
-        except Exception:
-            supports_gpu_offload = None
-    except Exception:
-        package_installed = False
-
-    if should_use_external_worker() and not package_installed:
-        external_diag = get_external_worker_llama_diagnostics()
-        if external_diag:
-            package_installed = bool(external_diag.get("package_installed"))
-            package_version = str(external_diag.get("package_version") or "")
-            package_path = str(external_diag.get("package_path") or "")
-            supported_parameters = list(external_diag.get("supported_parameters") or [])
-            gpu_related_supported = list(external_diag.get("gpu_related_supported") or [])
-            supports_gpu_offload = external_diag.get("supports_gpu_offload")  # type: ignore[assignment]
-            system_info = str(external_diag.get("system_info") or "")
-            gpu_backend_flags = list(external_diag.get("gpu_backend_flags") or [])
+    external_diag = get_external_worker_llama_diagnostics()
+    package_installed = bool(external_diag.get('package_installed'))
+    package_version = str(external_diag.get('package_version') or '')
+    package_path = str(external_diag.get('package_path') or '')
+    supported_parameters = list(external_diag.get('supported_parameters') or [])
+    gpu_related_supported = list(external_diag.get('gpu_related_supported') or [])
+    supports_gpu_offload = external_diag.get('supports_gpu_offload')
+    system_info = str(external_diag.get('system_info') or '')
+    gpu_backend_flags = list(external_diag.get('gpu_backend_flags') or [])
 
     nvidia_smi = ""
     nvidia_smi_found = False
@@ -1001,11 +940,11 @@ def get_runtime_diagnostics() -> dict[str, Any]:
     elif supports_gpu_offload is False:
         summary = "Установлена CPU-сборка llama-cpp-python: параметры GPU принимаются, но видеокарта не используется."
         recommendations.append("Для NVIDIA поставь CUDA-сборку llama-cpp-python и перезапусти приложение.")
-        recommendations.append("Быстрый путь: закрой EXE/backend и запусти tools\\06_install_cuda_runtime.bat cu124 0.3.4. Для отката есть tools\\07_install_cpu_runtime.bat.")
+        recommendations.append("Быстрый путь: закрой EXE/backend и запусти tools\\06_install_cuda_runtime.bat cu124 0.3.36. Для отката есть tools\\07_install_cpu_runtime.bat.")
         if platform.system() == "Windows":
             recommendations.append("Для cu124 на Windows нужны CUDA 12 runtime DLL в PATH: cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll.")
             recommendations.append("На Windows CUDA wheel может не найтись автоматически; тогда нужны Visual Studio Build Tools с компонентом Desktop development with C++ и NVIDIA CUDA Toolkit.")
-            recommendations.append("Ручная сборка: set CMAKE_ARGS=-DGGML_CUDA=on && set FORCE_CMAKE=1 && backend\\.venv\\Scripts\\python.exe -m pip install --force-reinstall --no-cache-dir llama-cpp-python==0.3.19")
+            recommendations.append("Ручная сборка: set CMAKE_ARGS=-DGGML_CUDA=on && set FORCE_CMAKE=1 && backend\\.venv\\Scripts\\python.exe -m pip install --force-reinstall --no-cache-dir llama-cpp-python==0.3.36")
     elif supports_gpu_offload is True:
         summary = "Текущая сборка llama-cpp-python сообщает поддержку GPU offload."
         recommendations.append("Поставь GPU layers = -1, выгрузи модель и снова нажми Прогреть.")
@@ -1021,7 +960,10 @@ def get_runtime_diagnostics() -> dict[str, Any]:
         recommendations.append("nvidia-smi не найден. Для NVIDIA установи драйвер; для AMD/Intel пробуй Vulkan-сборку.")
 
     return {
-        "python": sys.executable,
+        "python": external_worker_python() or sys.executable,
+        "parent_python": sys.executable,
+        "worker_python": external_worker_python(),
+        "probe_error": external_diag.get("error", ""),
         "platform": platform.platform(),
         "package_installed": package_installed,
         "package_version": package_version,
@@ -1065,6 +1007,14 @@ def _worker_events(worker, payload, *, loading=False):
     yield from worker.events(payload, timeout=timeout, idle_timeout=idle)
 
 
+def model_file_signature(path):
+    try:
+        file = Path(path).resolve(); info = file.stat()
+        return (str(file), info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    except OSError:
+        return None
+
+
 def _get_runtime(model, settings, request_log_path=None, runtime_override=None, prewarm=True):
     from backend.app.worker_client import WorkerClient
     from backend.app.llama_worker import build_llama_kwargs
@@ -1076,11 +1026,15 @@ def _get_runtime(model, settings, request_log_path=None, runtime_override=None, 
     load_config = build_llama_kwargs(payload)
     model_id = model["id"]
     entry = RUNTIMES.get(model_id)
-    if entry and (entry["load_config"] != load_config or entry["runtime"].process.poll() is not None):
+    signature = model_file_signature(model['path'])
+    if entry and (entry["load_config"] != load_config or entry["runtime"].process.poll() is not None
+                  or entry.get('model_signature') != signature
+                  or not entry.get('model_loaded', entry.get('state') == 'hot')
+                  or (not cfg.get('gpu_fallback_to_cpu', True) and entry['runtime'].runtime.get('fallback_reason'))):
         _unload_runtime(model_id)
         entry = None
     if entry:
-        entry.update(config=cfg, policy=cfg.get("warm_policy", "unload_after_idle"))
+        entry.update(config=cfg, policy=cfg.get("warm_policy", "unload_after_idle"), last_used_at=now_iso(), last_used_ts=time.time())
         append_request_log(request_log_path, "runtime_cache_hit", get_runtime_summary(model_id))
         return entry["runtime"]
     # One loaded model keeps bounded RAM/VRAM even when dialogs choose different models.
@@ -1096,7 +1050,8 @@ def _get_runtime(model, settings, request_log_path=None, runtime_override=None, 
     stamp = now_iso()
     entry = {"runtime": worker, "state": "loading", "model_name": model.get("name"),
              "loaded_at": stamp, "last_used_at": stamp, "last_used_ts": time.time(),
-             "config": cfg, "load_config": load_config, "policy": cfg.get("warm_policy", "unload_after_idle")}
+             "config": cfg, "load_config": load_config, 'model_signature': signature, 'model_loaded': False,
+             "policy": cfg.get("warm_policy", "unload_after_idle")}
     RUNTIMES[model_id] = entry
     if not prewarm:
         return worker
@@ -1105,7 +1060,7 @@ def _get_runtime(model, settings, request_log_path=None, runtime_override=None, 
             if event.get("type") == "error":
                 raise HTTPException(event.get("status_code", 500), event.get("message"))
             if event.get("type") == "ready":
-                entry.update(state="hot", fallback_reason=worker.runtime.get("fallback_reason", ""))
+                entry.update(state="hot", model_loaded=True, loaded_at=now_iso(), last_used_at=now_iso(), last_used_ts=time.time(), fallback_reason=worker.runtime.get("fallback_reason", ""))
                 append_request_log(request_log_path, "runtime_load_success", worker.runtime)
                 return worker
         raise HTTPException(502, "Worker did not confirm model loading.")
@@ -1131,22 +1086,28 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
             raise HTTPException(400, str(exc)) from exc
         worker = _get_runtime(model, settings, request_log_path, runtime_override, prewarm=False)
         entry = RUNTIMES[model_id]
-        entry.update(state="generating", last_used_at=now_iso(), last_used_ts=time.time())
-        append_request_log(request_log_path, "generation_start", {"message_count": len(messages), "worker_pid": worker.process.pid})
-        events = _worker_events(worker, _worker_payload(model, cfg, messages=messages, temperature=temperature,
-                                max_tokens=max_tokens, stream=stream, truncate_history=truncate_history and cfg.get('context_overflow', 'trim') == 'trim'))
+        entry.update(state='generating' if entry.get('model_loaded') else 'loading', last_used_at=now_iso(), last_used_ts=time.time())
+        events = None
         try:
+            append_request_log(request_log_path, "generation_start", {"message_count": len(messages), "worker_pid": worker.process.pid})
+            events = _worker_events(worker, _worker_payload(model, cfg, messages=messages, temperature=temperature,
+                max_tokens=max_tokens, stream=stream, truncate_history=truncate_history and cfg.get('context_overflow', 'trim') == 'trim'))
             for event in events:
+                if event.get('type') in {'runtime', 'ready', 'done', 'result'}:
+                    entry.update(model_loaded=True, state='generating')
                 if event.get("type") == "error":
                     raise HTTPException(event.get("status_code", 500), event.get("message") or "Inference failed.")
                 if event.get("type") in {"done", "result"}:
                     append_request_log(request_log_path, "generation_complete", {"type": event["type"], "worker_pid": worker.process.pid})
                 yield event
         finally:
-            events.close()
-            entry.update(state="hot", last_used_at=now_iso(), last_used_ts=time.time())
-            if worker.process.poll() is not None:
-                RUNTIMES.pop(model_id, None)
+            if events is not None:
+                events.close()
+            if not entry.get('model_loaded') or worker.process.poll() is not None:
+                if RUNTIMES.get(model_id) is entry:
+                    _unload_runtime(model_id)
+            else:
+                entry.update(state='hot', last_used_at=now_iso(), last_used_ts=time.time())
 
 
 def create_chat_completion(*, model_id, messages, temperature, max_tokens, request_log_path=None,
@@ -1242,6 +1203,8 @@ async def fetch_hub_models(settings: dict[str, Any]) -> list[dict[str, Any]]:
 
 async def import_from_hub(payload: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     hub = settings.get("hub", {})
+    if not hub.get("enabled", False):
+        raise HTTPException(400, "Hub is disabled")
     base_url = str(hub.get("base_url", "")).strip().rstrip("/")
     endpoint = str(hub.get("pull_endpoint", "/models/pull")).strip() or "/models/pull"
     if not base_url:

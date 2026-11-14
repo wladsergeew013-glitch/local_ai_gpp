@@ -21,7 +21,8 @@ REQUIRED = [
     DIST / "models_storage" / "models.json",
 ]
 
-EXCLUDE_DIR_NAMES = {"logs", "assistant_state", "__pycache__"}
+EXCLUDE_DIR_NAMES = {"logs", "__pycache__"}
+PUBLIC_EXCLUDE_DIR_NAMES = EXCLUDE_DIR_NAMES | {"assistant_state"}
 EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".tmp", ".log"}
 RELEASE_ROOT_FILES = {'LocalAIGPP.exe', 'LocalAIGPP.ico', 'VERSION', 'runtime_info.json',
                       'check_api.py', 'CHECK_API.bat',
@@ -50,7 +51,7 @@ def write_release_archive(dist: Path, target: Path, version: str, settings: dict
             relative = path.relative_to(dist)
             if not path.is_file() or path.is_symlink():
                 continue
-            if any(part in EXCLUDE_DIR_NAMES for part in relative.parts) or path.suffix.lower() in EXCLUDE_SUFFIXES:
+            if any(part in PUBLIC_EXCLUDE_DIR_NAMES for part in relative.parts) or path.suffix.lower() in EXCLUDE_SUFFIXES:
                 continue
             if relative.parts[0] not in {'backend', 'worker_runtime'} and relative.as_posix() not in RELEASE_ROOT_FILES:
                 continue

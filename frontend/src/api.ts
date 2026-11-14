@@ -34,15 +34,15 @@ async function readJson<T>(response: Response): Promise<T> {
 }
 
 export async function fetchBootstrap(): Promise<BootstrapPayload> {
-  return readJson<BootstrapPayload>(await fetch(apiUrl('/api/bootstrap')));
+  return readJson<BootstrapPayload>(await fetch(apiUrl('/api/bootstrap'), { signal: AbortSignal.timeout(10000) }));
 }
 
-export async function uploadModel(formData: FormData): Promise<ModelRecord> {
-  return readJson<ModelRecord>(await fetch(apiUrl('/api/models/upload'), { method: 'POST', body: formData }));
+export async function uploadModel(formData: FormData, signal?: AbortSignal): Promise<ModelRecord> {
+  return readJson<ModelRecord>(await fetch(apiUrl('/api/models/upload'), { method: 'POST', body: formData, signal }));
 }
 
-export async function registerModelPath(formData: FormData): Promise<ModelRecord> {
-  return readJson<ModelRecord>(await fetch(apiUrl('/api/models/register-path'), { method: 'POST', body: formData }));
+export async function registerModelPath(formData: FormData, signal?: AbortSignal): Promise<ModelRecord> {
+  return readJson<ModelRecord>(await fetch(apiUrl('/api/models/register-path'), { method: 'POST', body: formData, signal }));
 }
 
 export async function validateModels(): Promise<ModelRecord[]> {
@@ -53,11 +53,12 @@ export async function startModel(modelId: string): Promise<ModelRecord> {
   return readJson<ModelRecord>(await fetch(apiUrl(`/api/models/${encodeURIComponent(modelId)}/start`), { method: 'POST' }));
 }
 
-export async function prewarmModel(modelId: string, runtime?: Record<string, unknown>): Promise<ModelRecord> {
+export async function prewarmModel(modelId: string, runtime?: Record<string, unknown>, signal?: AbortSignal): Promise<ModelRecord> {
   return readJson<ModelRecord>(await fetch(apiUrl(`/api/models/${encodeURIComponent(modelId)}/prewarm`), {
     method: 'POST',
     headers: runtime ? { 'Content-Type': 'application/json' } : undefined,
     body: runtime ? JSON.stringify({ runtime }) : undefined,
+    signal,
   }));
 }
 
@@ -215,8 +216,8 @@ export async function importHubModel(payload: { model_id: string; name: string }
   }));
 }
 
-export async function fetchRuntimeStatus(): Promise<RuntimeStatus[]> {
-  return readJson(await fetch(apiUrl('/api/runtime/status')));
+export async function fetchRuntimeStatus(signal = AbortSignal.timeout(5000)): Promise<RuntimeStatus[]> {
+  return readJson(await fetch(apiUrl('/api/runtime/status'), { signal }));
 }
 
 export async function fetchRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {

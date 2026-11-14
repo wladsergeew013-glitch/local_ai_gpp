@@ -18,7 +18,7 @@ class QwenAdapterTests(unittest.TestCase):
         self.assertIsNone(qwen_thinking_template({'general.name': 'Qwen', 'tokenizer.chat_template': template}))
 
     def test_openai_template_flag_reaches_both_generation_paths(self):
-        client = TestClient(app)
+        client = TestClient(app, base_url='http://127.0.0.1')
         payload = {'model': 'm', 'messages': [{'role': 'user', 'content': 'hello'}],
                    'chat_template_kwargs': {'enable_thinking': True}}
         result = {'choices': [{'message': {'content': 'hello'}, 'finish_reason': 'stop'}]}
@@ -34,7 +34,7 @@ class QwenAdapterTests(unittest.TestCase):
 
     def test_unknown_template_flags_fail_before_stream_headers(self):
         with patch('backend.app.routers.compat.find_model'):
-            response = TestClient(app).post('/v1/chat/completions', json={
+            response = TestClient(app, base_url='http://127.0.0.1').post('/v1/chat/completions', json={
                 'model': 'm', 'messages': [{'role': 'user', 'content': 'hi'}], 'stream': True,
                 'chat_template_kwargs': {'invented': False}})
         self.assertEqual(response.status_code, 400)

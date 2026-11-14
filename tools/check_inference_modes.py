@@ -1,5 +1,7 @@
 """Verify CPU, mixed CPU/CUDA, and complete GPU layer offload on one GGUF."""
 import argparse
+import contextlib
+import uuid
 import json
 import re
 import time
@@ -18,16 +20,23 @@ def main():
     parser.add_argument('--thinking', action='store_true', help='Enable thinking for capable Qwen templates')
     args = parser.parse_args()
     checks = []
-    with httpx.Client(base_url=args.base_url, timeout=200, trust_env=False) as client:
+    test_name = 'LOCAL_AI_CHECK_' + uuid.uuid4().hex
+    with httpx.Client(base_url=args.base_url, timeout=200, trust_env=False) as client, contextlib.ExitStack() as cleanup:
+        registered_cleanup = False
+        def remove_test_model(model_id):
+            client.delete('/api/models/' + model_id).raise_for_status()
         for label, layers in [('CPU', 0), ('CPU + CUDA', args.mixed_layers), ('CUDA', -1)]:
             runtime = {'n_gpu_layers': layers, 'n_ctx': 1024, 'n_batch': 64,
                        'flash_attn': True, 'gpu_fallback_to_cpu': False, 'verbose_runtime': True,
                        'load_timeout_sec': 120, 'request_timeout_sec': 180, 'enable_thinking': args.thinking}
             registered = client.post('/api/models/register-path', data={
-                'model_name': args.model_name, 'model_path': str(args.model_path.resolve()),
+                'model_name': test_name, 'model_path': str(args.model_path.resolve()),
                 'runtime_json': json.dumps(runtime)})
             registered.raise_for_status()
             model_id = registered.json()['id']
+            if not registered_cleanup:
+                cleanup.callback(remove_test_model, model_id)
+                registered_cleanup = True
             started = time.monotonic()
             answer = ''
             done = None
@@ -50,7 +59,7 @@ def main():
             assert done.get('finish_reason') == 'stop', done
             if status.get('model_adapter') == 'qwen' and not args.thinking:
                 assert not done.get('reasoning'), done
-            final = answer.split('</think>')[-1].strip()
+            final = done.get('answer', answer).strip()
             assert re.search(r'\b(?:4|four)\b', final, re.IGNORECASE), answer
             assert status['runtime_mode'] == label and not status['fallback_reason'], status
             offloaded = status.get('gpu_offloaded_layers', 0)

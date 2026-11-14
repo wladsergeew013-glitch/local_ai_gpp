@@ -129,3 +129,9 @@ python tools/check_docker.py --model-path /models/Qwen3.5-4B-Q4_K_M.gguf --gpu-l
 GPU-запрос к обычному CPU-образу требует fallback или вернёт ошибку при `gpu_fallback_to_cpu=false`. GPU-образ выбирайте через overlay выше. Проверочные запросы и фактические GPU-слои — [результаты](VALIDATION.md).
 
 Проверено 2026-10-03: Linux CUDA-контейнер на Docker Desktop/WSL2, RTX 3070 Ti. В GPU-образе Qwen4B отвечает `Four` во всех трёх режимах: CPU 0/33, смешанный 16/33, CUDA 33/33 слоя на GPU; fallback отсутствует. Python-клиент проверяет память `ORBIT`, SSE и повторное использование worker. Установка драйвера/Container Toolkit на отдельном физическом Linux-хосте не проверялась. [Подробные результаты и ограничения](VALIDATION.md#linux-cuda-docker--2026-10-03).
+
+
+Приватный перенос Windows: `python tools/29_make_portable_package.py` включает `assistant_state`
+с диалогами и настройками мини-помощника. Этот архив содержит личные данные.
+Публичный релиз: добавьте `--release`; личная история, настройки и веса исключаются.
+Пути `models_storage/...` разрешаются относительно каталога данных, независимо от текущего каталога процесса.

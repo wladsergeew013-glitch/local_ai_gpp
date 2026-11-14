@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import contextlib
+import threading
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Request
 
 from backend.app.core import (
     copy_uploaded_model,
@@ -38,7 +41,8 @@ def validate_models() -> list[dict]:
 
 
 @router.post("/api/models/upload")
-def upload_model(
+async def upload_model(
+    request: Request,
     model_name: str = Form(...),
     model_type: str = Form("LLM"),
     copy_to_storage: bool = Form(True),
@@ -52,8 +56,22 @@ def upload_model(
                 "Если модель уже лежит на сервере, используй регистрацию пути."
             ),
         )
-    return copy_uploaded_model(model_name, model_file.filename or "model.bin", model_file.file,
-                               model_type=model_type, expected_bytes=model_file.size)
+    cancelled = threading.Event()
+    async def monitor():
+        while not cancelled.is_set():
+            if await request.is_disconnected():
+                cancelled.set()
+                return
+            await asyncio.sleep(.05)
+    watcher = asyncio.create_task(monitor())
+    try:
+        return await asyncio.to_thread(copy_uploaded_model, model_name,
+            model_file.filename or 'model.bin', model_file.file, model_type=model_type,
+            expected_bytes=model_file.size, cancel_event=cancelled)
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
 
 
 @router.post("/api/models/register-path")
@@ -63,7 +81,12 @@ def register_path(
     model_path: str = Form(...),
     runtime_json: str = Form("{}"),
 ) -> dict:
-    runtime = json.loads(runtime_json or "{}")
+    try:
+        runtime = json.loads(runtime_json or '{}')
+        if not isinstance(runtime, dict):
+            raise ValueError('runtime_json must contain an object')
+    except ValueError as exc:
+        raise HTTPException(400, 'Некорректный runtime_json: требуется JSON-объект.') from exc
     return register_model_path(
         name=model_name,
         model_type=model_type,

@@ -10,14 +10,17 @@ set "LOG_FILE=%LOG_DIR%\check_runtime_gpu.log"
 set "RUNTIME_PY="
 set "RUNTIME_ROOT=%ROOT%"
 
-if exist "%ROOT%\dist\worker_runtime\Scripts\python.exe" (
+if exist "%ROOT%\dist\worker_runtime\python.exe" (
+  set "RUNTIME_PY=%ROOT%\dist\worker_runtime\python.exe"
+  set "RUNTIME_ROOT=%ROOT%\dist"
+) else if exist "%ROOT%\dist\worker_runtime\Scripts\python.exe" (
   set "RUNTIME_PY=%ROOT%\dist\worker_runtime\Scripts\python.exe"
   set "RUNTIME_ROOT=%ROOT%\dist"
 ) else if exist "%ROOT%\backend\.venv\Scripts\python.exe" (
   set "RUNTIME_PY=%ROOT%\backend\.venv\Scripts\python.exe"
 ) else (
   echo [ERROR] No worker/backend runtime python found.
-  echo Expected dist\worker_runtime\Scripts\python.exe or backend\.venv\Scripts\python.exe.
+  echo Expected dist\worker_runtime\python.exe or backend\.venv\Scripts\python.exe.
   exit /b 1
 )
 
