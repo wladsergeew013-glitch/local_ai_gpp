@@ -460,7 +460,7 @@ def copy_portable_backend_and_metadata() -> None:
     new_store = not models_dst.exists()
     (models_dst / "branding").mkdir(parents=True, exist_ok=True)
     from backend.app.model_paths import data_root
-    models_src = data_root(ROOT) / 'models_storage' 
+    models_src = data_root(ROOT) / 'models_storage'
     settings_src = models_src / "settings.json"
     settings_dst = models_dst / "settings.json"
     if not settings_dst.exists():
@@ -558,7 +558,7 @@ def verify_worker_runtime(worker_py: Path, runtime_kind: str, dist: Path) -> dic
         "'system_info':lib.llama_print_system_info().decode('utf-8','replace')}))"
     )
     checked = subprocess.run([str(worker_py), "-c", script], cwd=str(dist),
-                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     if checked.returncode:
         raise SystemExit("[ERROR] Packaged runtime failed verification: " + (checked.stderr or checked.stdout))
     details = json.loads(checked.stdout.strip().splitlines()[-1])
