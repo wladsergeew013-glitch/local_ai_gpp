@@ -88,7 +88,7 @@ def check(workspace_url, notes_url, runtime_url, model, project, output):
         while time.monotonic() - started < 420:
             task = client.get(f"/api/tasks/{task_id}").raise_for_status().json()
             for approval in task.get("approvals", []):
-                payload = approval["payload"]
+                payload = approval["payload"].get("payload", approval["payload"])
                 allowed = (
                     approval["kind"] == "connector"
                     and payload.get("title") == title

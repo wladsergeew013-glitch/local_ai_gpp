@@ -123,12 +123,19 @@ def check(base_url, model=None):
             for f in frames
             for c in f.get("choices", [])
         ), frames
+        stream_usage = next((f["usage"] for f in reversed(frames) if f.get("usage")), {})
+        for usage in (first.get("usage", {}), stream_usage):
+            assert usage.get("prompt_tokens", 0) > 0 and usage.get("completion_tokens", 0) > 0, usage
+            assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"], usage
+            assert not usage.get("estimated"), usage
         return {
             "model": model,
             "tool_call_id": calls[0]["id"],
             "tool_name": calls[0]["function"]["name"],
             "answer": text,
             "stream_tool_calls": len(stream_calls),
+            "tool_usage": first["usage"],
+            "stream_usage": stream_usage,
             "elapsed_sec": round(time.monotonic() - started, 2),
             "capabilities": client.get("models/" + model + "/capabilities").json(),
         }

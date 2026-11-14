@@ -161,6 +161,29 @@ def main():
     threading.Thread(target=approvals, daemon=True).start()
     try:
         harness.start()
+        if config.get("connector_endpoint"):
+            from urllib.request import Request, build_opener, ProxyHandler
+
+            check = Request(
+                config["connector_endpoint"],
+                data=json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "workspace-ready",
+                        "method": "workspace/readiness",
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Workspace-Task-Token": config["owner_token"],
+                },
+            )
+            with build_opener(ProxyHandler({})).open(check, timeout=5) as response:
+                ready = json.load(response)["result"]["ready"]
+            if not ready:
+                raise RuntimeError(
+                    "CONNECTOR_UNAVAILABLE: Harness did not discover application tools; no prompt was submitted."
+                )
         session = (
             harness.resume_session(config["session_id"])
             if config.get("resume")

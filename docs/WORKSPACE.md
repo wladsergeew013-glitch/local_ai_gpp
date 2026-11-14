@@ -9,7 +9,7 @@ Workspace — отдельное приложение для работы аге
 | Harness Python SDK + native runtime | Оба `0.2.2rc2` | Отдельный DSH home каждой задачи |
 | Канонический журнал Harness | JSONL format 4, без сжатия | `tasks/<id>/dsh/sessions` |
 
-Это первая версия Workspace для локальных задач. Модель Qwen3.5 4B может ошибаться в коде и вызовах инструментов. Успешный итог агента проверяйте по результату тестов и diff. Ограничения набора приёмки и измеренные результаты публикуются в [VALIDATION.md](VALIDATION.md).
+Это первая beta-версия Workspace для локальных задач. Модель Qwen3.5 4B может ошибаться в коде и вызовах инструментов. Успешный итог агента проверяйте по результату тестов и diff. Ограничения набора приёмки и измеренные результаты публикуются в [VALIDATION.md](VALIDATION.md).
 
 ## Запустить
 
@@ -96,7 +96,7 @@ python examples/notes_app.py --data-dir .local/example-notes --port 8890
 
 В Workspace откройте «Подключения», добавьте `http://127.0.0.1:8890`. Чтение работает отдельно. Для записи нужно разрешить writes у подключения и подтвердить точное содержимое записи. Receipt с action ID фиксируется до HTTP-записи; после потери ответа повтор той же операции не отправляется автоматически.
 
-Подключение можно явно прикрепить к новой задаче. Адаптер предоставляет Harness узкий MCP-мост `read_items` / `create_item` только для выбранных connector IDs. Перед каждой агентной записью Workspace показывает название и текст и ждёт отдельного решения. Мост защищён секретной capability текущего запуска; завершённая задача теряет доступ. Запрос модели сам по себе разрешением на запись не является.
+Подключение можно явно прикрепить к новой задаче. Адаптер предоставляет Harness узкий MCP-мост `read_items` / `create_item` только для выбранных connector IDs. До отправки задания модель получает инструменты только после успешного MCP discovery; иначе выполнение останавливается с CONNECTOR_UNAVAILABLE. Перед каждой агентной записью Workspace показывает название и текст и ждёт отдельного решения. Мост защищён секретной capability текущего запуска; завершённая задача теряет доступ. Запрос модели сам по себе разрешением на запись не является.
 
 Этот пример проверяет контракт первого подключения. Он не доказывает подключение к авторизованной рабочей сессии VetConsult и не отправляет её документы в модель.
 
@@ -115,11 +115,13 @@ workspace/.venv/Scripts/python.exe workspace/build_workspace.py
 ## Проверки для разработчика
 
 ```powershell
-python -m unittest discover -s tests -v
-python -m unittest discover -s workspace/tests -v
+python tools/run_tests.py --start tests -v
+python tools/run_tests.py --start workspace/tests -v
 python tools/check_tool_api.py --base-url http://127.0.0.1:8765/v1
 python tools/check_workspace_agent.py --output-root .local/acceptance-new
 python tools/check_workspace_recovery.py .local/acceptance-new/workspace-data
+# Отдельно запустите examples/notes_app.py и Workspace, затем:
+python tools/check_workspace_connector.py --model "ID из /v1/models" --project .local/connector-new --output .local/connector-result.json
 python tools/agent_benchmark.py --output-root .local/benchmark-new --limit 20
 ```
 

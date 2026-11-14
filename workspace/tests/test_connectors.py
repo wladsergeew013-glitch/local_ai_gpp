@@ -118,6 +118,27 @@ class ConnectorTests(unittest.TestCase):
             service.processes.clear()
             store.close()
 
+    def test_discovery_is_required_for_the_current_attempt(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, service, task = self.prepare(Path(root))
+            task_id = task["id"]
+            service.tokens[task_id] = "first-attempt"
+            query = {"id": 1, "method": "workspace/readiness"}
+            self.assertFalse(
+                handle(service, task_id, "first-attempt", query)["result"]["ready"]
+            )
+            handle(service, task_id, "first-attempt", {"id": 2, "method": "tools/list"})
+            self.assertTrue(
+                handle(service, task_id, "first-attempt", query)["result"]["ready"]
+            )
+            service.tokens[task_id] = "second-attempt"
+            self.assertFalse(
+                handle(service, task_id, "second-attempt", query)["result"]["ready"]
+            )
+            with self.assertRaises(HTTPException):
+                handle(service, task_id, "first-attempt", query)
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

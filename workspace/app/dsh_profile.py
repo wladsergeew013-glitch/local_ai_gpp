@@ -87,19 +87,23 @@ def profile(
     if connector_endpoint:
         rows.append(
             {
-                "id": "workspace-apps",
-                "name": "@deepseek-ai/dsh-mcp-client",
-                "config": {
-                    "transport": "streamable-http",
-                    "serverName": "workspace_apps",
-                    "url": connector_endpoint,
-                    "headers": {"X-Workspace-Task-Token": owner_token},
-                    "toolCallTimeoutMs": 330000,
-                    "startupTimeoutMs": 15000,
-                    "closeTimeoutMs": 1000,
-                    "failOnStartupError": True,
-                    "reconnect": {"enabled": False},
-                },
+                "insert": [
+                    {
+                        "id": "workspace-apps",
+                        "name": "@deepseek-ai/dsh-mcp-client",
+                        "config": {
+                            "transport": "streamable-http",
+                            "serverName": "workspace_apps",
+                            "url": connector_endpoint,
+                            "headers": {"X-Workspace-Task-Token": owner_token},
+                            "toolCallTimeoutMs": 330000,
+                            "startupTimeoutMs": 15000,
+                            "closeTimeoutMs": 1000,
+                            "failOnStartupError": True,
+                            "reconnect": {"enabled": False},
+                        },
+                    }
+                ]
             }
         )
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")

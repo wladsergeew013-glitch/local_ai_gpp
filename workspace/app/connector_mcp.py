@@ -38,7 +38,18 @@ def handle(service, task_id, token, payload):
         )
     if method == "ping":
         return response({})
+    if method == "workspace/readiness":
+        return response(
+            {
+                "ready": getattr(service, "connector_discoveries", {}).get(task_id)
+                == token
+            }
+        )
     if method == "tools/list":
+        if not hasattr(service, "connector_discoveries"):
+            service.connector_discoveries = {}
+        service.connector_discoveries[task_id] = token
+        service.store.event(task_id, "connector_tools_discovered", {"tool_count": 2})
         common = {
             "connector_id": {
                 "type": "string",
