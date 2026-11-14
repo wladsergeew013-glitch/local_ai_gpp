@@ -26,7 +26,7 @@ from backend.app.context_budget import estimate_context, validate_context
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 
-APP_NAME = "Local AI GPP"
+APP_NAME = "Local AI Runtime"
 PROXY_BYPASS_VALUE = "localhost,127.0.0.1,::1,[::1],*.localhost"
 WEBVIEW2_PROXY_ARGS = "--no-proxy-server --proxy-bypass-list=<-loopback>;localhost;127.0.0.1;::1;[::1]"
 TRANSPARENT_COLOR = "#010203"
@@ -2262,9 +2262,7 @@ def start_tray() -> None:
         hide_main_window()
 
     def _status(_icon=None, _item=None):
-        if assistant_agent is not None:
-            assistant_agent.show()
-            assistant_agent.set_state("ready", "На связи", "Локальный сервис работает")
+        show_main_window()
 
     def _unload(_icon=None, _item=None):
         threading.Thread(target=unload_models_from_tray, daemon=True).start()
@@ -2290,11 +2288,7 @@ def start_tray() -> None:
         image,
         APP_NAME,
         menu=pystray.Menu(
-            pystray.MenuItem("Показать помощника", _show_assistant, default=True),
-            pystray.MenuItem("Скрыть помощника", _hide_assistant),
-            pystray.MenuItem("Переключить помощника", _toggle_assistant),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Открыть полный интерфейс", _show_main),
+            pystray.MenuItem("Открыть Runtime", _show_main, default=True),
             pystray.MenuItem("Скрыть полный интерфейс", _hide_main),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Состояние runtime", _status),
@@ -2314,8 +2308,7 @@ def _run_desktop() -> None:
     global main_window, server, server_thread, server_port, webview_module, assistant_agent, desktop_ui_enabled
     desktop_ui_enabled = True
     from backend.app.desktop_host import register
-    register(show_main=show_main_window,hide_main=hide_main_window,show_assistant=show_assistant_window,
-             hide_assistant=hide_assistant_window,toggle_assistant=toggle_assistant_window,
+    register(show_main=show_main_window,hide_main=hide_main_window,
              diagnostics=desktop_diagnostics,exit=lambda: threading.Thread(target=request_exit,daemon=True).start() or {'ok':True})
     configure_windows_app_identity()
     if not FRONTEND_DIST.exists():
@@ -2357,7 +2350,6 @@ def _run_desktop() -> None:
 
     url = f"http://127.0.0.1:{server_port}"
     write_instance_info(server_port)
-    assistant_agent = NativeAssistantAgent(lambda: server_port)
     start_tray()
 
     main_window = webview.create_window(
@@ -2372,7 +2364,6 @@ def _run_desktop() -> None:
         if quitting:
             return True
         hide_main_window()
-        show_assistant_window()
         return False
 
     try:
@@ -2393,7 +2384,15 @@ def main() -> None:
     from backend.app.instance_lock import InstanceAlreadyRunning, owned_instance
     try:
         with owned_instance(assistant_state_dir() / '.instance.lock'):
-            _run_desktop()
+            if '--headless' in sys.argv:
+                from backend.app.core import LOGS_DIR
+                if sys.stdout is None or sys.stderr is None:
+                    stream=(LOGS_DIR/'headless.log').open('a',encoding='utf-8',buffering=1)
+                    if sys.stdout is None:sys.stdout=stream
+                    if sys.stderr is None:sys.stderr=stream
+                uvicorn.run(app,host='127.0.0.1',port=find_free_port(),log_level='warning',access_log=False)
+            else:
+                _run_desktop()
     except InstanceAlreadyRunning:
         # A second launch only focuses the live owner; it never runs recovery.
         with contextlib.suppress(Exception):

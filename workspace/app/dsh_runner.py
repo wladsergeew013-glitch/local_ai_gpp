@@ -18,6 +18,11 @@ from workspace.app.dsh_profile import SDK_VERSION, profile
 
 
 def main():
+    # Frozen CPython does not honor PYTHONUTF8/PYTHONIOENCODING consistently.
+    # The parent protocol is always UTF-8, including tool schemas and Russian text.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="strict")
     first = sys.stdin.readline()
     if not first:
         return 2

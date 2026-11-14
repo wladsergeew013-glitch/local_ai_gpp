@@ -16,7 +16,7 @@ from workspace.app.runtime_client import RuntimeClient, local_url
 from workspace.app.history import reconcile
 from workspace.app.instance import Instance
 
-VERSION = "0.1.0"
+from workspace.app.version import VERSION
 
 
 def create_app(root=None):
@@ -79,6 +79,18 @@ def create_app(root=None):
 
     def tasks(request):
         return request.app.state.tasks
+
+    @app.get('/api/host/status')
+    def host_status():
+        from workspace.app import desktop_host
+        return desktop_host.status()
+
+    @app.post('/api/host/{action}')
+    def host_action(action:str,request:Request,payload:dict|None=None):
+        from workspace.app import desktop_host
+        names={'open-main':'show_main','show-mini':'show_mini','hide-mini':'hide_mini','exit':'exit'}
+        if action not in names:raise HTTPException(404,'Unknown desktop action')
+        return desktop_host.invoke(names[action],payload)
 
     @app.get("/api/health")
     def health():

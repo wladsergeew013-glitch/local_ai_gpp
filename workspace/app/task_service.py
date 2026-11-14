@@ -204,6 +204,7 @@ class TaskService:
         return self.store.one("tasks", task_id)
 
     def _event(self, task_id, event):
+        from workspace.app.desktop_host import activity
         kind = event.get("kind", "unknown")
         key = None
         if kind == "notification" and event.get("method") == "session.event":
@@ -214,6 +215,7 @@ class TaskService:
                 self.store.event(task_id, "dsh", item, key)
                 return
         if kind in {"approval", "question"}:
+            activity('awaiting_permission')
             approval_id = identifier()
             with self.store.transaction() as db:
                 db.execute(
@@ -231,6 +233,7 @@ class TaskService:
             self.store.update_task(task_id, "awaiting_permission")
             event = {**event, "approval_id": approval_id}
         elif kind == "started":
+            activity('running')
             self.store.update_task(task_id, "running")
         elif kind == "identity":
             self.store.update_task(task_id, details={"adapter": event})
@@ -239,6 +242,8 @@ class TaskService:
         self.store.event(task_id, kind, event, key)
 
     def _exit(self, task_id, code, error):
+        from workspace.app.desktop_host import activity
+        activity('idle')
         with self.lock:
             current = self.store.one("tasks", task_id)
             result = self.results.pop(task_id, None)

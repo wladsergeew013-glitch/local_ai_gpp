@@ -420,10 +420,51 @@ h1 {
 }
 .settings-panel {
   background: white;
-  border-bottom: 1px solid #dce4ef;
-  padding: 20px 34px;
-  max-height: 70vh;
+  padding: 26px 30px;
+}
+.settings-dialog {
+  border: 1px solid #dbe3ef;
+  border-radius: 14px;
+  padding: 0;
+  width: min(900px, calc(100vw - 48px));
+  max-height: 85vh;
   overflow: auto;
+  color: #172b45;
+  background: white;
+  box-shadow: 0 24px 90px #1024413b;
+}
+.settings-dialog::backdrop {
+  background: #0c234360;
+  backdrop-filter: blur(2px);
+}
+.dialog-error {
+  background: #fff0f0;
+  color: #a73542;
+  padding: 14px 30px;
+  font-size: 13px;
+}
+.workspace-notice {
+  position: fixed;
+  z-index: 20;
+  right: 24px;
+  bottom: 24px;
+  max-width: min(560px, calc(100vw - 40px));
+  padding: 14px 18px;
+  background: #eaf7ef;
+  border: 1px solid #b7ddc7;
+  border-radius: 10px;
+  color: #286044;
+  box-shadow: 0 6px 24px #17365216;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  display: flex;
+  gap: 12px;
+}
+.workspace-notice button {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
 }
 .settings-panel > header {
   display: flex;

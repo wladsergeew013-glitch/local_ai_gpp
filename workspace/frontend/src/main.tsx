@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import { SettingsDialog } from "./SettingsDialog";
+import { MiniApp } from "./MiniApp";
 
 type Project = { id: string; name: string; path: string };
 type Provider = { id: string; name: string; base_url: string; model: string };
@@ -182,6 +184,28 @@ function EventCard({ event }: { event: Event }) {
 }
 
 function App() {
+  const [notice, setNotice] = useState("");
+  useEffect(() => {
+    const receive: EventListener = (event) => {
+      const detail = (
+        event as CustomEvent<{
+          task_id?: string;
+          project_id?: string;
+          panel?: string;
+        }>
+      ).detail;
+      if (detail.task_id) setSelected(detail.task_id);
+      if (detail.project_id) setProject(detail.project_id);
+      if (
+        detail.panel === "provider" ||
+        detail.panel === "project" ||
+        detail.panel === "connector"
+      )
+        setPanel(detail.panel);
+    };
+    window.addEventListener("local-ai-select-task", receive);
+    return () => window.removeEventListener("local-ai-select-task", receive);
+  }, []);
   const [connectorIds, setConnectorIds] = useState<string[]>([]);
   const [boot, setBoot] = useState<Bootstrap>({
     version: "0.1.0",
@@ -191,10 +215,14 @@ function App() {
     connectors: [],
   });
   const [project, setProject] = useState(
-    sessionStorage.getItem("workspace-project") || "",
+    new URLSearchParams(location.search).get("project") ??
+      sessionStorage.getItem("workspace-project") ??
+      "",
   );
   const [selected, setSelected] = useState(
-    sessionStorage.getItem("workspace-task") || "",
+    new URLSearchParams(location.search).get("task") ??
+      sessionStorage.getItem("workspace-task") ??
+      "",
   );
   const [task, setTask] = useState<Task | null>(null),
     [events, setEvents] = useState<Event[]>([]),
@@ -388,6 +416,15 @@ function App() {
           )}
         </div>
         <div className="side-footer">
+          <button
+            onClick={() =>
+              api("/host/show-mini", {}).catch(() =>
+                window.open("/mini", "LocalAIMini", "width=650,height=500"),
+              )
+            }
+          >
+            ◉ Мини-помощник
+          </button>
           <button onClick={() => setPanel("provider")}>
             ⚙ Провайдеры и модели
           </button>
@@ -410,8 +447,7 @@ function App() {
               onClick={() =>
                 act(async () => {
                   const result = await api("/snapshots", {});
-                  setConnection({ snapshot: result.path });
-                  setPanel("provider");
+                  setNotice("Снимок данных сохранён: " + result.path);
                 })
               }
             >
@@ -427,274 +463,287 @@ function App() {
             </button>
           </div>
         )}
+        {notice && (
+          <div className="workspace-notice" role="status">
+            {notice}
+            <button
+              aria-label="Закрыть уведомление"
+              onClick={() => setNotice("")}
+            >
+              ×
+            </button>
+          </div>
+        )}
         {panel !== "none" && (
-          <section className="settings-panel">
-            <header>
-              <h2>
-                {panel === "project"
-                  ? "Добавить проект"
-                  : panel === "provider"
-                    ? "Подключить Runtime"
-                    : "Подключения к приложениям"}
-              </h2>
-              <button
-                aria-label="Закрыть панель"
-                onClick={() => setPanel("none")}
-              >
-                ×
-              </button>
-            </header>
-            {panel === "project" && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  act(async () => {
-                    const p = await api<Project>("/projects", {
-                      name: projectName,
-                      path: projectPath,
-                    });
-                    setProject(p.id);
-                    setSelected("");
-                    setPanel("none");
-                  });
-                }}
-              >
-                <label>
-                  Название
-                  <input
-                    required
-                    value={projectName}
-                    onChange={(e) => setProjectName(e.target.value)}
-                    placeholder="Мой проект"
-                  />
-                </label>
-                <label>
-                  Путь к Git-репозиторию
-                  <input
-                    required
-                    value={projectPath}
-                    onChange={(e) => setProjectPath(e.target.value)}
-                    placeholder="C:\Projects\my-app"
-                  />
-                </label>
-                <p className="muted">
-                  Агент работает с выбранным проектом. Существующие изменения
-                  сохраняются в исходной точке сравнения.
-                </p>
-                <button className="primary" disabled={busy}>
-                  Добавить проект
-                </button>
-              </form>
-            )}
-            {panel === "provider" && (
-              <div>
-                <div className="form-grid">
-                  <label>
-                    Адрес Runtime API
-                    <input
-                      value={base}
-                      onChange={(e) => {
-                        setBase(e.target.value);
-                        setConnection(null);
-                      }}
-                    />
-                  </label>
-                  <label>
-                    Локальный API-ключ
-                    <input
-                      type="password"
-                      value={key}
-                      onChange={(e) => setKey(e.target.value)}
-                      autoComplete="off"
-                      placeholder="Если задан в Runtime"
-                    />
-                  </label>
-                </div>
-                <div className="form-grid">
-                  <label>
-                    ID модели
-                    <input
-                      list="model-ids"
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                    />
-                    <datalist id="model-ids">
-                      {models.map((m) => (
-                        <option key={m.id} value={m.id} />
-                      ))}
-                    </datalist>
-                  </label>
-                  <div className="button-row">
-                    <button
-                      disabled={busy}
-                      onClick={() =>
-                        act(async () => {
-                          const data = await api("/providers/probe", {
-                            base_url: base,
-                            model,
-                            api_key: key,
-                          });
-                          setConnection(data);
-                          setModels(data.models);
-                          if (!model && data.models.length)
-                            setModel(data.models[0].id);
-                        })
-                      }
-                    >
-                      Проверить связь
-                    </button>
-                    <button
-                      className="primary"
-                      disabled={busy || !model}
-                      onClick={() =>
-                        act(async () => {
-                          const p = await api<Provider>("/providers", {
-                            name: "Local AI Runtime",
-                            base_url: base,
-                            model,
-                            api_key: key,
-                          });
-                          setProvider(p.id);
-                          setKey("");
-                          setPanel("none");
-                        })
-                      }
-                    >
-                      Сохранить
-                    </button>
-                  </div>
-                </div>
-                {connection && (
-                  <div className="connection-result">
-                    {connection.snapshot ? (
-                      "Снимок сохранён: " + connection.snapshot
-                    ) : (
-                      <>
-                        <strong>Связь установлена</strong>
-                        <p>
-                          Состояние: {connection.ready?.state}. Моделей:{" "}
-                          {connection.models?.length}.{" "}
-                          {connection.capabilities &&
-                            `Контекст: ${connection.capabilities.context_window}; tools: ${connection.capabilities.tools.supported ? "поддерживаются" : "требуется загрузка модели"}.`}
-                        </p>
-                      </>
-                    )}
-                  </div>
-                )}
-                {boot.providers.map((p) => (
-                  <p className="provider-row" key={p.id}>
-                    <strong>{p.name}</strong>
-                    <code>{p.base_url}</code>
-                    <span>{p.model}</span>
-                  </p>
-                ))}
-                <p className="muted">
-                  Облачный ключ DeepSeek не нужен. Модель загружается в
-                  отдельном Runtime; закрытие Workspace оставляет Runtime
-                  работающим.
-                </p>
-              </div>
-            )}
-            {panel === "connector" && (
-              <div>
-                <p className="muted">
-                  Первый адаптер подключает локальное приложение из
-                  examples/notes_app.py. Чтение и запись выполняются отдельными
-                  действиями.
-                </p>
-                <label>
-                  Адрес приложения
-                  <input
-                    value={connectorUrl}
-                    onChange={(e) => setConnectorUrl(e.target.value)}
-                  />
-                </label>
+          <SettingsDialog onClose={() => setPanel("none")} error={error}>
+            <section className="settings-panel">
+              <header>
+                <h2>
+                  {panel === "project"
+                    ? "Добавить проект"
+                    : panel === "provider"
+                      ? "Подключить Runtime"
+                      : "Подключения к приложениям"}
+                </h2>
                 <button
-                  disabled={busy}
-                  onClick={() =>
-                    act(() =>
-                      api("/connectors", {
-                        name: "Local Notes",
-                        base_url: connectorUrl,
-                        allow_write: approveWrite,
-                      }),
-                    )
-                  }
+                  aria-label="Закрыть панель"
+                  onClick={() => setPanel("none")}
                 >
-                  Добавить подключение
+                  ×
                 </button>
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={approveWrite}
-                    onChange={(e) => setApproveWrite(e.target.checked)}
-                  />
-                  Разрешить запись и подтвердить создание записи ниже
-                </label>
-                <div className="form-grid">
+              </header>
+              {panel === "project" && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    act(async () => {
+                      const p = await api<Project>("/projects", {
+                        name: projectName,
+                        path: projectPath,
+                      });
+                      setProject(p.id);
+                      setSelected("");
+                      setPanel("none");
+                    });
+                  }}
+                >
                   <label>
-                    Название записи
+                    Название
                     <input
-                      value={noteTitle}
-                      onChange={(e) => setNoteTitle(e.target.value)}
+                      required
+                      value={projectName}
+                      onChange={(e) => setProjectName(e.target.value)}
+                      placeholder="Мой проект"
                     />
                   </label>
                   <label>
-                    Текст записи
+                    Путь к Git-репозиторию
                     <input
-                      value={noteBody}
-                      onChange={(e) => setNoteBody(e.target.value)}
+                      required
+                      value={projectPath}
+                      onChange={(e) => setProjectPath(e.target.value)}
+                      placeholder="C:\Projects\my-app"
                     />
                   </label>
-                </div>
-                {boot.connectors.map((c) => (
-                  <div className="provider-row" key={c.id}>
-                    <strong>{c.name}</strong>
-                    <code>{c.base_url}</code>
-                    <button
-                      onClick={() =>
-                        act(async () =>
-                          setConnectorResult(
-                            JSON.stringify(
-                              await api("/connectors/" + c.id + "/items"),
-                              null,
-                              2,
-                            ),
-                          ),
-                        )
-                      }
-                    >
-                      Прочитать
-                    </button>
-                    <button
-                      disabled={!approveWrite || !c.allow_write || !noteTitle}
-                      onClick={() =>
-                        act(async () =>
-                          setConnectorResult(
-                            JSON.stringify(
-                              await api("/connectors/" + c.id + "/items", {
-                                title: noteTitle,
-                                body: noteBody,
-                                approved: true,
-                                action_id: crypto.randomUUID(),
-                              }),
-                              null,
-                              2,
-                            ),
-                          ),
-                        )
-                      }
-                    >
-                      Создать подтверждённую запись
-                    </button>
+                  <p className="muted">
+                    Агент работает с выбранным проектом. Существующие изменения
+                    сохраняются в исходной точке сравнения.
+                  </p>
+                  <button className="primary" disabled={busy}>
+                    Добавить проект
+                  </button>
+                </form>
+              )}
+              {panel === "provider" && (
+                <div>
+                  <div className="form-grid">
+                    <label>
+                      Адрес Runtime API
+                      <input
+                        value={base}
+                        onChange={(e) => {
+                          setBase(e.target.value);
+                          setConnection(null);
+                        }}
+                      />
+                    </label>
+                    <label>
+                      Локальный API-ключ
+                      <input
+                        type="password"
+                        value={key}
+                        onChange={(e) => setKey(e.target.value)}
+                        autoComplete="off"
+                        placeholder="Если задан в Runtime"
+                      />
+                    </label>
                   </div>
-                ))}
-                {connectorResult && (
-                  <pre className="connector-output">{connectorResult}</pre>
-                )}
-              </div>
-            )}
-          </section>
+                  <div className="form-grid">
+                    <label>
+                      ID модели
+                      <input
+                        list="model-ids"
+                        value={model}
+                        onChange={(e) => setModel(e.target.value)}
+                      />
+                      <datalist id="model-ids">
+                        {models.map((m) => (
+                          <option key={m.id} value={m.id} />
+                        ))}
+                      </datalist>
+                    </label>
+                    <div className="button-row">
+                      <button
+                        disabled={busy}
+                        onClick={() =>
+                          act(async () => {
+                            const data = await api("/providers/probe", {
+                              base_url: base,
+                              model,
+                              api_key: key,
+                            });
+                            setConnection(data);
+                            setModels(data.models);
+                            if (!model && data.models.length)
+                              setModel(data.models[0].id);
+                          })
+                        }
+                      >
+                        Проверить связь
+                      </button>
+                      <button
+                        className="primary"
+                        disabled={busy || !model}
+                        onClick={() =>
+                          act(async () => {
+                            const p = await api<Provider>("/providers", {
+                              name: "Local AI Runtime",
+                              base_url: base,
+                              model,
+                              api_key: key,
+                            });
+                            setProvider(p.id);
+                            setKey("");
+                            setPanel("none");
+                          })
+                        }
+                      >
+                        Сохранить
+                      </button>
+                    </div>
+                  </div>
+                  {connection && (
+                    <div className="connection-result">
+                      {connection.snapshot ? (
+                        "Снимок сохранён: " + connection.snapshot
+                      ) : (
+                        <>
+                          <strong>Связь установлена</strong>
+                          <p>
+                            Состояние: {connection.ready?.state}. Моделей:{" "}
+                            {connection.models?.length}.{" "}
+                            {connection.capabilities &&
+                              `Контекст: ${connection.capabilities.context_window}; tools: ${connection.capabilities.tools.supported ? "поддерживаются" : "требуется загрузка модели"}.`}
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {boot.providers.map((p) => (
+                    <p className="provider-row" key={p.id}>
+                      <strong>{p.name}</strong>
+                      <code>{p.base_url}</code>
+                      <span>{p.model}</span>
+                    </p>
+                  ))}
+                  <p className="muted">
+                    Облачный ключ DeepSeek не нужен. Модель загружается в
+                    отдельном Runtime; закрытие Workspace оставляет Runtime
+                    работающим.
+                  </p>
+                </div>
+              )}
+              {panel === "connector" && (
+                <div>
+                  <p className="muted">
+                    Первый адаптер подключает локальное приложение из
+                    examples/notes_app.py. Чтение и запись выполняются
+                    отдельными действиями.
+                  </p>
+                  <label>
+                    Адрес приложения
+                    <input
+                      value={connectorUrl}
+                      onChange={(e) => setConnectorUrl(e.target.value)}
+                    />
+                  </label>
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      act(() =>
+                        api("/connectors", {
+                          name: "Local Notes",
+                          base_url: connectorUrl,
+                          allow_write: approveWrite,
+                        }),
+                      )
+                    }
+                  >
+                    Добавить подключение
+                  </button>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={approveWrite}
+                      onChange={(e) => setApproveWrite(e.target.checked)}
+                    />
+                    Разрешить запись и подтвердить создание записи ниже
+                  </label>
+                  <div className="form-grid">
+                    <label>
+                      Название записи
+                      <input
+                        value={noteTitle}
+                        onChange={(e) => setNoteTitle(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Текст записи
+                      <input
+                        value={noteBody}
+                        onChange={(e) => setNoteBody(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  {boot.connectors.map((c) => (
+                    <div className="provider-row" key={c.id}>
+                      <strong>{c.name}</strong>
+                      <code>{c.base_url}</code>
+                      <button
+                        onClick={() =>
+                          act(async () =>
+                            setConnectorResult(
+                              JSON.stringify(
+                                await api("/connectors/" + c.id + "/items"),
+                                null,
+                                2,
+                              ),
+                            ),
+                          )
+                        }
+                      >
+                        Прочитать
+                      </button>
+                      <button
+                        disabled={!approveWrite || !c.allow_write || !noteTitle}
+                        onClick={() =>
+                          act(async () =>
+                            setConnectorResult(
+                              JSON.stringify(
+                                await api("/connectors/" + c.id + "/items", {
+                                  title: noteTitle,
+                                  body: noteBody,
+                                  approved: true,
+                                  action_id: crypto.randomUUID(),
+                                }),
+                                null,
+                                2,
+                              ),
+                            ),
+                          )
+                        }
+                      >
+                        Создать подтверждённую запись
+                      </button>
+                    </div>
+                  ))}
+                  {connectorResult && (
+                    <pre className="connector-output">{connectorResult}</pre>
+                  )}
+                </div>
+              )}
+            </section>
+          </SettingsDialog>
         )}
         {!selected ? (
           <section className="welcome">
@@ -1043,6 +1092,6 @@ function App() {
 }
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    {location.pathname === "/mini" ? <MiniApp /> : <App />}
   </React.StrictMode>,
 );

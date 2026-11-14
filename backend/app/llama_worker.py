@@ -158,13 +158,13 @@ def serve(payloads) -> int:
                 chat_kwargs = {'messages': messages, 'max_tokens': max_tokens, 'temperature': float(payload.get('temperature', 0.2)),
                                'top_k': _int_value(cfg.get('top_k'), 40), 'top_p': _float_value(cfg.get('top_p'), 0.95),
                                'min_p': _float_value(cfg.get('min_p'), 0.05), 'repeat_penalty': _float_value(cfg.get('repeat_penalty'), 1.1),
-                               'seed': _int_value(cfg.get('seed'), -1), 'stream': bool(payload.get('stream'))}
+                               'seed': _int_value(cfg.get('seed'), -1), 'stream': bool(payload.get('stream')) and not tools}
                 if tools:
                     # Keep the GGUF's native Qwen tool envelope; validate forced choices after decoding.
                     chat_kwargs.update(tools=tools, tool_choice='auto')
                 generated = time.perf_counter()
                 result = runtime.create_chat_completion(**_filter_supported_kwargs(runtime.create_chat_completion, chat_kwargs))
-                if not payload.get('stream'):
+                if not payload.get('stream') or tools:
                     if tools:
                         choice = result['choices'][0]
                         message = choice['message']
@@ -177,6 +177,17 @@ def serve(payloads) -> int:
                             raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
                     result['_local_ai_gpp'] = {'runtime': summary, 'history_dropped': dropped,
                                                'generation_elapsed_ms': round((time.perf_counter()-generated)*1000)}
+                    if payload.get('stream'):
+                        # Tool turns are already buffered for validation. Native non-stream
+                        # usage includes the exact template, tool definitions and envelope.
+                        choice=result['choices'][0];message=choice['message'];text=message.get('content') or ''
+                        if text:write_event({'type':'delta','text':text})
+                        for index,call in enumerate(message.get('tool_calls') or []):
+                            write_event({'type':'tool_delta','tool_calls':[{'index':index,**call}]})
+                        write_event({'type':'done','content':text,'tool_calls':message.get('tool_calls') or [],
+                            'finish_reason':choice.get('finish_reason') or 'stop','runtime':summary,'history_dropped':dropped,
+                            'usage':result.get('usage') or {},'elapsed_ms':round((time.perf_counter()-started)*1000)})
+                        continue
                     write_event({'type': 'result', 'result': result})
                     continue
                 content, finish, calls = '', 'stop', {}

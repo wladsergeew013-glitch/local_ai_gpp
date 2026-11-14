@@ -39,7 +39,6 @@ export default function App() {
   const [input, setInput] = useState('');
   const [status, setStatus] = useState('Подключаюсь к Local AI…');
   const [busy, setBusy] = useState(false);
-  const [desktop, setDesktop] = useState(false);
   const [syncReady, setSyncReady] = useState(false);
   const [networkErrors, setNetworkErrors] = useState<Record<string, string>>({});
   const [showSettings, setShowSettings] = useState(false);
@@ -115,7 +114,7 @@ export default function App() {
           }
           try { localStorage.setItem(imported, '1'); } catch { /* The server owns persisted dialogs. */ }
         }
-        if (!stopped) { applyRemote(state, true); setSyncReady(true); setDesktop(response.headers.get('X-Local-AI-GPP-Desktop') !== '0'); }
+        if (!stopped) { applyRemote(state, true); setSyncReady(true); }
         network('sync', '');
       } catch (e) { network('sync', errorText(e)); }
       if (!stopped) timers.sync = window.setTimeout(() => void pollSync(), chatRef.current.conversations.some(c => c.messages.some(m => m.pending)) ? 500 : 2000);
@@ -219,9 +218,8 @@ export default function App() {
   }
 
   return <div className="compact-app">
-    <header className="compact-header"><strong>Local AI GPP <small>{APP_VERSION}</small></strong>
-      <div>{desktop && <button onClick={() => void jsonRequest('/api/desktop/show-assistant').catch(e => setStatus(errorText(e)))}>Мини-помощник</button>}
-        <button aria-expanded={showSettings} onClick={() => setShowSettings(!showSettings)}>Настройки</button></div></header>
+    <header className="compact-header"><strong>Local AI Runtime <small>{APP_VERSION}</small></strong>
+      <div><button aria-expanded={showSettings} onClick={() => setShowSettings(!showSettings)}>Настройки</button></div></header>
     <aside className="dialog-list"><button className="primary" disabled={!syncReady} onClick={() => { const c = fresh(); void selectConversation(c.id, { ...chat, conversations: [c, ...chat.conversations] }); }}>+ Новый диалог</button>
       <nav aria-label="Диалоги">{chat.conversations.map(c => <button className={c.id === active.id ? 'selected' : ''} key={c.id} onClick={() => void selectConversation(c.id)}>{c.title}<small>{c.messages.length} сообщений</small></button>)}</nav>
       <a href={url('/docs')} target="_blank" rel="noreferrer">API · документация</a></aside>

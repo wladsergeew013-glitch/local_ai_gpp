@@ -5,6 +5,7 @@ import json
 import secrets
 from fastapi import HTTPException
 from workspace.app.connectors import read_items, write_item
+from workspace.app.version import VERSION
 
 
 def handle(service, task_id, token, payload):
@@ -30,7 +31,7 @@ def handle(service, task_id, token, payload):
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "Local AI Workspace applications",
-                    "version": "0.1.0",
+                    "version": VERSION,
                 },
                 "instructions": "Read only explicitly selected local applications. Creating an item requires a separate one-operation user approval in Workspace.",
             }

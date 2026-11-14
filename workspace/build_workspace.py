@@ -34,6 +34,7 @@ def manifest(directory):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-frontend", action="store_true")
+    parser.add_argument("--stage-only", action="store_true")
     args = parser.parse_args()
     if sys.platform != "win32":
         raise SystemExit(
@@ -87,6 +88,10 @@ def main():
         str(WORKSPACE / "frontend/dist") + ";workspace_frontend",
         "--add-data",
         str(WORKSPACE / "VERSION") + ";workspace_version",
+        "--add-data",
+        str(ROOT / "frontend/public/assistant") + ";workspace_assistant",
+        "--add-data",
+        str(ROOT / "models_storage/branding/icons") + ";workspace_icons",
         "--collect-submodules",
         "workspace",
         "--exclude-module",
@@ -97,6 +102,14 @@ def main():
         "deepseek_harness_runtime",
         "--collect-all",
         "webview",
+        "--collect-all",
+        "pystray",
+        "--collect-all",
+        "PIL",
+        "--hidden-import",
+        "tkinter",
+        "--hidden-import",
+        "PIL.ImageTk",
         "--collect-submodules",
         "uvicorn",
         "--hidden-import",
@@ -170,6 +183,19 @@ def main():
         ),
         encoding="utf-8",
     )
+    if args.stage_only:
+        print(
+            json.dumps(
+                {
+                    "version": version,
+                    "candidate": str(candidate),
+                    "files": len(files),
+                    "staged": True,
+                },
+                indent=2,
+            )
+        )
+        return 0
     destination = WORKSPACE / "dist"
     previous = WORKSPACE / ("build/previous-" + uuid.uuid4().hex)
     if destination.exists():

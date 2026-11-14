@@ -15,6 +15,9 @@ def main():
     parser.add_argument("--port", type=int, default=8776)
     parser.add_argument("--data-dir")
     parser.add_argument("--smoke-seconds", type=float, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--self-test-avatar", action="store_true", help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
     if args.data_dir:
         os.environ["LOCAL_AI_WORKSPACE_DATA_DIR"] = str(Path(args.data_dir).resolve())
@@ -31,8 +34,45 @@ def main():
     import uvicorn
     from workspace.app.main import create_app
 
+    if args.self_test_avatar:
+        import json
+        from workspace.app.store import data_root
+        from workspace.app.mini_avatar import MiniAvatar
+
+        root = data_root()
+        root.mkdir(parents=True, exist_ok=True)
+        avatar = MiniAvatar(
+            root, lambda *_: None, lambda *_: None, lambda *_: None, start_hidden=True
+        )
+        if not avatar.initialized.wait(15):
+            raise RuntimeError("Avatar initialization timed out")
+        try:
+            if avatar.error:
+                raise RuntimeError(avatar.error)
+            if not avatar.frame_counts.get("ready"):
+                raise RuntimeError("Avatar frames are missing")
+        finally:
+            avatar.close()
+        result = {
+            "passed": True,
+            "owner": "workspace",
+            "frames": avatar.frame_counts,
+            "thread_stopped": not avatar.thread.is_alive(),
+        }
+        (root / "avatar-self-test.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        print(json.dumps(result))
+        return 0
+
     if args.headless:
-        uvicorn.run(create_app(), host="127.0.0.1", port=args.port, access_log=False)
+        uvicorn.run(
+            create_app(),
+            host="127.0.0.1",
+            port=args.port,
+            access_log=False,
+            timeout_graceful_shutdown=8,
+        )
         return 0
     import webview
 
@@ -43,6 +83,7 @@ def main():
             port=args.port,
             log_level="warning",
             access_log=False,
+            timeout_graceful_shutdown=8,
         )
     )
     thread = threading.Thread(target=server.run, daemon=False)
@@ -63,38 +104,14 @@ def main():
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "LocalAI.Workspace.0.1"
+            "LocalAI.Workspace"
         )
-    window = webview.create_window(
-        "Local AI Workspace",
-        f"http://127.0.0.1:{args.port}",
-        width=1360,
-        height=900,
-        min_size=(900, 640),
-        background_color="#f4f6fa",
+    from workspace.app.desktop_shell import WorkspaceShell
+    from workspace.app.store import data_root
+
+    WorkspaceShell(server.config.app, server, thread, args.port, data_root()).run(
+        args.smoke_seconds
     )
-
-    def closing():
-        # Uvicorn lifespan stops/observes the owned DSH tree before the host exits.
-        server.should_exit = True
-
-    window.events.closed += closing
-    if args.smoke_seconds:
-
-        def close_later():
-            time.sleep(args.smoke_seconds)
-            window.destroy()
-
-        threading.Thread(target=close_later, daemon=True).start()
-    try:
-        webview.start(debug=False)
-    finally:
-        server.should_exit = True
-        thread.join(20)
-        if thread.is_alive():
-            raise RuntimeError(
-                "Workspace shutdown was not confirmed. Runtime was left independent."
-            )
     return 0
 
 

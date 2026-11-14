@@ -59,5 +59,5 @@ class RuntimeClient:
         return self.request(
             "POST",
             "owners/" + quote(owner_id, safe="") + "/cancel",
-            headers={"X-Local-AI-Owner-Token": token},
+            headers={"X-Local-AI-Owner-Token": token}, timeout=3,
         )

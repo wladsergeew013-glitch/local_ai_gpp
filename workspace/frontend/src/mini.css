@@ -1,0 +1,260 @@
+.mini-shell {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #f4f7fc;
+  color: #193451;
+  border: 1px solid #96b6e8;
+  border-radius: 10px;
+  overflow: hidden;
+  font-family:
+    Segoe UI,
+    system-ui,
+    sans-serif;
+}
+.mini-header {
+  height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  background: #175ba4;
+  color: white;
+  flex-shrink: 0;
+}
+.mini-header button {
+  border: 0;
+  background: #ffffff12;
+  color: white;
+  padding: 5px 10px;
+  font-size: 19px;
+}
+.mini-brand {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: move;
+}
+.mini-brand small {
+  display: block;
+  font-size: 10px;
+  font-weight: 400;
+  color: #c5ddfb;
+  margin-top: 3px;
+}
+.mini-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.mini-dialogs {
+  width: 190px;
+  padding: 12px 9px;
+  border-right: 1px solid #d7e2f2;
+  background: #eaf1fb;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.mini-dialogs > .primary {
+  font-size: 11px;
+  padding: 9px 5px;
+}
+.mini-dialogs label {
+  font-size: 10px;
+}
+.mini-dialogs select {
+  padding: 7px 5px;
+  font-size: 11px;
+}
+.mini-dialogs nav {
+  overflow: auto;
+  flex: 1;
+}
+.mini-dialogs nav button {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: 11px;
+  padding: 10px 7px;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.mini-dialogs nav button.selected {
+  background: #d3e4ff;
+}
+.mini-dialogs small {
+  display: block;
+  font-size: 10px;
+  color: #6985a8;
+  margin-top: 5px;
+}
+.mini-conversation {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mini-messages {
+  flex: 1;
+  overflow: auto;
+  padding: 18px;
+  min-height: 0;
+}
+.mini-empty {
+  padding: 15px 10px;
+  color: #6982a4;
+  font-size: 12px;
+}
+.mini-empty strong {
+  font-size: 20px;
+  color: #28496f;
+}
+.mini-empty p {
+  margin-bottom: 20px;
+}
+.mini-empty select {
+  margin-bottom: 10px;
+  font-size: 11px;
+  padding: 8px;
+}
+.mini-empty .check {
+  margin-top: 10px;
+}
+.mini-message {
+  border: 1px solid #dae4f2;
+  border-radius: 9px;
+  margin: 0 45px 17px 0;
+  background: white;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.mini-message.user {
+  margin: 0 0 17px 45px;
+  background: #e0edff;
+  border-color: #ccdffc;
+}
+.mini-message header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 10px;
+  color: #6982a3;
+  white-space: normal;
+}
+.mini-message.user header {
+  flex-direction: row-reverse;
+}
+.mini-message time {
+  font-size: 9px;
+  font-weight: 400;
+  color: #7e96b6;
+}
+.mini-message.user > div {
+  text-align: right;
+}
+.mini-progress,
+.mini-recovery {
+  font-size: 11px;
+  color: #6480a1;
+  line-height: 1.6;
+  margin: 14px 0;
+}
+.mini-progress button,
+.mini-recovery button {
+  border: 0;
+  background: none;
+  font-size: 10px;
+  color: #2d65bf;
+  padding: 4px 5px;
+}
+.mini-recovery {
+  color: #936828;
+  background: #fff3d9;
+  padding: 12px;
+  border-radius: 7px;
+}
+.mini-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 9px;
+  padding: 12px;
+  background: white;
+  border-top: 1px solid #dce5f2;
+}
+.mini-composer textarea {
+  font-size: 12px;
+  min-height: 58px;
+}
+.mini-composer button {
+  font-size: 11px;
+  padding: 9px 12px;
+  white-space: nowrap;
+}
+.mini-error {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  background: #fff0f1;
+  color: #a13545;
+  padding: 10px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.mini-error button {
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+}
+.mini-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 9px;
+  color: #7f96b4;
+  padding: 5px 12px;
+  background: #eaf1fb;
+  flex-shrink: 0;
+}
+.mini-footer button {
+  font-size: 9px;
+  border: 0;
+  background: none;
+  color: #4975b1;
+  padding: 2px 3px;
+}
+@media (max-width: 500px) {
+  .mini-dialogs {
+    width: 155px;
+  }
+  .mini-messages {
+    padding: 13px;
+  }
+  .mini-message {
+    margin-right: 25px;
+    padding: 10px;
+  }
+  .mini-message.user {
+    margin-left: 25px;
+  }
+  .mini-composer {
+    padding: 9px;
+    gap: 7px;
+  }
+  .mini-composer button {
+    padding: 9px 8px;
+  }
+  .mini-brand {
+    font-size: 12px;
+  }
+}
