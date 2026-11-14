@@ -11,6 +11,7 @@ from backend.app.core import _filter_supported_kwargs, _float_value, _int_value,
 from backend.app.cuda_runtime import configure_cuda_dlls
 from backend.app.context_budget import validate_context, context_limit_message
 from backend.app.model_adapters import apply_model_adapter
+from backend.app.tool_calls import decode_qwen_tools, merge_tool_delta
 
 _output_lock = threading.Lock()
 
@@ -58,12 +59,14 @@ def llama_backend_details() -> dict:
             'system_info': raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else str(raw)}
 
 
-def fit_messages(runtime: Any, messages: list[dict], max_tokens: int, n_ctx: int, truncate: bool) -> tuple[list[dict], int]:
+def fit_messages(runtime: Any, messages: list[dict], max_tokens: int, n_ctx: int, truncate: bool, tools=None) -> tuple[list[dict], int]:
     """Conservative budget; llama.cpp also checks its exact chat template."""
     validate_context(n_ctx, max_tokens)
     kept, dropped = list(messages), 0
     while True:
-        text = '\n'.join(str(m.get('content') or '') for m in kept)
+        text = '\n'.join(str(m.get('content') or '') + (json.dumps(m['tool_calls'], ensure_ascii=False) if m.get('tool_calls') else '') for m in kept)
+        if tools:
+            text += json.dumps(tools, ensure_ascii=False)
         count = len(runtime.tokenize(text.encode('utf-8'), special=True)) + 32 * len(kept) + 128
         if count + max_tokens <= n_ctx: return kept, dropped
         start = next((i for i, m in enumerate(kept) if m.get('role') == 'user'), -1)
@@ -135,31 +138,85 @@ def serve(payloads) -> int:
                     write_event({'type': 'ready', 'runtime': summary})
                     continue
                 max_tokens = int(payload.get('max_tokens', 512))
-                messages, dropped = fit_messages(runtime, payload['messages'], max_tokens, int(cfg.get('n_ctx', 4096)), bool(payload.get('truncate_history')))
+                tools = payload.get('tools') or []
+                tool_choice = payload.get('tool_choice', 'auto')
+                if tools and summary.get('tool_calling') not in {'qwen3-json', 'qwen35-xml'}:
+                    raise ValueError('TOOLS_UNSUPPORTED: this model template has no validated tool-call adapter.')
+                if tool_choice == 'none':
+                    tools = []
+                messages, dropped = fit_messages(runtime, payload['messages'], max_tokens, int(cfg.get('n_ctx', 4096)), bool(payload.get('truncate_history')), tools)
+                if summary.get('tool_calling') == 'qwen35-xml':
+                    # The official 3.5 template iterates argument mappings; the HTTP API carries JSON strings.
+                    messages = json.loads(json.dumps(messages))
+                    for message in messages:
+                        for call in message.get('tool_calls') or []:
+                            function = call['function']
+                            if isinstance(function.get('arguments'), str):
+                                function['arguments'] = json.loads(function['arguments'])
                 if dropped:
                     write_event({'type': 'worker_status', 'message': f'Контекст заполнен: исключено {dropped} старых реплик. Полная история сохранена в диалоге.'})
                 chat_kwargs = {'messages': messages, 'max_tokens': max_tokens, 'temperature': float(payload.get('temperature', 0.2)),
                                'top_k': _int_value(cfg.get('top_k'), 40), 'top_p': _float_value(cfg.get('top_p'), 0.95),
                                'min_p': _float_value(cfg.get('min_p'), 0.05), 'repeat_penalty': _float_value(cfg.get('repeat_penalty'), 1.1),
-                               'seed': _int_value(cfg.get('seed'), -1), 'stream': bool(payload.get('stream'))}
+                               'seed': _int_value(cfg.get('seed'), -1), 'stream': bool(payload.get('stream')) and not tools}
+                if tools:
+                    # Keep the GGUF's native Qwen tool envelope; validate forced choices after decoding.
+                    chat_kwargs.update(tools=tools, tool_choice='auto')
                 generated = time.perf_counter()
                 result = runtime.create_chat_completion(**_filter_supported_kwargs(runtime.create_chat_completion, chat_kwargs))
-                if not payload.get('stream'):
+                if not payload.get('stream') or tools:
+                    if tools:
+                        choice = result['choices'][0]
+                        message = choice['message']
+                        if not message.get('tool_calls'):
+                            message['content'], calls = decode_qwen_tools(message.get('content') or '', tools, tool_choice, choice.get('finish_reason'))
+                            if calls:
+                                message['tool_calls'] = calls
+                                choice['finish_reason'] = 'tool_calls'
+                        if not payload.get('parallel_tool_calls',True) and len(message.get('tool_calls') or [])>1:
+                            raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
                     result['_local_ai_gpp'] = {'runtime': summary, 'history_dropped': dropped,
                                                'generation_elapsed_ms': round((time.perf_counter()-generated)*1000)}
+                    if payload.get('stream'):
+                        # Tool turns are already buffered for validation. Native non-stream
+                        # usage includes the exact template, tool definitions and envelope.
+                        choice=result['choices'][0];message=choice['message'];text=message.get('content') or ''
+                        if text:write_event({'type':'delta','text':text})
+                        for index,call in enumerate(message.get('tool_calls') or []):
+                            write_event({'type':'tool_delta','tool_calls':[{'index':index,**call}]})
+                        write_event({'type':'done','content':text,'tool_calls':message.get('tool_calls') or [],
+                            'finish_reason':choice.get('finish_reason') or 'stop','runtime':summary,'history_dropped':dropped,
+                            'usage':result.get('usage') or {},'elapsed_ms':round((time.perf_counter()-started)*1000)})
+                        continue
                     write_event({'type': 'result', 'result': result})
                     continue
-                content, finish = '', 'stop'
+                content, finish, calls = '', 'stop', {}
                 for chunk in result:
                     choice = (chunk.get('choices') or [{}])[0]
                     finish = choice.get('finish_reason') or finish
                     text = str((choice.get('delta') or {}).get('content') or '')
+                    merge_tool_delta(calls, choice.get('delta') or {})
                     if text:
                         content += text
-                        write_event({'type': 'delta', 'text': text})
-                prompt_tokens = len(runtime.tokenize('\n'.join(m['content'] for m in messages).encode('utf-8')))
+                        # Buffer tool-enabled turns until a complete, validated action is available.
+                        if not tools:
+                            write_event({'type': 'delta', 'text': text})
+                tool_calls = [calls[i] for i in sorted(calls)]
+                if tools and not tool_calls:
+                    content, tool_calls = decode_qwen_tools(content, tools, tool_choice, finish)
+                if tools:
+                    if not payload.get('parallel_tool_calls',True) and len(tool_calls)>1:
+                        raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
+                    if content:
+                        write_event({'type': 'delta', 'text': content})
+                    for index, call in enumerate(tool_calls):
+                        write_event({'type': 'tool_delta', 'tool_calls': [{'index': index, **call}]})
+                    if tool_calls:
+                        finish = 'tool_calls'
+                content = content or ''
+                prompt_tokens = len(runtime.tokenize(json.dumps(messages, ensure_ascii=False).encode('utf-8')))
                 completion_tokens = len(runtime.tokenize(content.encode('utf-8'), add_bos=False))
-                write_event({'type': 'done', 'content': content, 'finish_reason': finish, 'runtime': summary, 'history_dropped': dropped,
+                write_event({'type': 'done', 'content': content, 'tool_calls': tool_calls, 'finish_reason': finish, 'runtime': summary, 'history_dropped': dropped,
                              'elapsed_ms': round((time.perf_counter()-started)*1000),
                              'usage': {'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens,
                                        'total_tokens': prompt_tokens+completion_tokens, 'estimated': True}})

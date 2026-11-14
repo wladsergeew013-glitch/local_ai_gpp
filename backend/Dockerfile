@@ -25,7 +25,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /install /usr/local
 COPY backend/app /app/backend/app
-COPY tools/exe_launcher.py /app/tools/exe_launcher.py
 COPY VERSION /app/VERSION
 COPY models_storage /data/models_storage
 RUN mkdir -p /data/logs

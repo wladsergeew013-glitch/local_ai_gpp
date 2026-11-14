@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from tools import exe_launcher as desktop
+from backend.app import diagnostic_chat as desktop
 
 
 class Response:

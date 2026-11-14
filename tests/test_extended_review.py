@@ -24,6 +24,7 @@ from backend.app.reasoning import split_reasoning
 from backend.app.routers.compat import OpenAIChatRequest
 from examples.client import LocalAI
 from tools import exe_launcher as desktop
+from backend.app import diagnostic_chat as shared_chat
 
 spec = importlib.util.spec_from_file_location('review_builder', Path(desktop.__file__).with_name('02_build_exe.py'))
 builder = importlib.util.module_from_spec(spec)
@@ -75,7 +76,7 @@ class ExtendedReviewTests(unittest.TestCase):
         agent.root=SimpleNamespace(attributes=lambda *_: True)
         agent.chat=agent.tail=None
         agent.settings={'always_on_top':True}
-        with patch.object(desktop,'assistant_state_dir',return_value=self.root):
+        with patch.object(shared_chat,'assistant_state_dir',return_value=self.root):
             agent._toggle_topmost()
             self.assertFalse(agent.settings['always_on_top'])
             agent.resize_start={'avatar_x':0}; agent.avatar_x=0
@@ -182,7 +183,7 @@ class ExtendedReviewTests(unittest.TestCase):
         core.SETTINGS_FILE.write_text('[]')
         self.assertIsInstance(core.load_settings()['runtime'],dict)
         self.assertEqual(core.SETTINGS_FILE.read_text(),'[]')
-        core.save_settings({'runtime':{'temperature':.3}})
+        core.save_settings({'runtime':{'temperature':.3},'server':{'api_key':'','openai_compat_enabled':True}})
         self.assertEqual(next(self.store.glob('settings.json.invalid-*')).read_text(),'[]')
 
     def test_R33_R34_atomic_logo_does_not_rewrite_concurrent_settings(self):

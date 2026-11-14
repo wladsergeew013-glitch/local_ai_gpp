@@ -25,7 +25,7 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertEqual(messages[1]['content'], 'x' * 600)
 
     def test_invalid_response_reserve_is_rejected_before_loading(self):
-        with patch.object(core, 'find_model', return_value=([], {}, 0)), patch.object(core, 'load_settings', return_value={}), \
+        with patch.object(core, 'find_model', return_value=([], {'id':'m','path':'fixture.gguf'}, 0)), patch.object(core, 'load_settings', return_value={}), \
              patch.object(core, '_merge_runtime', return_value={'n_ctx': 512}), patch.object(core, '_get_runtime') as load:
             with self.assertRaises(HTTPException) as error:
                 list(core._completion_events(model_id='m', messages=[], temperature=.2, max_tokens=512, stream=True))

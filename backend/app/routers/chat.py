@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from backend.app.core import append_request_log, create_chat_completion, create_request_log, read_log_tail, stream_chat_completion
 from backend.app.streaming import event_response
 from backend.app.reasoning import split_reasoning, uses_reasoning
+from backend.app.runtime_manager import runtime_manager
 
 router = APIRouter(tags=["chat"])
 
@@ -111,6 +112,7 @@ def chat(payload: ChatRequest) -> dict:
 def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
     request_id, log_path = create_request_log(payload.model_id, "chat_stream")
     messages = chat_messages(payload)
+    lease = runtime_manager.admit()
 
     def events():
         yield sse({"type": "meta", "request_id": request_id, "log_path": str(log_path)})
@@ -124,13 +126,14 @@ def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
             request_log_path=log_path,
             runtime_override=payload.runtime,
             truncate_history=payload.memory,
+            lease=lease,
         )
         try:
             yield from response_events(stream, log_path, request_id, started)
         finally:
             stream.close()
 
-    return event_response(request, events())
+    return event_response(request, events(), on_close=lease.close)
 
 
 def response_events(stream, log_path, request_id, started):

@@ -1,3 +1,5 @@
+import { disjointRuntimeChange } from './settingsPatch';
+import type { RuntimeSettings } from './types';
 import type { BootstrapPayload, EngineSettings, ModelRecord, RemoteHubModel, RuntimeDiagnostics, RuntimeStatus } from './types';
 
 const envApiBase = import.meta.env.VITE_API_BASE;
@@ -57,7 +59,7 @@ export async function prewarmModel(modelId: string, runtime?: Record<string, unk
   return readJson<ModelRecord>(await fetch(apiUrl(`/api/models/${encodeURIComponent(modelId)}/prewarm`), {
     method: 'POST',
     headers: runtime ? { 'Content-Type': 'application/json' } : undefined,
-    body: runtime ? JSON.stringify({ runtime }) : undefined,
+    body: runtime ? JSON.stringify({ runtime, save_profile: true }) : undefined,
     signal,
   }));
 }
@@ -242,4 +244,20 @@ export async function setAssistantOnTop(enabled: boolean): Promise<{ enabled: bo
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
   }));
+}
+
+
+export async function saveRuntimePatch(original: EngineSettings, patch: Partial<RuntimeSettings>): Promise<EngineSettings> {
+  if (!Object.keys(patch).length) return original;
+  if (!original._revision) throw new Error('Обновите Runtime: требуется версия настроек.');
+  async function send(revision: string) {
+    return fetch(apiUrl('/api/settings'), {method:'PATCH', headers:{'Content-Type':'application/json','If-Match':'"'+revision+'"'}, body:JSON.stringify({runtime:patch})});
+  }
+  let response=await send(original._revision);
+  if (response.status===409) {
+    const latest=await readJson<EngineSettings>(await fetch(apiUrl('/api/settings')));
+    if (!disjointRuntimeChange(original.runtime,latest.runtime,patch)) throw new Error('Этот параметр уже изменён в другом окне. Обновите настройки перед сохранением.');
+    response=await send(latest._revision!);
+  }
+  return readJson<EngineSettings>(response);
 }

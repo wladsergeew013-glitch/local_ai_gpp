@@ -3,7 +3,7 @@
 EXE запускает сервер на **127.0.0.1:8765**. Веб-чат: http://127.0.0.1:8765,
 интерактивная схема: http://127.0.0.1:8765/docs.
 Порт задаётся через LOCAL_AI_GPP_PORT или server.port в settings.json.
-Запускайте один экземпляр: EXE, мини-помощник и API используют общий worker.
+Запускайте один экземпляр Runtime на его каталог данных. Workspace и его мини-помощник подключаются к API как независимые клиенты; они не владеют worker Runtime.
 
 Docker: base URL `http://127.0.0.1:8080/v1`, Swagger `http://127.0.0.1:8080/docs`;
 backend напрямую — `http://127.0.0.1:18765`. Пути GGUF внутри контейнера начинаются с `/models/`.
@@ -50,6 +50,19 @@ model_id в URL кодируйте через percent encoding.
 Статус отражает наблюдаемое число слоёв из llama.cpp, а не только запрошенную настройку.
 
 ## OpenAI-compatible
+
+Текущий контракт — **API 1.1**. Клиенту Workspace не нужно читать файлы Runtime:
+
+| Запрос | Результат |
+|---|---|
+| `GET /api/health` | Процесс сервера жив; не означает готовность модели |
+| `GET /v1/runtime/readiness` | `model_not_loaded`, `ready` или `busy`; capacity=1, queue=0 |
+| `GET /v1/models/{id}/capabilities` | Реальный контекст выбранного профиля, лимит вывода, streaming, поддержка tools и адаптер |
+| `POST /v1/models/{id}/load` | Загрузить; необязательное `{"runtime":{"n_ctx":16384,"max_tokens":2048,"n_gpu_layers":12}}` сохраняет явно выбранный профиль модели |
+| `POST /v1/requests/{id}/cancel` | Адресная отмена с `X-Local-AI-Cancel-Token` |
+| `POST /v1/owners/{owner}/cancel` | Отмена запроса владельца с `X-Local-AI-Owner-Token` |
+
+`tools.supported` подтверждается после загрузки фактического GGUF-шаблона, а не по имени модели. Проверены Qwen3.5 XML и протокольный цикл; другие модели не объявляются поддержанными автоматически. Контекст/GPU-профиль уже загруженной модели используется другими API-клиентами; явные значения native-запроса имеют приоритет. После выгрузки используется сохранённый профиль модели. Формы Runtime сохраняют выбранный профиль при загрузке.
 
 POST `/v1/chat/completions`, Content-Type: application/json:
 
@@ -144,15 +157,64 @@ curl http://127.0.0.1:8765/v1/chat/completions \
 Изменение флага не перегружает веса. `/api/runtime/status` возвращает `model_adapter` и `enable_thinking`;
 у неподдерживаемого шаблона это `default` и `null`.
 
-При включённых рассуждениях `/v1` возвращает исходный think-блок в content/SSE;
-native чат отделяет `reasoning` от `answer`. В прежних assistant messages передавайте только финальный ответ.
+При включённых рассуждениях `/v1` возвращает финальный ответ в `message.content`, а рассуждения — отдельно в `message.reasoning_content` и `_local_ai_gpp.reasoning`. SSE не смешивает рассуждения с ответом. Native чат также отделяет `reasoning` от `answer`. В прежних assistant messages передавайте только финальный ответ (и tool_calls, если они были).
 Токены рассуждения входят в лимит `max_tokens`; `finish_reason=length` означает обрезанный ответ.
 Qwen3.5 не поддерживает `/think` и `/nothink` как официальный переключатель.
 [Описание режимов от Qwen](https://huggingface.co/Qwen/Qwen3.5-4B#instruct-or-non-thinking-mode).
 
+## Вызовы инструментов
+
+Готовый безопасный пример: `python examples/tools_client.py`. Он выбирает первую доступную модель как обычный `LocalAI`, предлагает одну функцию `project_name`, проверяет имя и аргументы, возвращает результат и получает итог. Произвольный Python или shell из ответа модели не исполняется.
+
+```python
+import json
+import requests
+
+base = "http://127.0.0.1:8765/v1"
+model = requests.get(f"{base}/models").json()["data"][0]["id"]
+tools = [{"type": "function", "function": {
+    "name": "project_name",
+    "description": "Return this example project's name.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}}]
+messages = [{"role": "user", "content": "Use project_name to tell me my project name."}]
+
+def ask():
+    response = requests.post(f"{base}/chat/completions", json={
+        "model": model, "messages": messages, "tools": tools,
+        "max_tokens": 512, "chat_template_kwargs": {"enable_thinking": False},
+    }, timeout=240)
+    response.raise_for_status()
+    return response.json()["choices"][0]
+
+first = ask()
+assert first["finish_reason"] == "tool_calls"  # length/error не разрешают действие
+messages.append(first["message"])
+for call in first["message"]["tool_calls"]:
+    assert call["function"]["name"] == "project_name"
+    assert json.loads(call["function"]["arguments"]) == {}
+    messages.append({"role": "tool", "tool_call_id": call["id"],
+                     "content": json.dumps({"name": "ORBIT"})})
+print(ask()["message"]["content"])
+```
+
+`assistant.content` может быть `null`, если есть `tool_calls`. Каждый вызов имеет уникальный ID и JSON-строку `function.arguments`; каждый результат — роль `tool` с соответствующим `tool_call_id`. Допускаются несколько вызовов и результаты в любом порядке. Нельзя пропустить результат, ответить дважды на один ID или продолжить обычным сообщением до всех результатов. `memory=false` с инструментальным обменом отклоняется, чтобы не потерять эту связь.
+
+В SSE вызовы передаются как `choices[].delta.tool_calls` с `index`, ID, именем и аргументами; конец хода — `finish_reason="tool_calls"`. Собирайте фрагменты по `index`. Для Qwen инструментальный ход буферизуется до полного проверенного envelope: неполный/обрезанный/неизвестный вызов возвращает ошибку, а не исполнимое действие. Обычный текстовый чат продолжает выдавать токены сразу.
+
+`tool_choice`: `auto`, `none`, `required` или `{"type":"function","function":{"name":"project_name"}}`. `none` отключает предложения инструментов. Невыполненный forced/required выбор возвращает `TOOL_CALL_REQUIRED`/`TOOL_CHOICE_MISMATCH`. Runtime не выполняет инструменты и не подтверждает разрешения за приложение.
+
+### Занятость, отмена и ошибки
+
+Один активный запрос; второй получает HTTP `409`, `error.code="RUNTIME_BUSY"` и `Retry-After: 1` до открытия SSE. Это не разрешение автоматически повторять уже выполненную команду агента.
+
+Для адресной отмены сохраните `X-Local-AI-Request-ID` и `X-Local-AI-Cancel-Token` из ответа и отправьте POST `/v1/requests/{id}/cancel` с тем же токеном. Если приложению нужен ID ещё до получения ответа, передайте собственные `X-Local-AI-Owner-ID` и случайный `X-Local-AI-Owner-Token`, затем отменяйте `/v1/owners/{owner}/cancel`. При настроенном ключе дополнительно нужен обычный Bearer/X-API-Key. Неизвестный owner возвращает cancelled=0; неверный токен активного запроса — 403. Завершённый запрос не затрагивает следующую генерацию.
+
+HTTP и SSE используют устойчивые `error.code`: `RUNTIME_BUSY`, `MODEL_NOT_FOUND`, `CONTEXT_OVERFLOW`, `REQUEST_CANCELLED`, `WORKER_FAILED`, `WORKER_TIMEOUT`, `TOOLS_UNSUPPORTED`, `TOOL_CALL_INVALID`, `TOOL_CALL_INCOMPLETE`, `SETTINGS_POLICY_UNAVAILABLE`, `AUTH_REQUIRED`, `API_DISABLED`. Ошибка после начала SSE остаётся error-frame; клиент обязан проверить её и терминальный finish_reason, а не только HTTP 200.
+
 ## Память и отдельные диалоги
 
-API не хранит сессии сообщений. Клиент передаёт историю нужного диалога при каждом запросе.
+Модельные API `/v1/chat/completions`, `/api/chat` и `/api/chat/stream` не хранят сессии сообщений. Клиент передаёт историю нужного диалога при каждом запросе. Общий диагностический чат `/api/desktop/chat-*` сохраняет беседы на сервере и восстанавливает прерванные pending-сообщения при любом запуске backend, включая Docker.
 memory=true (по умолчанию) использует все переданные messages.
 memory=false сохраняет системные сообщения и последний вопрос пользователя, исключая прежнюю историю.
 Для нового диалога используйте новую коллекцию messages. Общий worker не переносит историю между ними.
@@ -169,7 +231,7 @@ done содержит answer, reasoning, usage и history_dropped.
 При переполнении `/api/chat` с memory=true удаляет старые завершённые пары, сохраняя системный prompt и последний вопрос.
 OpenAI-compatible API не обрезает историю автоматически: при переполнении возвращает ошибку.
 max_tokens должен оставлять место для prompt в n_ctx; длинный последний вопрос не обрезается молча.
-Браузер сохраняет историю локально; EXE и мини-помощник — в общем assistant_state/shared_chat_v67.json.
+Браузер, EXE и мини-помощник используют общий серверный `assistant_state/shared_chat_v67.json`; браузерная локальная копия служит кэшем. Удаление кэша браузера не удаляет серверные беседы.
 Сообщения desktop store и браузера содержат createdAt (ISO 8601), который сохраняется при обновлениях ответа.
 Дата/время отображаются в локальном часовом поясе. Для старой истории используется сохранённый syncUpdatedAt;
 если временных меток нет, интерфейс показывает «Время не сохранено».
@@ -260,3 +322,20 @@ Python `LocalAI` хранит свою память в экземпляре кл
 Сервис предназначен для loopback. Браузерные запросы проверяют Host и Origin до выполнения действий;
 обычный Python/curl без Origin продолжает работать. Дополнительные браузерные origins задаются явно
 через `server.cors_origins` или `LOCAL_AI_GPP_CORS_ORIGINS`; после изменения нужен перезапуск.
+
+
+## Восстановление и согласованное изменение настроек
+
+Если испорчены параметры генерации, восстанавливаются только соответствующие секции. Действующие `server.api_key`
+и `openai_compat_enabled` из того же файла сохраняют силу. Когда политику доступа невозможно определить,
+`/v1` возвращает `503 SETTINGS_POLICY_UNAVAILABLE`; health и диагностика продолжают работать. Исходный файл не переписывается.
+При полном повреждении политики для ремонта необходимо явно передать корректные `server.api_key` и `server.openai_compat_enabled`.
+Первый запуск без настроек и корректные частичные конфигурации поддерживаются.
+
+`GET /api/settings` возвращает `_revision` и ETag. Секретные значения не возвращаются: вместо них есть `api_key_configured` и `token_configured`.
+`PATCH /api/settings` принимает только изменённые поля и требует `If-Match: "<revision>"`. Конфликт версии — `409 SETTINGS_CONFLICT`,
+отсутствие версии — 428. Неизменённые параметры и ключи остаются на сервере. Старый PUT поддерживается, но новые клиенты должны использовать PATCH.
+Основная форма Runtime отправляет только изменённые runtime-поля и сохраняет параллельные правки других полей.
+
+Общий backend, включая Docker, при старте восстанавливает незавершённые сообщения как прерванные, сохраняя частичный текст.
+Повторный владелец того же каталога данных отклоняется до восстановления. Явный неизвестный ID модели возвращает 404 вместо выбора другой модели.

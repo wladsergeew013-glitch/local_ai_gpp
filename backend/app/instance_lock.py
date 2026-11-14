@@ -1,6 +1,30 @@
 """One desktop owner per data directory; the OS releases the lock on exit."""
 import os
 from pathlib import Path
+from contextlib import contextmanager
+import threading
+
+_process_owners = {}
+_owners_lock = threading.RLock()
+
+
+@contextmanager
+def owned_instance(path):
+    """Desktop and ASGI lifespan share a reentrant lease in this process."""
+    key=str(Path(path).resolve())
+    with _owners_lock:
+        entry=_process_owners.get(key)
+        if entry is None:
+            lease=InstanceLock(Path(path));lease.__enter__()
+            entry={'lease':lease,'count':0};_process_owners[key]=entry
+        entry['count']+=1
+    try:yield
+    finally:
+        with _owners_lock:
+            entry['count']-=1
+            if not entry['count']:
+                _process_owners.pop(key,None)
+                entry['lease'].__exit__(None,None,None)
 
 
 class InstanceAlreadyRunning(RuntimeError):

@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 import tkinter as tk
 from tools import exe_launcher as desktop
+from backend.app import diagnostic_chat as shared_chat
 
 
 def main():
@@ -30,7 +31,7 @@ def main():
     original_tk = tk.Tk
     with tempfile.TemporaryDirectory() as temporary:
         state_dir = Path(temporary)
-        with patch.object(desktop, 'assistant_state_dir', return_value=state_dir), \
+        with patch.object(shared_chat, 'assistant_state_dir', return_value=state_dir), \
              patch.object(desktop.NativeAssistantAgent, '_json_request', slow_request), \
              patch.object(desktop.NativeAssistantAgent, '_load_frames'):
             desktop.write_chat_state({'source': 'new-conversation', 'activeConversationId': 'first',

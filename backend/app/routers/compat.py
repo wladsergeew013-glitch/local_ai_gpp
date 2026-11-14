@@ -3,32 +3,16 @@ from __future__ import annotations
 import time
 import uuid
 import json
-from typing import Literal
 
-from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from backend.app.compat_schema import OpenAIMessage, OpenAIChatRequest
+from backend.app.runtime_manager import runtime_manager
 
 from backend.app.core import append_request_log, create_chat_completion, create_request_log, find_model, load_models, load_settings, stream_chat_completion
 from backend.app.streaming import event_response
 from backend.app.reasoning import split_reasoning, uses_reasoning
 
 router = APIRouter(tags=["openai-compatible"])
-
-
-class OpenAIMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
-    content: str
-
-
-class OpenAIChatRequest(BaseModel):
-    model: str
-    messages: list[OpenAIMessage] = Field(min_length=1, max_length=8192)
-    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=256, ge=1, le=8192)
-    stream: bool = False
-    memory: bool = Field(default=True, description='Use all supplied messages; false keeps system messages and the latest user message.')
-    stream_options: dict = Field(default_factory=dict)
-    chat_template_kwargs: dict[str, bool] = Field(default_factory=dict)
 
 
 @router.get("/v1/models")
@@ -57,6 +41,7 @@ def openai_models(
 def openai_chat_completions(
     payload: OpenAIChatRequest,
     request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
 ):
@@ -67,14 +52,17 @@ def openai_chat_completions(
     find_model(payload.model)
     template_runtime(payload)
     request_id, log_path = create_request_log(payload.model, "openai_chat")
-    messages = [{"role": msg.role, "content": msg.content} for msg in payload.messages]
+    messages = [msg.model_dump(exclude_none=True) for msg in payload.messages]
     if not payload.memory:
         latest_user = next((item for item in reversed(messages) if item['role'] == 'user'), None)
         if latest_user is None:
             raise HTTPException(400, 'memory=false requires a user message')
         messages = [item for item in messages if item['role'] == 'system'] + [latest_user]
+    lease = runtime_manager.admit(request.headers.get('X-Local-AI-Owner-ID', ''), request.headers.get('X-Local-AI-Owner-Token', ''))
+    headers = {'X-Local-AI-Request-ID': lease.request_id, 'X-Local-AI-Cancel-Token': lease.token, 'X-Local-AI-API-Version': '1.1'}
     if payload.stream:
-        return event_response(request, openai_events(payload, messages, log_path))
+        return event_response(request, openai_events(payload, messages, log_path, lease), on_close=lease.close, headers=headers)
+    response.headers.update(headers)
     try:
         result = create_chat_completion(
             model_id=payload.model,
@@ -83,14 +71,19 @@ def openai_chat_completions(
             max_tokens=payload.max_tokens,
             request_log_path=log_path,
             runtime_override=template_runtime(payload),
+            tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, parallel_tool_calls=payload.parallel_tool_calls, lease=lease,
         )
     except HTTPException as exc:
         append_request_log(log_path, "openai_chat_failed", {"error": exc.detail, "request_id": request_id})
-        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-        raise HTTPException(status_code=exc.status_code, detail=f"{detail} Лог выполнения: {log_path}") from exc
-    raw = result['choices'][0]['message']['content']
+        raise
+    finally:
+        lease.close()
+    result_message = result['choices'][0]['message']
+    raw = result_message.get('content') or ''
     runtime = result.get('_local_ai_gpp', {}).get('runtime', {})
     parsed = split_reasoning(raw, uses_reasoning(runtime))
+    if result_message.get('tool_calls'):
+        parsed['answer_state'] = 'tool_calls'
     answer = parsed['answer']
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -100,7 +93,9 @@ def openai_chat_completions(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": answer, "reasoning_content": parsed["reasoning"]},
+                "message": {"role": "assistant", "content": answer or (None if result_message.get('tool_calls') else ''),
+                            "reasoning_content": parsed["reasoning"],
+                            **({'tool_calls': result_message['tool_calls']} if result_message.get('tool_calls') else {})},
                 "finish_reason": result["choices"][0].get("finish_reason", "stop"),
             }
         ],
@@ -109,7 +104,7 @@ def openai_chat_completions(
     }
 
 
-def openai_events(payload, messages, log_path):
+def openai_events(payload, messages, log_path, lease=None):
     completion_id = f'chatcmpl-{uuid.uuid4().hex}'
     created = int(time.time())
 
@@ -126,7 +121,8 @@ def openai_events(payload, messages, log_path):
     yield chunk({'role': 'assistant', 'content': ''})
     stream = stream_chat_completion(model_id=payload.model, messages=messages,
                                    temperature=payload.temperature, max_tokens=payload.max_tokens,
-                                   request_log_path=log_path, runtime_override=template_runtime(payload))
+                                   request_log_path=log_path, runtime_override=template_runtime(payload),
+                                   tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, parallel_tool_calls=payload.parallel_tool_calls, lease=lease)
     full_text, sent_answer, runtime = '', 0, {}
     try:
         for event in stream:
@@ -147,17 +143,24 @@ def openai_events(payload, messages, log_path):
             elif kind == 'done':
                 runtime = event.get('runtime') or runtime
                 parsed = split_reasoning(event.get('content') or full_text, uses_reasoning(runtime))
+                if event.get('tool_calls'):
+                    parsed['answer_state'] = 'tool_calls'
                 yield chunk({}, event.get('finish_reason') or 'stop', metadata={**parsed, 'runtime': runtime})
                 if payload.stream_options.get('include_usage'):
                     yield chunk({}, usage=event.get('usage') or {})
+            elif kind == 'tool_delta':
+                yield chunk({'tool_calls': event['tool_calls']})
             elif kind == 'error':
+                from backend.app.api_errors import error_code
                 yield 'data: ' + json.dumps({'error': {'message': event.get('message'),
-                    'type': 'inference_error', 'code': event.get('status_code', 500)}}) + '\n\n'
+                    'type': 'inference_error', 'code': error_code(event.get('status_code',500),event.get('message'))}}) + '\n\n'
             else:
                 yield ': keepalive\n\n'
         yield 'data: [DONE]\n\n'
     finally:
         stream.close()
+        if lease is not None:
+            lease.close()
 
 
 def template_runtime(payload: OpenAIChatRequest) -> dict:
@@ -173,6 +176,8 @@ def _require_api_key(
     settings: dict | None = None,
 ) -> None:
     settings = settings or load_settings()
+    if settings.get('_access_policy_error'):
+        raise HTTPException(503, 'SETTINGS_POLICY_UNAVAILABLE: repair the server access policy')
     expected = str(settings.get("server", {}).get("api_key") or "").strip()
     if not expected:
         return

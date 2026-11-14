@@ -30,6 +30,17 @@ class Runtime(Section):
     request_timeout_sec: int = Field(default=180, ge=1, le=86400)
     load_timeout_sec: int = Field(default=120, ge=1, le=86400)
     worker_idle_timeout_sec: int = Field(default=60, ge=1, le=86400)
+    tensor_split: str | list[float] = ''
+    enable_thinking: bool = False
+    offload_kqv: bool = True
+    flash_attn: bool = False
+    op_offload: bool = True
+    swa_full: bool = False
+    use_mmap: bool = True
+    use_mlock: bool = False
+    verbose_runtime: bool = False
+    gpu_fallback_to_cpu: bool = True
+    preload_on_start: bool = False
 
 
 class Server(Section):
@@ -51,29 +62,47 @@ class Hub(Section):
     timeout_sec: int = Field(default=30, ge=1, le=3600)
 
 
-def validate_settings(value, defaults):
+class AccessPolicy(Section):
+    api_key: str = ''
+    openai_compat_enabled: bool = True
+
+
+def validate_runtime(value, *, complete=False, check_context=True):
+    if not isinstance(value, dict):
+        raise HTTPException(422, 'INVALID_RUNTIME: runtime must be an object')
     try:
-        if not isinstance(value, dict):
-            raise ValueError('Settings must be an object')
-        # All known fields retain the type specified by the shipped defaults.
-        for section, fields in defaults.items():
-            actual = value.get(section)
-            if not isinstance(actual, dict):
-                raise ValueError(f'{section} must be an object')
-            for key, default in fields.items():
-                item = actual.get(key)
-                valid = isinstance(item, type(default))
-                if isinstance(default, float):
-                    valid = isinstance(item, (int, float)) and not isinstance(item, bool)
-                elif isinstance(default, int) and not isinstance(default, bool):
-                    valid = isinstance(item, int) and not isinstance(item, bool)
-                if not valid:
-                    raise ValueError(f'Invalid type: {section}.{key}')
-        Runtime.model_validate(value['runtime'])
-        Server.model_validate(value['server'])
-        Hub.model_validate(value['hub'])
-        from backend.app.context_budget import validate_context
-        validate_context(value['runtime']['n_ctx'], value['runtime']['max_tokens'])
-    except (ValueError, ValidationError) as exc:
-        raise HTTPException(422, f'Invalid settings: {exc}') from exc
+        Runtime.model_validate(value)
+        if check_context and (complete or ('n_ctx' in value and 'max_tokens' in value)):
+            from backend.app.context_budget import validate_context
+            validate_context(value.get('n_ctx',4096),value.get('max_tokens',1024))
+    except ValueError as exc:
+        # Never include request values, tokens or secrets in schema diagnostics.
+        errors = exc.errors(include_input=False) if isinstance(exc,ValidationError) else []
+        fields = ', '.join('.'.join(map(str,e['loc'])) for e in errors)
+        raise HTTPException(422, 'INVALID_RUNTIME: ' + (fields or str(exc))) from exc
+    return value
+
+
+def validate_section(section, actual, defaults):
+    if not isinstance(actual,dict):
+        raise HTTPException(422,f'INVALID_SETTINGS: {section} must be an object')
+    for key,default in defaults.items():
+        item=actual.get(key)
+        valid=isinstance(item,type(default))
+        if isinstance(default,float):valid=isinstance(item,(int,float)) and not isinstance(item,bool)
+        elif isinstance(default,int) and not isinstance(default,bool):valid=isinstance(item,int) and not isinstance(item,bool)
+        if section=='runtime' and key=='tensor_split':valid=isinstance(item,(str,list))
+        if not valid:raise HTTPException(422,f'INVALID_SETTINGS: {section}.{key}')
+    try:
+        if section=='runtime':validate_runtime(actual,complete=True)
+        elif section=='server':Server.model_validate(actual)
+        elif section=='hub':Hub.model_validate(actual)
+    except ValidationError as exc:
+        raise HTTPException(422,f'INVALID_SETTINGS: {section}') from exc
+    return actual
+
+
+def validate_settings(value, defaults):
+    if not isinstance(value,dict):raise HTTPException(422,'INVALID_SETTINGS: object required')
+    for section,fields in defaults.items():validate_section(section,value.get(section),fields)
     return value
