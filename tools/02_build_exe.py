@@ -840,7 +840,23 @@ def prepare_worker_runtime(runtime_kind: str, reuse_source: Path | None = None) 
     return stage
 
 
+def validate_distribution(candidate):
+    required=('LocalAIGPP.exe','VERSION','runtime_info.json','worker_runtime/python.exe',
+              'backend/app/llama_worker.py','models_storage/models.json','models_storage/settings.json')
+    for relative in required:
+        if not (candidate / relative).is_file():
+            raise ValueError(f'Incomplete distribution: {relative}')
+    if not isinstance(json.loads((candidate/'models_storage/models.json').read_text(encoding='utf-8')),list):
+        raise ValueError('Invalid packaged model registry')
+    if not isinstance(json.loads((candidate/'models_storage/settings.json').read_text(encoding='utf-8')),dict):
+        raise ValueError('Invalid packaged settings')
+
+
 def promote_distribution(candidate):
+    checked_build_path(candidate)
+    if candidate == OUT:
+        raise ValueError('A distribution must be staged below the build output directory')
+    validate_distribution(candidate)
     destination = ROOT / 'dist'
     # The previous executable and runtime remain intact until every build step passes.
     if destination.is_symlink() or (destination.exists() and getattr(destination.lstat(), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
@@ -851,20 +867,20 @@ def promote_distribution(candidate):
     if had_previous:
         destination.rename(previous)
     try:
-        for name in ('models_storage', 'assistant_state', 'logs'):
-            source = previous / name if had_previous else ROOT / name
+        for name in ('models_storage', 'assistant_state', 'logs') if had_previous else ():
+            source = previous / name
             if not source.is_dir():
                 continue
             target = candidate / name
             if target.exists():
                 remove_build_tree(target)
-            if had_previous:
-                source.rename(target)
-                moved.append(name)
-            elif name == 'assistant_state':
-                shutil.copytree(source, target)
+            source.rename(target)
+            moved.append(name)
         candidate.rename(destination)
+        validate_distribution(destination)
     except BaseException:
+        if not candidate.exists() and destination.exists():
+            destination.rename(candidate)
         for name in reversed(moved):
             (candidate / name).rename(previous / name)
         if had_previous:

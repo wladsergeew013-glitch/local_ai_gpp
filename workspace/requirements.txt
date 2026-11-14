@@ -1,0 +1,8 @@
+# Kept separate from the inference runtime and its native packages.
+fastapi==0.141.1
+uvicorn==0.38.0
+httpx==0.28.1
+pydantic==2.14.3
+psutil==7.2.2
+deepseek-harness-sdk==0.2.2rc2
+deepseek-harness-runtime-bin==0.2.2rc2

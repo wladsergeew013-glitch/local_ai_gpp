@@ -31,4 +31,8 @@ def apply_model_adapter(runtime, cfg: dict) -> dict:
         template=template, eos_token=token_text(eos_id), bos_token=token_text(bos_id),
         stop_token_ids=[eos_id] if eos_id >= 0 else None,
     ).to_chat_handler()
-    return {'model_adapter': 'qwen', 'enable_thinking': enabled}
+    supports_tools = 'tools' in template and '<tool_call>' in template and 'tool_response' in template
+    tool_adapter = ('qwen35-xml' if '<function=' in template else 'qwen3-json') if supports_tools else None
+    return {'model_adapter': 'qwen', 'enable_thinking': enabled,
+            'tool_calling': tool_adapter,
+            'chat_template': 'gguf', 'architecture': runtime.metadata.get('general.architecture')}

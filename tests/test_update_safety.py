@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from tools import exe_launcher as desktop
+from backend.app import diagnostic_chat as shared_chat
 
 spec = importlib.util.spec_from_file_location('update_builder', Path(desktop.__file__).with_name('02_build_exe.py'))
 builder = importlib.util.module_from_spec(spec)
@@ -41,7 +42,7 @@ class UpdateSafetyTests(unittest.TestCase):
                 self.assertTrue((root/'dist/backend/app/core.py').exists())
 
     def test_history_is_not_truncated_after_120_messages(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'assistant_state_dir', return_value=Path(folder)):
+        with tempfile.TemporaryDirectory() as folder, patch.object(shared_chat, 'assistant_state_dir', return_value=Path(folder)):
             messages = [{'id':f'm-{i}', 'role':'user' if i % 2 == 0 else 'assistant',
                          'text':f'Message {i}', 'phase':'done'} for i in range(122)]
             desktop.write_chat_state({'source':'new-conversation','activeConversationId':'long',
@@ -53,7 +54,7 @@ class UpdateSafetyTests(unittest.TestCase):
             self.assertEqual(len(desktop.read_chat_state()['conversations'][0]['messages']),123)
 
     def test_41st_dialog_remains_active_without_deleting_others(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'assistant_state_dir', return_value=Path(folder)):
+        with tempfile.TemporaryDirectory() as folder, patch.object(shared_chat, 'assistant_state_dir', return_value=Path(folder)):
             old = [{'id':f'c-{i}','title':f'Chat {i}','messages':[]} for i in range(40)]
             desktop._write_chat_state_raw(desktop._normalize_chat_state({
                 'source':'new-conversation','activeConversationId':'c-0','conversations':old}))

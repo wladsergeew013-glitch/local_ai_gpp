@@ -1,5 +1,6 @@
+import { changedRuntime, clearSubmittedDraft } from './settingsPatch';
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { API_BASE, fetchBootstrap, fetchRuntimeStatus, prewarmModel, registerModelPath, saveSettings, streamChat, unloadModel, uploadModel } from './api';
+import { API_BASE, fetchBootstrap, fetchRuntimeStatus, prewarmModel, registerModelPath, saveRuntimePatch, streamChat, unloadModel, uploadModel } from './api';
 import type { ChatMessage, EngineSettings, ModelRecord, RuntimeStatus } from './types';
 import { APP_VERSION } from './version';
 import { contextSettingsError, estimateContext } from './contextBudget';
@@ -154,7 +155,8 @@ export default function App() {
 
   async function send(event: FormEvent) {
     event.preventDefault();
-    const text = input.trim();
+    const draft = input;
+    const text = draft.trim();
     if (!text || !modelId || generating || !syncReady) return;
     if (budgetError) { setStatus(budgetError); setShowContext(true); return; }
     const target = active;
@@ -169,7 +171,7 @@ export default function App() {
         const result = await jsonRequest('/api/desktop/chat-send', { ...payload, conversationId: target.id,
           conversationTitle: title, conversationCreatedAt: target.createdAt, assistant_id: assistantId, source: 'main-ui', baseVersion: remoteState.current?.version });
         if (result.state) applyRemote(result.state);
-        setInput(current => current === text ? '' : current); setStatus(stateStatus(chatRef.current));
+        setInput(current => clearSubmittedDraft(current,draft)); setStatus(stateStatus(chatRef.current));
       } catch (e) { setStatus(errorText(e)); }
       finally { setBusy(false); }
       return;
@@ -210,8 +212,8 @@ export default function App() {
     if (!settings) return;
     if (budgetError) { setStatus(budgetError); setShowContext(true); return; }
     try {
-      setSettings(await saveSettings({ ...settings, runtime: { ...settings.runtime, ...runtimeOptions,
-        warm_policy: warmPolicy as EngineSettings['runtime']['warm_policy'], temperature, max_tokens: maxTokens } }));
+      setSettings(await saveRuntimePatch(settings, changedRuntime(settings.runtime, { ...runtimeOptions,
+        warm_policy: warmPolicy as EngineSettings['runtime']['warm_policy'], temperature, max_tokens: maxTokens })));
       setStatus('Настройки сохранены');
     } catch (e) { setStatus(errorText(e)); }
   }

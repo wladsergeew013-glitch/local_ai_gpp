@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 
-def event_response(request: Request, events) -> StreamingResponse:
+def event_response(request: Request, events, *, on_close=None, headers=None) -> StreamingResponse:
     async def body():
         try:
             while True:
@@ -16,6 +16,10 @@ def event_response(request: Request, events) -> StreamingResponse:
         finally:
             # ASGI cancellation must not skip worker cleanup.
             with anyio.CancelScope(shield=True):
-                await run_in_threadpool(events.close)
+                try:
+                    await run_in_threadpool(events.close)
+                finally:
+                    if on_close is not None:
+                        await run_in_threadpool(on_close)
     return StreamingResponse(body(), media_type='text/event-stream',
-                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', **(headers or {})})

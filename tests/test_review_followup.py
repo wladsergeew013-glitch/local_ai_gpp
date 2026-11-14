@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from backend.app import core
 from tools import exe_launcher as desktop
+from backend.app import diagnostic_chat as shared_chat
 
 
 class TextWidget:
@@ -100,11 +101,11 @@ class FollowupTests(unittest.TestCase):
                 self.assertEqual(agent.state, 'error')
 
     def test_unchanged_reads_reuse_normalization_without_exposing_mutable_cache(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'assistant_state_dir', return_value=Path(folder)):
+        with tempfile.TemporaryDirectory() as folder, patch.object(shared_chat, 'assistant_state_dir', return_value=Path(folder)):
             payload = {'updatedAt': 1, 'activeConversationId': 'd', 'conversations': [
                 {'id': 'd', 'messages': [{'id': 'u', 'role': 'user', 'text': 'original'}]}]}
             path = desktop.chat_sync_file(); path.write_text(json.dumps(payload), encoding='utf-8')
-            with patch.object(desktop, '_normalize_chat_state', wraps=desktop._normalize_chat_state) as normalize:
+            with patch.object(shared_chat, '_normalize_chat_state', wraps=shared_chat._normalize_chat_state) as normalize:
                 first = desktop.read_chat_state()
                 first['conversations'][0]['messages'][0]['text'] = 'caller mutation'
                 self.assertEqual(desktop.read_chat_state()['conversations'][0]['messages'][0]['text'], 'original')
@@ -133,7 +134,7 @@ class FollowupTests(unittest.TestCase):
         self.assertEqual(agent.state, 'error')
 
     def test_idle_context_hint_skips_history_but_reacts_to_typed_input(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'assistant_state_dir', return_value=Path(folder)):
+        with tempfile.TemporaryDirectory() as folder, patch.object(shared_chat, 'assistant_state_dir', return_value=Path(folder)):
             desktop.read_chat_state()
             agent = renderer(); agent.context_label = TextWidget()
             agent.runtime = {'n_ctx': 4096}; agent.max_tokens = 512
@@ -146,7 +147,7 @@ class FollowupTests(unittest.TestCase):
                 agent._refresh_context_hint(); self.assertEqual(read.call_count, 1)
 
     def test_idle_ui_poll_does_not_read_unchanged_history(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'assistant_state_dir', return_value=Path(folder)):
+        with tempfile.TemporaryDirectory() as folder, patch.object(shared_chat, 'assistant_state_dir', return_value=Path(folder)):
             desktop.read_chat_state()
             agent = renderer(); agent._render_shared_history(force=True)
             with patch.object(desktop, 'read_chat_state', wraps=desktop.read_chat_state) as read:

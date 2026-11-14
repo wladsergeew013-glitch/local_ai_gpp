@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import contextlib
 import inspect
 import os
@@ -23,7 +24,7 @@ import httpx
 import anyio
 from fastapi import HTTPException
 from backend.app.model_paths import data_root, model_path
-from backend.app.settings_schema import validate_settings
+from backend.app.settings_schema import validate_settings, validate_runtime, validate_section, AccessPolicy, Server
 from backend.app.storage_paths import MAX_MODEL_UPLOAD_BYTES, checked_filename, contained_path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -319,35 +320,80 @@ def get_logo_url() -> str:
     return f"/assets/branding/{file.name}?v={int(file.stat().st_mtime)}"
 
 
+def _settings_revision() -> str:
+    try:return hashlib.sha256(SETTINGS_FILE.read_bytes()).hexdigest()
+    except FileNotFoundError:return 'new'
+    except OSError:return 'unreadable'
+
+
 def load_settings() -> dict[str, Any]:
-    try:
-        raw = _read_json(SETTINGS_FILE, DEFAULT_SETTINGS)
-        if not isinstance(raw, dict):
-            raise HTTPException(422, 'Settings must be an object')
-        merged = validate_settings(merge_dict(DEFAULT_SETTINGS, raw), DEFAULT_SETTINGS)
-    except HTTPException as exc:
-        logging.getLogger(__name__).warning('Settings preserved; using defaults: %s', exc.detail)
-        merged = merge_dict(DEFAULT_SETTINGS, {})
-        merged['settings_warning'] = str(exc.detail)
-    merged['branding']['logo_url'] = get_logo_url()
-    return merged
-
-
-def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise HTTPException(422, 'Settings must be an object')
     with JSON_LOCK:
-        # Partial writes merge with the current file under the same lock.
-        current = load_settings()
-        current.pop('settings_warning', None)
-        merged = validate_settings(merge_dict(current, payload), DEFAULT_SETTINGS)
-        merged['branding']['logo_url'] = get_logo_url()
-        if SETTINGS_FILE.exists():
+        raw = None
+        warnings = []
+        try:
+            raw = _read_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+            if not isinstance(raw,dict):raise HTTPException(422,'INVALID_SETTINGS: object required')
+            merged = merge_dict(DEFAULT_SETTINGS,raw)
+            for section,defaults in DEFAULT_SETTINGS.items():
+                try:validate_section(section,merged.get(section),defaults)
+                except HTTPException:
+                    warnings.append(section)
+                    merged[section]=merge_dict({section:defaults},{})[section]
+        except HTTPException:
+            merged=merge_dict(DEFAULT_SETTINGS,{})
+            warnings.append('file')
+        if warnings:
+            # Recover generation/UI settings independently from access decisions.
+            # Only the same parsed file may establish the access policy.
+            server = raw.get('server') if isinstance(raw,dict) else None
+            if isinstance(server,dict) and 'server' in warnings:
+                for field in Server.model_fields:
+                    if field not in server:continue
+                    try:merged['server'][field]=getattr(Server.model_validate({field:server[field]}),field)
+                    except ValueError:
+                        if field=='cors_origins':merged['server'][field]=[]
             try:
-                validate_settings(merge_dict(DEFAULT_SETTINGS, json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))), DEFAULT_SETTINGS)
-            except (HTTPException, ValueError, TypeError, AttributeError):
-                shutil.copy2(SETTINGS_FILE, SETTINGS_FILE.with_name(SETTINGS_FILE.name + '.invalid-' + uuid.uuid4().hex))
-        _write_json(SETTINGS_FILE, merged)
+                if not isinstance(server,dict) or not any(k in server for k in ('api_key','openai_compat_enabled')):
+                    raise ValueError('No valid policy in damaged file')
+                policy=AccessPolicy.model_validate({k:server[k] for k in ('api_key','openai_compat_enabled') if k in server})
+                merged['server'].update(policy.model_dump(include={'api_key','openai_compat_enabled'}))
+            except ValueError:
+                merged['server'].update(api_key='',openai_compat_enabled=False)
+                merged['_access_policy_error']='SETTINGS_POLICY_UNAVAILABLE'
+                merged['server']['cors_origins']=[]
+            merged['settings_warning']='Invalid settings preserved; defaults used for: '+', '.join(warnings)
+        merged['branding']['logo_url']=get_logo_url()
+        merged['_revision']=_settings_revision()
+        return merged
+
+
+def public_settings(settings=None):
+    result=merge_dict(settings if settings is not None else load_settings(),{})
+    server=result['server']; server['api_key_configured']=bool(server.pop('api_key',''))
+    result['hub']['token_configured']=bool(result['hub'].pop('token',''))
+    return result
+
+
+def save_settings(payload: dict[str, Any], *, expected_revision=None) -> dict[str, Any]:
+    if not isinstance(payload,dict):raise HTTPException(422,'INVALID_SETTINGS: object required')
+    with JSON_LOCK:
+        if expected_revision is not None and expected_revision != _settings_revision():
+            raise HTTPException(409,{'code':'SETTINGS_CONFLICT','message':'Settings changed; reload before saving.'})
+        current=load_settings()
+        if current.get('_access_policy_error'):
+            policy=payload.get('server')
+            if not isinstance(policy,dict) or not {'api_key','openai_compat_enabled'} <= policy.keys():
+                raise HTTPException(503,'SETTINGS_POLICY_UNAVAILABLE: explicitly restore the server access policy first')
+        for key in ('settings_warning','_access_policy_error','_revision'):current.pop(key,None)
+        update={k:v for k,v in payload.items() if not k.startswith('_') and k!='settings_warning'}
+        merged=validate_settings(merge_dict(current,update),DEFAULT_SETTINGS)
+        merged['branding']['logo_url']=get_logo_url()
+        if SETTINGS_FILE.exists():
+            try:validate_settings(merge_dict(DEFAULT_SETTINGS,json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))),DEFAULT_SETTINGS)
+            except (HTTPException,ValueError,TypeError,AttributeError):
+                shutil.copy2(SETTINGS_FILE,SETTINGS_FILE.with_name(SETTINGS_FILE.name+'.invalid-'+uuid.uuid4().hex))
+        _write_json(SETTINGS_FILE,merged)
+        merged['_revision']=_settings_revision()
         return merged
 
 
@@ -498,6 +544,7 @@ def make_model_record(
 
 
 def upsert_model(record: dict[str, Any]) -> dict[str, Any]:
+    validate_runtime(record.get('runtime', {}))
     checked = validate_model_record(record)
     with JSON_LOCK:
         models = [m for m in load_models() if m.get("id") != checked.get("id")]
@@ -579,8 +626,16 @@ def _commit_model_file(record: dict[str, Any], temporary: Path, target: Path) ->
         os.replace(temporary, target)
         result = upsert_model(record)
         if previous:
-            _retire_managed_upload(previous.get("path"))
+            _cleanup_retired_upload(previous.get("path"))
         return result
+
+
+def _cleanup_retired_upload(value: Any) -> None:
+    # Registry + new file are committed. Collection must never roll them back.
+    try:
+        _retire_managed_upload(value)
+    except Exception:
+        logging.getLogger(__name__).warning('Old model cleanup deferred; committed model retained.', exc_info=True)
 
 
 def copy_uploaded_model(name: str, incoming_filename: str, file_obj: Any, *,
@@ -661,6 +716,7 @@ def register_model_path(
     runtime: dict[str, Any] | None = None,
     source: str = "server_path",
 ) -> dict[str, Any]:
+    validate_runtime(runtime if runtime is not None else {})
     path_obj = resolve_model_file_path(model_path)
     if not path_obj.is_file():
         raise HTTPException(400, 'Model path must reference a file')
@@ -675,7 +731,7 @@ def register_model_path(
         _unload_runtime(record['id'])
         result = upsert_model(record)
         if previous:
-            _retire_managed_upload(previous.get('path'))
+            _cleanup_retired_upload(previous.get('path'))
         return result
 
 
@@ -684,11 +740,11 @@ def _merge_runtime(
     settings: dict[str, Any],
     runtime_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    model_runtime = model.get("runtime") if isinstance(model.get("runtime"), dict) else {}
+    model_runtime = validate_runtime(model.get("runtime") if model.get("runtime") is not None else {})
     merged = merge_dict(settings.get("runtime", {}), model_runtime)
-    if runtime_override:
-        merged = merge_dict(merged, runtime_override)
-    return merged
+    if runtime_override is not None:
+        merged = merge_dict(merged, validate_runtime(runtime_override))
+    return validate_runtime(merged, check_context=False)
 
 
 def _int_value(value: Any, default: int) -> int:
@@ -1074,8 +1130,10 @@ def get_runtime(model, settings, request_log_path=None, runtime_override=None):
 
 
 def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
-                       request_log_path=None, runtime_override=None, truncate_history=False):
-    with runtime_operation():
+                       request_log_path=None, runtime_override=None, truncate_history=False,
+                       tools=None, tool_choice='auto', lease=None):
+    from backend.app.runtime_manager import runtime_manager
+    with runtime_manager.operation(lease) as admitted:
         _, model, _ = find_model(model_id)
         settings = load_settings()
         cfg = _merge_runtime(model, settings, runtime_override)
@@ -1085,14 +1143,17 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         worker = _get_runtime(model, settings, request_log_path, runtime_override, prewarm=False)
+        admitted.attach(worker)
         entry = RUNTIMES[model_id]
         entry.update(state='generating' if entry.get('model_loaded') else 'loading', last_used_at=now_iso(), last_used_ts=time.time())
         events = None
         try:
             append_request_log(request_log_path, "generation_start", {"message_count": len(messages), "worker_pid": worker.process.pid})
             events = _worker_events(worker, _worker_payload(model, cfg, messages=messages, temperature=temperature,
-                max_tokens=max_tokens, stream=stream, truncate_history=truncate_history and cfg.get('context_overflow', 'trim') == 'trim'))
+                max_tokens=max_tokens, stream=stream, tools=tools or [], tool_choice=tool_choice,
+                truncate_history=truncate_history and cfg.get('context_overflow', 'trim') == 'trim'))
             for event in events:
+                admitted.check()
                 if event.get('type') in {'runtime', 'ready', 'done', 'result'}:
                     entry.update(model_loaded=True, state='generating')
                 if event.get("type") == "error":
@@ -1111,10 +1172,11 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
 
 
 def create_chat_completion(*, model_id, messages, temperature, max_tokens, request_log_path=None,
-                           runtime_override=None, truncate_history=False):
+                           runtime_override=None, truncate_history=False, tools=None, tool_choice='auto', lease=None):
     for event in _completion_events(model_id=model_id, messages=messages, temperature=temperature,
                                    max_tokens=max_tokens, stream=False, request_log_path=request_log_path,
-                                   runtime_override=runtime_override, truncate_history=truncate_history):
+                                   runtime_override=runtime_override, truncate_history=truncate_history,
+                                   tools=tools, tool_choice=tool_choice, lease=lease):
         if event.get("type") == "result":
             return event["result"]
     raise HTTPException(502, "Worker did not return a completion.")

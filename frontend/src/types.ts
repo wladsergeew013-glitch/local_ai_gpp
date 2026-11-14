@@ -109,6 +109,7 @@ export type LayoutSettings = {
 };
 
 export type EngineSettings = {
+  _revision?: string;
   branding: BrandingSettings;
   theme: ThemeSettings;
   layout: LayoutSettings;

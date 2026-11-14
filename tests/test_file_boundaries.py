@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.staticfiles import StaticFiles
 from backend.app import core
-from tools import exe_launcher as desktop
+from backend.app import ui_resources as desktop
 
 
 class FileBoundaryTests(unittest.TestCase):

@@ -13,6 +13,11 @@ frontend/dist/
 frontend/*.log
 frontend/*.tsbuildinfo
 frontend/tsconfig*.tsbuildinfo
+workspace/frontend/node_modules/
+workspace/frontend/dist/
+workspace/frontend/*.tsbuildinfo
+workspace/dist/
+workspace/build/
 
 # Build outputs
 dist/

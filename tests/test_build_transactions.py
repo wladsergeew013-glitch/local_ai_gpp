@@ -50,6 +50,10 @@ class BuildTransactionTests(unittest.TestCase):
         old=self.root/'dist/LocalAIGPP.exe'; old.write_bytes(b'previous')
         state=self.root/'dist/assistant_state'; state.mkdir(); (state/'history.json').write_text('private')
         candidate=self.root/'out/candidate'; candidate.mkdir(); (candidate/'LocalAIGPP.exe').write_bytes(b'new')
+        for name,contents in {'VERSION':'1.5.0','runtime_info.json':'{}','worker_runtime/python.exe':'python',
+                              'backend/app/llama_worker.py':'worker','models_storage/models.json':'[]',
+                              'models_storage/settings.json':'{}'}.items():
+            file=candidate/name; file.parent.mkdir(parents=True,exist_ok=True);file.write_text(contents)
         original=Path.rename
         def fail(source,target):
             if source == candidate: raise OSError('cannot promote')

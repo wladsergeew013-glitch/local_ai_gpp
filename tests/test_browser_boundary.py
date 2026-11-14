@@ -4,13 +4,14 @@ from pathlib import Path
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from tools import exe_launcher as desktop
+from backend.app import diagnostic_chat as shared_chat
 
 
 class BrowserBoundaryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        p = patch.object(desktop, 'assistant_state_dir', return_value=self.root); p.start(); self.addCleanup(p.stop)
+        p = patch.object(shared_chat, 'assistant_state_dir', return_value=self.root); p.start(); self.addCleanup(p.stop)
         self.state = desktop.write_chat_state({'source': 'new-conversation', 'conversations': [
             {'id': 'safe', 'messages': [{'id': 'u', 'role': 'user', 'text': 'Preserve history'}]}]})
         self.client = TestClient(desktop.app, base_url='http://127.0.0.1:8765')
