@@ -9,7 +9,7 @@ import shutil
 import sys
 import threading
 from pathlib import Path
-from workspace.app.store import ACTIVE, identifier, now
+from workspace.app.store import ACTIVE, SCHEMA_VERSION, identifier, now
 from workspace.app.runtime_client import RuntimeClient
 from workspace.app.owned_process import OwnedProcess
 from workspace.app import history, project_diff
@@ -33,9 +33,27 @@ class TaskService:
         permission="read-only",
         title="",
         connector_ids=None,
+        mode="agent",
+        memory=True,
     ):
         if permission not in {"read-only", "workspace-write"}:
             raise ValueError("Unsupported permission preset.")
+        if mode not in {"chat", "agent"}:
+            raise ValueError("Unknown conversation mode.")
+        if not project_id:
+            if mode == "agent":
+                raise ValueError("Для доступа к файлам сначала подключите проект.")
+            project_id = "__direct_chats__"
+            with self.store.transaction() as db:
+                db.execute(
+                    "INSERT OR IGNORE INTO projects VALUES(?,?,?,?)",
+                    (
+                        project_id,
+                        "Диалоги без проекта",
+                        str(self.store.root / "chat-files"),
+                        now(),
+                    ),
+                )
         self.store.one("projects", project_id)
         self.store.one("providers", provider_id)
         for connector_id in connector_ids or []:
@@ -52,12 +70,16 @@ class TaskService:
                     current["prompt"],
                     current["permission"],
                     current["details"].get("connector_ids", []),
+                    current["details"].get("mode", "agent"),
+                    current["details"].get("memory", True),
                 ) != (
                     project_id,
                     provider_id,
                     prompt,
                     permission,
                     list(dict.fromkeys(connector_ids or [])),
+                    mode,
+                    memory,
                 ):
                     raise ValueError(
                         "ACTION_CONFLICT: this action ID already describes a different task."
@@ -66,7 +88,7 @@ class TaskService:
             task_id = identifier()
             stamp = now()
             db.execute(
-                "INSERT INTO tasks(id,project_id,provider_id,title,prompt,status,session_id,created_at,updated_at,permission,action_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO tasks(id,project_id,provider_id,title,prompt,status,session_id,created_at,updated_at,permission,action_id,details) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task_id,
                     project_id,
@@ -79,6 +101,13 @@ class TaskService:
                     stamp,
                     permission,
                     action_id,
+                    json.dumps(
+                        {
+                            "mode": mode,
+                            "memory": memory,
+                            "connector_ids": list(dict.fromkeys(connector_ids or [])),
+                        }
+                    ),
                 ),
             )
         self.store.event(
@@ -87,10 +116,6 @@ class TaskService:
             {"prompt": prompt, "permission": permission},
             "created",
         )
-        if connector_ids:
-            self.store.update_task(
-                task_id, details={"connector_ids": list(dict.fromkeys(connector_ids))}
-            )
         return self.store.one("tasks", task_id)
 
     def start(
@@ -101,6 +126,7 @@ class TaskService:
         restore_only=False,
         new_prompt=None,
         workspace_url=None,
+        memory=None,
     ):
         with self.lock:
             if self.processes:
@@ -115,6 +141,14 @@ class TaskService:
                 raise ValueError(
                     "RECOVERY_REQUIRES_RECONCILIATION: restore history, then explicitly send a new instruction."
                 )
+            if task["details"].get("mode") == "chat":
+                if restore_only:
+                    return self.store.update_task(
+                        task_id,
+                        "restored",
+                        {"partial": "", "error": "", "replayed": False},
+                    )
+                return self._start_chat(task, new_prompt or task["prompt"], memory)
             if resume:
                 history.reconcile(self.store, task)
             provider = self.store.one("providers", task["provider_id"])
@@ -203,8 +237,42 @@ class TaskService:
                 raise
         return self.store.one("tasks", task_id)
 
+    def _start_chat(self, task, prompt, memory):
+        from workspace.app.chat_run import ChatRun
+        from workspace.app.desktop_host import activity
+
+        task_id = task["id"]
+        token = secrets.token_urlsafe(32)
+        self.tokens[task_id] = token
+        remember = task["details"].get("memory", True) if memory is None else memory
+        self.store.update_task(
+            task_id, "running", {"partial": "", "error": "", "memory": remember}
+        )
+
+        def finished(status, error):
+            with self.lock:
+                self.store.update_task(task_id, status, {"partial": "", "error": error})
+                self.processes.pop(task_id, None)
+                self.tokens.pop(task_id, None)
+                activity("error" if status == "failed" else "idle")
+
+        run = ChatRun(
+            self.store,
+            task,
+            self.store.one("providers", task["provider_id"]),
+            token,
+            prompt,
+            remember,
+            finished,
+        )
+        self.processes[task_id] = run
+        activity("running")
+        run.start()
+        return self.store.one("tasks", task_id)
+
     def _event(self, task_id, event):
         from workspace.app.desktop_host import activity
+
         kind = event.get("kind", "unknown")
         key = None
         if kind == "notification" and event.get("method") == "session.event":
@@ -215,7 +283,7 @@ class TaskService:
                 self.store.event(task_id, "dsh", item, key)
                 return
         if kind in {"approval", "question"}:
-            activity('awaiting_permission')
+            activity("awaiting_permission")
             approval_id = identifier()
             with self.store.transaction() as db:
                 db.execute(
@@ -233,7 +301,7 @@ class TaskService:
             self.store.update_task(task_id, "awaiting_permission")
             event = {**event, "approval_id": approval_id}
         elif kind == "started":
-            activity('running')
+            activity("running")
             self.store.update_task(task_id, "running")
         elif kind == "identity":
             self.store.update_task(task_id, details={"adapter": event})
@@ -243,7 +311,8 @@ class TaskService:
 
     def _exit(self, task_id, code, error):
         from workspace.app.desktop_host import activity
-        activity('idle')
+
+        activity("idle")
         with self.lock:
             current = self.store.one("tasks", task_id)
             result = self.results.pop(task_id, None)
@@ -436,15 +505,18 @@ class TaskService:
         with self.lock:
             if self.processes:
                 raise ValueError(
-                    "Stop tasks before taking a consistent application snapshot."
+                    "Дождитесь ответа или остановите его перед созданием резервной копии."
                 )
             target = self.store.snapshot(self.store.root / "snapshots" / identifier())
             source = self.store.root / "tasks"
             if source.exists():
                 shutil.copytree(source, target / "tasks")
+            preferences = self.store.root / "mini-helper.json"
+            if preferences.is_file():
+                shutil.copy2(preferences, target / preferences.name)
             return {
                 "path": str(target),
-                "schema_version": 1,
+                "schema_version": SCHEMA_VERSION,
                 "dsh_version": "0.2.2rc2",
                 "includes_sessions": True,
             }

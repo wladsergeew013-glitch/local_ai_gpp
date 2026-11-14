@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from workspace.app.store import Store, data_root, identifier, now
+from workspace.app.store import Store, data_root, identifier, now, SCHEMA_VERSION
 from workspace.app.task_service import TaskService
 from workspace.app.runtime_client import RuntimeClient, local_url
 from workspace.app.history import reconcile
@@ -80,17 +80,27 @@ def create_app(root=None):
     def tasks(request):
         return request.app.state.tasks
 
-    @app.get('/api/host/status')
+    @app.get("/api/host/status")
     def host_status():
         from workspace.app import desktop_host
+
         return desktop_host.status()
 
-    @app.post('/api/host/{action}')
-    def host_action(action:str,request:Request,payload:dict|None=None):
+    @app.post("/api/host/{action}")
+    def host_action(action: str, request: Request, payload: dict | None = None):
         from workspace.app import desktop_host
-        names={'open-main':'show_main','show-mini':'show_mini','hide-mini':'hide_mini','exit':'exit'}
-        if action not in names:raise HTTPException(404,'Unknown desktop action')
-        return desktop_host.invoke(names[action],payload)
+
+        names = {
+            "open-main": "show_main",
+            "show-avatar": "show_avatar",
+            "choose-folder": "choose_folder",
+            "show-mini": "show_mini",
+            "hide-mini": "hide_mini",
+            "exit": "exit",
+        }
+        if action not in names:
+            raise HTTPException(404, "Unknown desktop action")
+        return desktop_host.invoke(names[action], payload)
 
     @app.get("/api/health")
     def health():
@@ -98,7 +108,7 @@ def create_app(root=None):
             "ok": True,
             "product": "Local AI Workspace",
             "version": VERSION,
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "sdk_version": "0.2.2rc2",
         }
 
@@ -107,12 +117,14 @@ def create_app(root=None):
         db = store(request)
         return {
             "version": VERSION,
-            "projects": db.rows("SELECT * FROM projects ORDER BY created_at DESC"),
+            "projects": db.rows(
+                "SELECT p.*, COALESCE(s.source, 'folder') AS source, COALESCE(s.url, '') AS github_url FROM projects p LEFT JOIN project_sources s ON p.id=s.project_id WHERE p.id!='__direct_chats__' ORDER BY p.created_at DESC"
+            ),
             "providers": db.rows(
                 "SELECT id,name,base_url,model,(api_key!='') AS api_key_configured FROM providers"
             ),
             "tasks": db.rows(
-                "SELECT id,project_id,provider_id,title,status,revision,updated_at FROM tasks ORDER BY created_at DESC"
+                "SELECT id,CASE WHEN project_id='__direct_chats__' THEN NULL ELSE project_id END AS project_id,provider_id,title,status,revision,updated_at,COALESCE(json_extract(details,'$.mode'),'agent') AS mode FROM tasks ORDER BY created_at DESC"
             ),
             "connectors": db.rows(
                 "SELECT id,name,base_url,allow_write,(api_key!='') AS api_key_configured FROM connectors"
@@ -121,27 +133,11 @@ def create_app(root=None):
 
     @app.post("/api/projects")
     def project(payload: ProjectInput, request: Request):
-        from workspace.app.project_diff import git_files
+        from workspace.app.projects import create_project
 
-        path = Path(payload.path).expanduser().resolve(strict=True)
-        if not path.is_dir():
-            raise ValueError("Project must be a directory.")
-        git_files(path)
-        db = store(request)
-        existing = db.rows("SELECT * FROM projects WHERE path=?", (str(path),))
-        if existing:
-            return existing[0]
-        value = {
-            "id": identifier(),
-            "name": payload.name,
-            "path": str(path),
-            "created_at": now(),
-        }
-        with db.transaction() as connection:
-            connection.execute(
-                "INSERT INTO projects VALUES(?,?,?,?)", tuple(value.values())
-            )
-        return value
+        return create_project(
+            store(request), payload.name, payload.path, payload.github_url
+        )
 
     @app.post("/api/providers")
     def provider(payload: ProviderInput, request: Request):
@@ -175,9 +171,47 @@ def create_app(root=None):
             result["capabilities"] = client.capabilities()
         return result
 
+    @app.post("/api/providers/{provider_id}")
+    def update_provider(provider_id: str, payload: ProviderInput, request: Request):
+        old = store(request).one("providers", provider_id)
+        base = local_url(payload.base_url)
+        if not urlsplit(base).path.rstrip("/").endswith("/v1"):
+            raise ValueError("Адрес Runtime должен заканчиваться на /v1.")
+        with store(request).transaction() as db:
+            db.execute(
+                "UPDATE providers SET name=?,base_url=?,model=?,api_key=? WHERE id=?",
+                (
+                    payload.name,
+                    base,
+                    payload.model,
+                    payload.api_key or old["api_key"],
+                    provider_id,
+                ),
+            )
+        return {
+            "id": provider_id,
+            "name": payload.name,
+            "base_url": base,
+            "model": payload.model,
+        }
+
+    @app.post("/api/providers/{provider_id}/probe")
+    def probe_saved_provider(
+        provider_id: str, payload: ProviderInput, request: Request
+    ):
+        old = store(request).one("providers", provider_id)
+        client = RuntimeClient(
+            {**payload.model_dump(), "api_key": payload.api_key or old["api_key"]}
+        )
+        return {
+            "models": client.request("GET", "models").get("data", []),
+            "ready": client.request("GET", "runtime/readiness"),
+        }
+
+    @app.post("/api/chats")
     @app.post("/api/tasks")
     def create_task(payload: TaskInput, request: Request):
-        return tasks(request).create(
+        result = tasks(request).create(
             payload.project_id,
             payload.provider_id,
             payload.prompt,
@@ -185,12 +219,25 @@ def create_app(root=None):
             payload.permission,
             payload.title,
             payload.connector_ids,
+            mode=(
+                payload.mode
+                if "mode" in payload.model_fields_set
+                else ("chat" if request.url.path == "/api/chats" else "agent")
+            ),
+            memory=payload.memory,
         )
 
+        if result["project_id"] == "__direct_chats__":
+            result["project_id"] = None
+        return result
+
+    @app.get("/api/chats/{task_id}")
     @app.get("/api/tasks/{task_id}")
     def task(task_id: str, request: Request):
         db = store(request)
         value = db.one("tasks", task_id)
+        if value["project_id"] == "__direct_chats__":
+            value["project_id"] = None
         approvals = db.rows(
             "SELECT * FROM approvals WHERE task_id=? AND status='pending' ORDER BY created_at",
             (task_id,),
@@ -200,6 +247,7 @@ def create_app(root=None):
         ]
         return value
 
+    @app.get("/api/chats/{task_id}/events")
     @app.get("/api/tasks/{task_id}/events")
     def events(task_id: str, request: Request, after: int = 0):
         db = store(request)
@@ -213,16 +261,40 @@ def create_app(root=None):
             "cursor": rows[-1]["seq"] if rows else after,
         }
 
+    @app.get("/api/chats/{task_id}/messages")
+    def chat_messages(task_id: str, request: Request, version: int = -1):
+        from workspace.app.conversation_messages import MESSAGE_FILTER, project_messages
+
+        db = store(request)
+        db.one("tasks", task_id)
+        current = db.rows(
+            "SELECT COALESCE(MAX(seq),0) AS version FROM events WHERE task_id=? AND "
+            + MESSAGE_FILTER,
+            (task_id,),
+        )[0]["version"]
+        if version == current:
+            return {"version": current, "messages": None}
+        rows = db.rows(
+            "SELECT seq,kind,created_at,payload FROM events WHERE task_id=? AND "
+            + MESSAGE_FILTER
+            + " ORDER BY seq",
+            (task_id,),
+        )
+        return {"version": current, "messages": project_messages(rows)}
+
+    @app.post("/api/chats/{task_id}/start")
     @app.post("/api/tasks/{task_id}/start")
     def start(task_id: str, payload: TaskAction, request: Request):
         return tasks(request).start(
             task_id, payload.revision, workspace_url=str(request.base_url)
         )
 
+    @app.post("/api/chats/{task_id}/stop")
     @app.post("/api/tasks/{task_id}/stop")
     def stop(task_id: str, payload: TaskAction, request: Request):
         return tasks(request).stop(task_id, payload.revision)
 
+    @app.post("/api/chats/{task_id}/restore")
     @app.post("/api/tasks/{task_id}/restore")
     def restore(task_id: str, payload: TaskAction, request: Request):
         return tasks(request).start(
@@ -232,6 +304,7 @@ def create_app(root=None):
             workspace_url=str(request.base_url),
         )
 
+    @app.post("/api/chats/{task_id}/continue")
     @app.post("/api/tasks/{task_id}/continue")
     def followup(task_id: str, payload: Followup, request: Request):
         current = store(request).one("tasks", task_id)
@@ -243,13 +316,19 @@ def create_app(root=None):
             task_id,
             payload.revision,
             new_prompt=payload.prompt,
+            memory=payload.memory,
             workspace_url=str(request.base_url),
         )
 
+    @app.post("/api/chats/{task_id}/reconcile")
     @app.post("/api/tasks/{task_id}/reconcile")
     def reconcile_task(task_id: str, request: Request):
-        return reconcile(store(request), store(request).one("tasks", task_id))
+        current = store(request).one("tasks", task_id)
+        if current["details"].get("mode") == "chat":
+            return {"source": "workspace", "replayed": False}
+        return reconcile(store(request), current)
 
+    @app.get("/api/chats/{task_id}/diff")
     @app.get("/api/tasks/{task_id}/diff")
     def diff(task_id: str, request: Request):
         return tasks(request).diff(task_id)
@@ -291,6 +370,7 @@ def create_app(root=None):
 
         return write_item(store(request), connector_id, payload.model_dump())
 
+    @app.post("/api/chats/{task_id}/mcp")
     @app.post("/api/tasks/{task_id}/mcp")
     def connector_mcp(task_id: str, payload: dict, request: Request):
         from workspace.app.connector_mcp import handle
@@ -333,7 +413,8 @@ def create_app(root=None):
 
 class ProjectInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    path: str = Field(min_length=1, max_length=4096)
+    path: str = Field(default="", max_length=4096)
+    github_url: str = Field(default="", max_length=500)
 
 
 class ProviderInput(BaseModel):
@@ -344,10 +425,12 @@ class ProviderInput(BaseModel):
 
 
 class TaskInput(BaseModel):
-    project_id: str
+    project_id: str | None = None
     provider_id: str
     prompt: str = Field(min_length=1, max_length=100000)
     title: str = ""
+    mode: str = "agent"
+    memory: bool = True
     action_id: str = Field(min_length=16, max_length=128)
     permission: str = "read-only"
     connector_ids: list[str] = Field(default_factory=list, max_length=16)
@@ -358,6 +441,7 @@ class TaskAction(BaseModel):
 
 
 class Followup(TaskAction):
+    memory: bool | None = None
     prompt: str = Field(min_length=1, max_length=100000)
 
 

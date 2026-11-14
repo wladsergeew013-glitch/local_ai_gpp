@@ -371,5 +371,47 @@
     ],
     "agent_rerun": false
   },
-  "benchmark_scope": "Source integration before final UI and exact-tool-usage changes, three real modules with injected regressions; not general coding quality"
+  "benchmark_scope": "Source integration before final UI and exact-tool-usage changes, three real modules with injected regressions; not general coding quality",
+  "workspace_chat_acceptance": {
+    "schema_version": 2,
+    "runtime_tests": 136,
+    "workspace_tests": 28,
+    "frontend_tests": 11,
+    "model": "Qwen3.5 4B Q4_K_M",
+    "plain_chat_requires_project": false,
+    "plain_chat_requires_git": false,
+    "plain_chat_runs_harness": false,
+    "memory_recall": "ORBIT",
+    "memory_can_be_disabled": true,
+    "generation_cancelled": true,
+    "native_panel": {
+      "renderer": "Tk",
+      "anchor": "left with pointer",
+      "modal": false,
+      "frozen_self_test_passed": true,
+      "manual_scroll_preserved": true,
+      "per_dialogue_drafts": true
+    },
+    "browser": {
+      "runtime_connection_visible": true,
+      "runtime_settings_link": true,
+      "unified_settings": true,
+      "backup_under_data_settings": true,
+      "user_right_assistant_left": true,
+      "compact_layout": true
+    },
+    "frozen_legacy_recovery": {
+      "schema_version": 2,
+      "canonical_events": 57,
+      "tool_calls_before": 7,
+      "tool_calls_after": 7,
+      "replayed": false
+    },
+    "project_sources": [
+      "none",
+      "folder without Git",
+      "GitHub clone"
+    ],
+    "manual_desktop_click_check": "Not completed after user stopped Computer Use"
+  }
 }

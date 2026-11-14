@@ -28,16 +28,51 @@ def git_files(project: Path):
             )
         return result.stdout
 
-    if git("rev-parse", "--is-inside-work-tree").strip() != b"true":
-        raise ValueError("A Git working tree is required.")
+    try:
+        inside = git("rev-parse", "--is-inside-work-tree").strip() == b"true"
+    except (ValueError, FileNotFoundError):
+        inside = False
+    if not inside:
+        paths = []
+        skipped = {
+            ".git",
+            ".venv",
+            "venv",
+            "node_modules",
+            "__pycache__",
+            "dist",
+            "build",
+        }
+        for directory, folders, files in os.walk(project, followlinks=False):
+            folders[:] = [
+                name
+                for name in folders
+                if name not in skipped
+                and not (Path(directory) / name).is_symlink()
+                and not (
+                    getattr((Path(directory) / name).lstat(), "st_file_attributes", 0)
+                    & 0x400
+                )
+            ]
+            paths.extend(
+                (Path(directory) / name).relative_to(project).as_posix()
+                for name in files
+            )
+            if len(paths) > 20000:
+                raise ValueError(
+                    "Папка слишком велика для сравнения. Подключите более узкую папку или Git-репозиторий."
+                )
+        return paths, ""
     paths = (
         git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
         .decode("utf-8", "replace")
         .split("\0")
     )
-    return [p for p in dict.fromkeys(paths) if p], git(
-        "rev-parse", "HEAD"
-    ).decode().strip()
+    try:
+        head = git("rev-parse", "HEAD").decode().strip()
+    except ValueError:
+        head = ""
+    return [p for p in dict.fromkeys(paths) if p], head
 
 
 def capture(project: Path, destination: Path):

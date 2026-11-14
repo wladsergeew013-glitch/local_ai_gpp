@@ -43,7 +43,7 @@ def work_area(x=None, y=None):
             ("flags", wintypes.DWORD),
         ]
 
-    api = ctypes.windll.user32
+    api = ctypes.WinDLL("user32", use_last_error=True)
     if x is None or y is None:
         rect = wintypes.RECT()
         api.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
@@ -69,7 +69,7 @@ def position_window(root, x, y):
         # Windows desktop coordinates can be negative on a secondary monitor.
         import ctypes
 
-        api = ctypes.windll.user32
+        api = ctypes.WinDLL("user32", use_last_error=True)
         api.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         api.GetAncestor.restype = ctypes.c_void_p
         api.SetWindowPos.argtypes = [
@@ -90,8 +90,12 @@ def position_window(root, x, y):
 
 
 class MiniAvatar:
-    def __init__(self, root, on_bubble, on_main, on_exit, *, start_hidden=False):
+    def __init__(
+        self, root, on_bubble, on_main, on_exit, *, start_hidden=False, api_base=None
+    ):
         self.data = root
+        self.api_base = api_base
+        self.chat = None
         self.on_bubble = on_bubble
         self.on_main = on_main
         self.on_exit = on_exit
@@ -120,6 +124,15 @@ class MiniAvatar:
     def hide(self):
         self._submit("hide")
 
+    def show_chat(self):
+        self._submit("show_chat")
+
+    def hide_chat(self):
+        self._submit("hide_chat")
+
+    def toggle_chat(self):
+        self._submit("toggle_chat")
+
     def set_state(self, state):
         self._submit("state", state)
 
@@ -133,7 +146,15 @@ class MiniAvatar:
         target = self.data / "mini-helper.json"
         stage = target.with_suffix(".tmp")
         stage.write_text(
-            json.dumps({"version": 1, "x": self.position[0], "y": self.position[1]}),
+            json.dumps(
+                {
+                    "version": 2,
+                    "x": self.position[0],
+                    "y": self.position[1],
+                    "chat": self.chat.prefs() if self.chat else {},
+                },
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
         os.replace(stage, target)
@@ -167,6 +188,7 @@ class MiniAvatar:
                 root.iconbitmap(default=str(icon_path()))
             left, top, right, bottom = work_area()
             x, y = right - self.width - 30, bottom - self.height - 25
+            saved = {}
             try:
                 saved = json.loads(
                     (self.data / "mini-helper.json").read_text(encoding="utf-8")
@@ -209,24 +231,41 @@ class MiniAvatar:
                     pictures["ready"] = [ImageTk.PhotoImage(picture, master=root)]
                 else:
                     avatar.configure(
-                        text="W", fg="#2867dc", font=("Segoe UI", 60, "bold")
+                        text="✓", fg="#25a957", font=("Segoe UI", 60, "bold")
                     )
             badge = tk.Label(
                 root,
-                text="W",
-                font=("Segoe UI", 11, "bold"),
+                text="✓",
+                font=("Segoe UI", 17, "bold"),
                 fg="white",
-                bg="#2969df",
+                bg="#25a957",
                 padx=5,
                 pady=2,
+                borderwidth=2,
+                relief="solid",
             )
-            badge.place(relx=0.74, rely=0.08)
+            size = max(30, min(42, int(self.width * 0.22)))
+            badge.place(x=self.width - size - 12, y=14, width=size, height=size)
+            if self.api_base:
+                from workspace.app.native_chat import NativeChatBubble
+
+                self.chat = NativeChatBubble(
+                    root,
+                    self.api_base,
+                    lambda: self.position,
+                    self.on_main,
+                    self._save,
+                    prefs=saved.get("chat"),
+                    hidden=self.start_hidden,
+                )
             drag = {"origin": None, "moved": False}
 
             def begin(event):
                 drag.update(
                     origin=(event.x_root, event.y_root, *self.position), moved=False
                 )
+                if os.name == "nt":
+                    root.after(12, poll_drag)
 
             def move(event):
                 if not drag["origin"]:
@@ -244,15 +283,38 @@ class MiniAvatar:
                 )
                 self.position = (x, y)
                 position_window(root, x, y)
+                if self.chat:
+                    self.chat.reposition()
 
             def end(event):
+                if not drag["origin"]:
+                    return
                 if drag["moved"]:
                     self._save()
                 else:
-                    threading.Thread(
-                        target=lambda: self.on_bubble(self.position), daemon=True
-                    ).start()
+                    if self.chat:
+                        self.chat.toggle()
+                    else:
+                        threading.Thread(
+                            target=lambda: self.on_bubble(self.position), daemon=True
+                        ).start()
                 drag["origin"] = None
+
+            def poll_drag():
+                if not drag["origin"]:
+                    return
+                import ctypes
+                from ctypes import wintypes
+                from types import SimpleNamespace
+
+                api = ctypes.WinDLL("user32", use_last_error=True)
+                point = wintypes.POINT()
+                if api.GetCursorPos(ctypes.byref(point)):
+                    move(SimpleNamespace(x_root=point.x, y_root=point.y))
+                if not (api.GetAsyncKeyState(1) & 0x8000):
+                    end(None)
+                else:
+                    root.after(12, poll_drag)
 
             menu = tk.Menu(root, tearoff=False)
             menu.add_command(
@@ -267,7 +329,7 @@ class MiniAvatar:
                     target=self.on_main, daemon=True
                 ).start(),
             )
-            menu.add_command(label="Скрыть помощника", command=root.withdraw)
+            menu.add_command(label="Скрыть помощника", command=self.hide)
             menu.add_separator()
             menu.add_command(
                 label="Выход из Workspace",
@@ -284,8 +346,9 @@ class MiniAvatar:
 
             for widget in (avatar, badge):
                 widget.bind("<ButtonPress-1>", begin)
-                widget.bind("<B1-Motion>", move)
-                widget.bind("<ButtonRelease-1>", end)
+                if os.name != "nt":
+                    widget.bind("<B1-Motion>", move)
+                    widget.bind("<ButtonRelease-1>", end)
                 widget.bind("<Button-3>", context)
             frame = [0]
 
@@ -294,13 +357,24 @@ class MiniAvatar:
                     name, value = self.commands.get_nowait()
                     if name == "close":
                         self._save()
+                        if self.chat:
+                            self.chat.close()
+                            self.chat = None
                         root.destroy()
                         return
                     if name == "show":
                         root.deiconify()
                         root.lift()
                     if name == "hide":
+                        if self.chat:
+                            self.chat.hide()
                         root.withdraw()
+                    if name == "show_chat" and self.chat:
+                        self.chat.show()
+                    if name == "hide_chat" and self.chat:
+                        self.chat.hide()
+                    if name == "toggle_chat" and self.chat:
+                        self.chat.toggle()
                     if name == "state":
                         self.state = value
                         frame[0] = 0
@@ -308,13 +382,14 @@ class MiniAvatar:
                 if frames:
                     avatar.configure(image=frames[frame[0] % len(frames)])
                     frame[0] += 1
-                badge.configure(
-                    text=(
-                        "!"
-                        if self.state == "awaiting_permission"
-                        else ("…" if self.state == "thinking" else "W")
-                    )
-                )
+                glyph, color = {
+                    "ready": ("✓", "#25a957"),
+                    "thinking": ("?", "#1e67cd"),
+                    "speaking": ("…", "#e3a51d"),
+                    "error": ("!", "#c5453c"),
+                    "awaiting_permission": ("!", "#e3a51d"),
+                }.get(self.state, ("✓", "#25a957"))
+                badge.configure(text=glyph, bg=color)
                 root.after(350 if self.state == "thinking" else 650, tick)
 
             self.frame_counts = {name: len(frames) for name, frames in pictures.items()}
@@ -328,6 +403,10 @@ class MiniAvatar:
 
             traceback.print_exc()
         finally:
+            if self.chat:
+                with contextlib.suppress(Exception):
+                    self.chat.close()
+                self.chat = None
             if root:
                 with contextlib.suppress(Exception):
                     root.destroy()

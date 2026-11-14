@@ -174,7 +174,7 @@ def main():
             {
                 "product": "Local AI Workspace",
                 "version": version,
-                "schema_version": 1,
+                "schema_version": 2,
                 "sdk_version": "0.2.2rc2",
                 "dsh_format": 4,
                 "files": files,

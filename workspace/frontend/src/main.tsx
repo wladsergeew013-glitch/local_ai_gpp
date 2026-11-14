@@ -1,270 +1,67 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
-import { SettingsDialog } from "./SettingsDialog";
 import { MiniApp } from "./MiniApp";
-
-type Project = { id: string; name: string; path: string };
-type Provider = { id: string; name: string; base_url: string; model: string };
-type Task = {
-  id: string;
-  project_id: string;
-  provider_id: string;
-  title: string;
-  status: string;
-  revision: number;
-  updated_at: string;
-  prompt?: string;
-  details?: Record<string, any>;
-  approvals?: Approval[];
-};
-type Approval = { id: string; kind: string; payload: Record<string, any> };
-type Event = {
-  seq: number;
-  kind: string;
-  created_at: string;
-  payload: Record<string, any>;
-};
-type Connector = {
-  id: string;
-  name: string;
-  base_url: string;
-  allow_write: boolean;
-};
-type Bootstrap = {
-  version: string;
-  projects: Project[];
-  providers: Provider[];
-  tasks: Task[];
-  connectors: Connector[];
-};
-const active = new Set([
-  "starting",
-  "running",
-  "awaiting_permission",
-  "stopping",
-]);
-const labels: Record<string, string> = {
-  queued: "В очереди",
-  starting: "Запуск",
-  running: "Выполняется",
-  awaiting_permission: "Нужно разрешение",
-  stopping: "Остановка",
-  completed: "Завершена",
-  failed: "Ошибка",
-  cancelled: "Остановлена",
-  interrupted: "Прервана",
-  uncertain: "Результат требует сверки",
-  restored: "История восстановлена",
-};
-
-async function api<T = any>(path: string, body?: unknown): Promise<T> {
-  const result = await fetch(
-    "/api" + path,
-    body === undefined
-      ? {}
-      : {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-  );
-  const data = await result.json();
-  if (!result.ok)
-    throw new Error(
-      typeof data.detail === "string"
-        ? data.detail
-        : JSON.stringify(data.detail || data),
-    );
-  return data;
-}
-function textContent(value: any): string {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value))
-    return value.map((v) => v.text || v.content || "").join("\n");
-  return value ? JSON.stringify(value, null, 2) : "";
-}
-function EventCard({ event }: { event: Event }) {
-  const payload = event.payload,
-    type = event.kind === "dsh" ? payload.type : event.kind,
-    data = payload.data || payload;
-  if (
-    [
-      "step/start",
-      "step/end",
-      "turn/start",
-      "turn/end",
-      "input_admitted",
-      "identity",
-      "notification",
-      "started",
-      "session/start",
-      "session/end",
-      "approval_channel_closed",
-    ].includes(type)
-  )
-    return null;
-  let title = type,
-    content = "",
-    tone = "";
-  if (type === "tool/call") {
-    title = "Действие · " + data.name;
-    content = textContent(data.arguments);
-    tone = "action";
-  } else if (type === "tool/result") {
-    title = data.message?.isError
-      ? "Ошибка инструмента"
-      : "Результат инструмента";
-    content = textContent(data.message?.content);
-    tone = data.message?.isError ? "danger" : "output";
-  } else if (type === "result") {
-    title = "Ответ агента";
-    content = payload.final_response || "";
-    tone = "answer";
-  } else if (type === "diagnostic") {
-    return (
-      <details className="diagnostic">
-        <summary>Диагностика адаптера</summary>
-        <pre>{payload.message}</pre>
-      </details>
-    );
-  } else if (type === "task_created") {
-    title = "Задача";
-    content = payload.prompt;
-    tone = "prompt";
-  } else if (type === "process_exited") {
-    title = "Процесс завершён";
-    content = labels[payload.status] || payload.status;
-  } else if (type === "uncertain") {
-    title = "Нужна сверка состояния";
-    content = payload.message;
-    tone = "danger";
-  } else if (data.message?.content) {
-    title = "Агент";
-    content = textContent(data.message.content);
-  } else if (
-    [
-      "approval",
-      "question",
-      "permission_decision",
-      "stop_confirmed",
-      "recovery",
-      "restored",
-    ].includes(type)
-  ) {
-    title = (
-      {
-        approval: "Запрос разрешения",
-        question: "Вопрос агента",
-        permission_decision: "Решение пользователя",
-        stop_confirmed: "Остановка подтверждена",
-        recovery: "Восстановление",
-        restored: "История восстановлена",
-      } as Record<string, string>
-    )[type];
-    content = JSON.stringify(payload, null, 2);
-  } else
-    return (
-      <details className="diagnostic">
-        <summary>{type}</summary>
-        <pre>{JSON.stringify(data, null, 2)}</pre>
-      </details>
-    );
-  return (
-    <article className={"event " + tone}>
-      <header>
-        <span>{title}</span>
-        <time dateTime={event.created_at}>
-          {new Date(event.created_at).toLocaleString("ru")}
-        </time>
-      </header>
-      <pre>{content || "—"}</pre>
-    </article>
-  );
-}
+import { WorkspaceSettings } from "./WorkspaceSettings";
+import { ProjectDialog } from "./ProjectDialog";
+import { ChatHistory } from "./ChatHistory";
+import { AgentPanel } from "./AgentPanel";
+import { RuntimeStatus } from "./RuntimeStatus";
+import {
+  api,
+  active,
+  states,
+  emptyBoot,
+  useConversation,
+  type Bootstrap,
+  type Conversation,
+} from "./chat";
 
 function App() {
-  const [notice, setNotice] = useState("");
-  useEffect(() => {
-    const receive: EventListener = (event) => {
-      const detail = (
-        event as CustomEvent<{
-          task_id?: string;
-          project_id?: string;
-          panel?: string;
-        }>
-      ).detail;
-      if (detail.task_id) setSelected(detail.task_id);
-      if (detail.project_id) setProject(detail.project_id);
-      if (
-        detail.panel === "provider" ||
-        detail.panel === "project" ||
-        detail.panel === "connector"
-      )
-        setPanel(detail.panel);
-    };
-    window.addEventListener("local-ai-select-task", receive);
-    return () => window.removeEventListener("local-ai-select-task", receive);
-  }, []);
-  const [connectorIds, setConnectorIds] = useState<string[]>([]);
-  const [boot, setBoot] = useState<Bootstrap>({
-    version: "0.1.0",
-    projects: [],
-    providers: [],
-    tasks: [],
-    connectors: [],
-  });
+  const [boot, setBoot] = useState<Bootstrap>(emptyBoot);
   const [project, setProject] = useState(
-    new URLSearchParams(location.search).get("project") ??
-      sessionStorage.getItem("workspace-project") ??
-      "",
+    sessionStorage.getItem("workspace-project") || "",
   );
   const [selected, setSelected] = useState(
-    new URLSearchParams(location.search).get("task") ??
-      sessionStorage.getItem("workspace-task") ??
+    new URLSearchParams(location.search).get("task") ||
+      sessionStorage.getItem("workspace-task") ||
       "",
   );
-  const [task, setTask] = useState<Task | null>(null),
-    [events, setEvents] = useState<Event[]>([]),
-    [diff, setDiff] = useState<any>(null);
-  const [prompt, setPrompt] = useState(""),
-    [write, setWrite] = useState(false),
-    [provider, setProvider] = useState(""),
+  const [settings, setSettings] = useState(false),
+    [addProject, setAddProject] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
-  const [panel, setPanel] = useState<
-      "none" | "project" | "provider" | "connector"
-    >("none"),
-    [tab, setTab] = useState<"activity" | "diff">("activity");
-  const [projectName, setProjectName] = useState(""),
-    [projectPath, setProjectPath] = useState("");
-  const [base, setBase] = useState("http://127.0.0.1:8765/v1"),
-    [model, setModel] = useState(""),
-    [key, setKey] = useState(""),
-    [models, setModels] = useState<any[]>([]),
-    [connection, setConnection] = useState<any>(null);
-  const [connectorUrl, setConnectorUrl] = useState("http://127.0.0.1:8890"),
-    [connectorResult, setConnectorResult] = useState(""),
-    [noteTitle, setNoteTitle] = useState(""),
-    [noteBody, setNoteBody] = useState(""),
-    [approveWrite, setApproveWrite] = useState(false);
-  const [questionText, setQuestionText] = useState<Record<string, string>>({});
-  const cursor = useRef(0),
-    sticky = useRef(true),
-    scroll = useRef<HTMLDivElement>(null);
+  const [provider, setProvider] = useState(""),
+    [files, setFiles] = useState(false),
+    [write, setWrite] = useState(false),
+    [memory, setMemory] = useState(true),
+    [tools, setTools] = useState(false),
+    [connectorIds, setConnectorIds] = useState<string[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>(() => {
+    try {
+      return JSON.parse(sessionStorage.getItem("workspace-drafts") || "{}");
+    } catch {
+      return {};
+    }
+  });
+  const draftKey = selected || "new:" + project,
+    draft = drafts[draftKey] || "";
+  const { current, events, error: pollError } = useConversation(selected);
+  const working = !!current && active.has(current.status);
+  const agent = !!current && current.details?.mode !== "chat";
   const reload = () => api<Bootstrap>("/bootstrap").then(setBoot);
   useEffect(() => {
     let valid = true;
-    const poll = () =>
+    const load = () =>
       api<Bootstrap>("/bootstrap")
-        .then((data) => {
-          if (valid) setBoot(data);
+        .then((b) => {
+          if (valid) setBoot(b);
         })
         .catch((e) => {
           if (valid) setError(e.message);
         });
-    poll();
-    const timer = setInterval(poll, 1500);
+    load();
+    const timer = setInterval(load, 1500);
     return () => {
       valid = false;
       clearInterval(timer);
@@ -275,46 +72,28 @@ function App() {
   }, [project]);
   useEffect(() => {
     sessionStorage.setItem("workspace-task", selected);
-    cursor.current = 0;
-    setEvents([]);
-    setTask(null);
-    setDiff(null);
-    sticky.current = true;
-    if (!selected) return;
-    let valid = true;
-    const poll = async () => {
-      try {
-        const [current, page] = await Promise.all([
-          api<Task>("/tasks/" + selected),
-          api<{ events: Event[]; cursor: number }>(
-            "/tasks/" + selected + "/events?after=" + cursor.current,
-          ),
-        ]);
-        if (!valid) return;
-        setTask(current);
-        cursor.current = page.cursor;
-        if (page.events.length) setEvents((old) => [...old, ...page.events]);
-      } catch (e) {
-        if (valid) setError((e as Error).message);
-      }
-    };
-    poll();
-    const timer = setInterval(poll, 1000);
-    return () => {
-      valid = false;
-      clearInterval(timer);
-    };
+    setTools(false);
   }, [selected]);
   useEffect(() => {
-    if (sticky.current && scroll.current)
-      scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [events]);
+    sessionStorage.setItem("workspace-drafts", JSON.stringify(drafts));
+  }, [drafts]);
   useEffect(() => {
-    if (selected && tab === "diff")
-      api("/tasks/" + selected + "/diff")
-        .then(setDiff)
-        .catch((e) => setError(e.message));
-  }, [selected, tab, task?.status]);
+    if (current) setMemory(current.details?.memory !== false);
+  }, [current?.id]);
+  useEffect(() => {
+    if (current?.approvals?.length) setTools(true);
+  }, [current?.approvals?.length]);
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const d = (event as CustomEvent).detail || {};
+      if (d.task_id) setSelected(d.task_id);
+      if (d.project_id) setProject(d.project_id);
+      if (d.panel === "project") setAddProject(true);
+      else if (d.panel) setSettings(true);
+    };
+    window.addEventListener("local-ai-select-task", receive);
+    return () => window.removeEventListener("local-ai-select-task", receive);
+  }, []);
   async function act(action: () => Promise<unknown>) {
     setBusy(true);
     setError("");
@@ -327,29 +106,193 @@ function App() {
       setBusy(false);
     }
   }
-  async function createTask() {
-    if (!prompt.trim() || !project || !(provider || boot.providers[0]?.id))
-      return;
-    const raw = prompt;
-    const created = await api<Task>("/tasks", {
-      project_id: project,
-      provider_id: provider || boot.providers[0].id,
-      prompt: raw.trim(),
-      permission: write ? "workspace-write" : "read-only",
-      connector_ids: connectorIds,
-      action_id: crypto.randomUUID(),
-    });
-    setSelected(created.id);
-    if (prompt === raw) setPrompt("");
-    await api("/tasks/" + created.id + "/start", {
-      revision: created.revision,
+  function newChat() {
+    setSelected("");
+    setFiles(false);
+    setTools(false);
+    setError("");
+  }
+  async function send() {
+    const raw = draft,
+      key = draftKey;
+    if (!raw.trim() || busy || working) return;
+    await act(async () => {
+      if (!selected) {
+        const p = provider || boot.providers[0]?.id;
+        if (!p) throw new Error("Подключите модель в настройках.");
+        const row = await api<Conversation>("/chats", {
+          project_id: project || null,
+          provider_id: p,
+          prompt: raw.trim(),
+          mode: files ? "agent" : "chat",
+          memory,
+          permission: files && write ? "workspace-write" : "read-only",
+          connector_ids: files ? connectorIds : [],
+          action_id: crypto.randomUUID(),
+        });
+        setSelected(row.id);
+        await api("/chats/" + row.id + "/start", { revision: row.revision });
+      } else {
+        const row = await api<Conversation>("/chats/" + selected);
+        await api(
+          "/chats/" +
+            selected +
+            (row.status === "queued" ? "/start" : "/continue"),
+          { revision: row.revision, prompt: raw.trim(), memory },
+        );
+      }
+      setDrafts((old) => (old[key] === raw ? { ...old, [key]: "" } : old));
     });
   }
-  const currentProject = boot.projects.find((p) => p.id === project),
-    filteredTasks = boot.tasks.filter(
-      (t) => !project || t.project_id === project,
-    );
-  const working = task && active.has(task.status);
+  const modelName = (id: string) =>
+    boot.providers.find((p) => p.id === id)?.model.split(":")[0] || "Модель";
+  const compose = (
+    <div className="chat-composer">
+      <textarea
+        aria-label={selected ? "Сообщение" : "Новое сообщение"}
+        placeholder="Напишите сообщение…"
+        rows={selected ? 2 : 4}
+        value={draft}
+        onChange={(e) =>
+          setDrafts((old) => ({ ...old, [draftKey]: e.target.value }))
+        }
+        onKeyDown={(e) => {
+          if (
+            (e.ctrlKey || e.metaKey) &&
+            e.key === "Enter" &&
+            !e.nativeEvent.isComposing
+          ) {
+            e.preventDefault();
+            send();
+          }
+        }}
+      />
+      <div className="compose-options">
+        {!selected && (
+          <>
+            <label className="inline-option">
+              Проект
+              <select
+                aria-label="Проект диалога"
+                value={project}
+                onChange={(e) => {
+                  setProject(e.target.value);
+                  setFiles(false);
+                }}
+              >
+                <option value="">Без проекта</option>
+                {boot.projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="inline-option">
+              Модель
+              <select
+                aria-label="Модель диалога"
+                value={provider || boot.providers[0]?.id || ""}
+                onChange={(e) => setProvider(e.target.value)}
+              >
+                {!boot.providers.length && (
+                  <option value="">Не подключена</option>
+                )}
+                {boot.providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.model.split(":")[0]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+        {(!selected || !agent) && (
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={memory}
+              onChange={(e) => setMemory(e.target.checked)}
+            />
+            Память диалога
+          </label>
+        )}
+        {!selected && project && (
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={files}
+              onChange={(e) => setFiles(e.target.checked)}
+            />
+            Работа с файлами
+          </label>
+        )}
+        {!selected && files && (
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={write}
+              onChange={(e) => setWrite(e.target.checked)}
+            />
+            Разрешить изменения
+          </label>
+        )}
+        <span className="compose-spacer" />
+        {working ? (
+          <button
+            className="stop"
+            disabled={busy}
+            onClick={() =>
+              act(async () => {
+                const row = await api<Conversation>("/chats/" + selected);
+                await api("/chats/" + selected + "/stop", {
+                  revision: row.revision,
+                });
+              })
+            }
+          >
+            ■ Остановить
+          </button>
+        ) : (
+          <button
+            className="primary"
+            disabled={
+              busy ||
+              !draft.trim() ||
+              !boot.providers.length ||
+              (!!current &&
+                ["interrupted", "uncertain"].includes(current.status))
+            }
+            onClick={send}
+          >
+            Отправить ↗
+          </button>
+        )}
+      </div>
+      {!selected && files && !!boot.connectors.length && (
+        <div className="attached-apps">
+          <span>Приложения:</span>
+          {boot.connectors.map((c) => (
+            <label className="check" key={c.id}>
+              <input
+                type="checkbox"
+                checked={connectorIds.includes(c.id)}
+                onChange={(e) =>
+                  setConnectorIds((old) =>
+                    e.target.checked
+                      ? [...old, c.id]
+                      : old.filter((id) => id !== c.id),
+                  )
+                }
+              />
+              {c.name}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+  const shown = boot.tasks.filter((t) => !project || t.project_id === project);
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -357,13 +300,17 @@ function App() {
           <span className="mark">W</span>
           <div>
             Local AI <strong>Workspace</strong>
-            <small>Локальная работа с проектами</small>
+            <small>Проекты и диалоги</small>
           </div>
         </div>
         <div className="side-section">
           <h2>
             Проекты{" "}
-            <button title="Добавить проект" onClick={() => setPanel("project")}>
+            <button
+              aria-label="Добавить проект"
+              title="Добавить проект"
+              onClick={() => setAddProject(true)}
+            >
               ＋
             </button>
           </h2>
@@ -371,727 +318,167 @@ function App() {
             className={"project " + (!project ? "selected" : "")}
             onClick={() => setProject("")}
           >
-            Все задачи <span>{boot.tasks.length}</span>
+            Все диалоги <span>{boot.tasks.length}</span>
           </button>
           {boot.projects.map((p) => (
             <button
-              className={"project " + (project === p.id ? "selected" : "")}
               key={p.id}
+              className={"project " + (project === p.id ? "selected" : "")}
               onClick={() => {
                 setProject(p.id);
-                setSelected("");
+                newChat();
               }}
-              title={p.path}
             >
-              <i>▣</i>
-              {p.name}
+              <span>
+                {p.source === "github" ? "↗" : "□"} {p.name}
+              </span>
             </button>
           ))}
         </div>
         <div className="side-section task-list">
           <h2>
-            Задачи{" "}
-            <button title="Новая задача" onClick={() => setSelected("")}>
+            Диалоги{" "}
+            <button
+              aria-label="Новый диалог"
+              title="Новый диалог"
+              onClick={newChat}
+            >
               ＋
             </button>
           </h2>
-          {filteredTasks.map((t) => (
+          {shown.map((t) => (
             <button
-              className={"task-link " + (selected === t.id ? "selected" : "")}
               key={t.id}
+              className={"task-link " + (selected === t.id ? "selected" : "")}
+              data-chat-id={t.id}
               onClick={() => {
                 setSelected(t.id);
-                setProject(t.project_id);
+                setProject(t.project_id || "");
               }}
             >
               <span className={"dot " + t.status} />
               <span>
                 {t.title}
-                <small>{labels[t.status] || t.status}</small>
+                {states[t.status] && <small>{states[t.status]}</small>}
               </span>
             </button>
           ))}
-          {!filteredTasks.length && (
-            <p className="muted empty-side">Здесь появятся задачи проекта.</p>
+          {!shown.length && (
+            <p className="muted empty-side">Здесь появятся ваши диалоги.</p>
           )}
         </div>
         <div className="side-footer">
-          <button
-            onClick={() =>
-              api("/host/show-mini", {}).catch(() =>
-                window.open("/mini", "LocalAIMini", "width=650,height=500"),
-              )
-            }
-          >
+          <button onClick={() => act(() => api("/host/show-avatar", {}))}>
             ◉ Мини-помощник
           </button>
-          <button onClick={() => setPanel("provider")}>
-            ⚙ Провайдеры и модели
-          </button>
-          <button onClick={() => setPanel("connector")}>↗ Подключения</button>
-          <small>Workspace {boot.version} · DSH 0.2.2rc2</small>
+          <button onClick={() => setSettings(true)}>⚙ Настройки</button>
+          <small>Workspace {boot.version}</small>
         </div>
       </aside>
       <main>
         <header className="topbar">
           <div>
             <span className="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span>
-            <h1>{currentProject?.name || "Проекты и задачи"}</h1>
+            <h1>
+              {boot.projects.find((p) => p.id === project)?.name || "Диалоги"}
+            </h1>
           </div>
-          <div className="top-actions">
-            <span className="local-badge">
-              <span className="dot completed" />
-              Локальный профиль
-            </span>
-            <button
-              onClick={() =>
-                act(async () => {
-                  const result = await api("/snapshots", {});
-                  setNotice("Снимок данных сохранён: " + result.path);
-                })
-              }
-            >
-              Снимок данных
-            </button>
-          </div>
+          <RuntimeStatus
+            provider={
+              boot.providers.find(
+                (p) => p.id === (current?.provider_id || provider),
+              ) || boot.providers[0]
+            }
+            open={() => setSettings(true)}
+          />
         </header>
-        {error && (
+        {(error || pollError) && (
           <div role="alert" className="alert">
-            {error}
+            {error || pollError}
             <button aria-label="Закрыть ошибку" onClick={() => setError("")}>
               ×
             </button>
           </div>
         )}
-        {notice && (
-          <div className="workspace-notice" role="status">
-            {notice}
-            <button
-              aria-label="Закрыть уведомление"
-              onClick={() => setNotice("")}
-            >
-              ×
-            </button>
-          </div>
-        )}
-        {panel !== "none" && (
-          <SettingsDialog onClose={() => setPanel("none")} error={error}>
-            <section className="settings-panel">
-              <header>
-                <h2>
-                  {panel === "project"
-                    ? "Добавить проект"
-                    : panel === "provider"
-                      ? "Подключить Runtime"
-                      : "Подключения к приложениям"}
-                </h2>
-                <button
-                  aria-label="Закрыть панель"
-                  onClick={() => setPanel("none")}
-                >
-                  ×
-                </button>
-              </header>
-              {panel === "project" && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    act(async () => {
-                      const p = await api<Project>("/projects", {
-                        name: projectName,
-                        path: projectPath,
-                      });
-                      setProject(p.id);
-                      setSelected("");
-                      setPanel("none");
-                    });
-                  }}
-                >
-                  <label>
-                    Название
-                    <input
-                      required
-                      value={projectName}
-                      onChange={(e) => setProjectName(e.target.value)}
-                      placeholder="Мой проект"
-                    />
-                  </label>
-                  <label>
-                    Путь к Git-репозиторию
-                    <input
-                      required
-                      value={projectPath}
-                      onChange={(e) => setProjectPath(e.target.value)}
-                      placeholder="C:\Projects\my-app"
-                    />
-                  </label>
-                  <p className="muted">
-                    Агент работает с выбранным проектом. Существующие изменения
-                    сохраняются в исходной точке сравнения.
-                  </p>
-                  <button className="primary" disabled={busy}>
-                    Добавить проект
-                  </button>
-                </form>
-              )}
-              {panel === "provider" && (
-                <div>
-                  <div className="form-grid">
-                    <label>
-                      Адрес Runtime API
-                      <input
-                        value={base}
-                        onChange={(e) => {
-                          setBase(e.target.value);
-                          setConnection(null);
-                        }}
-                      />
-                    </label>
-                    <label>
-                      Локальный API-ключ
-                      <input
-                        type="password"
-                        value={key}
-                        onChange={(e) => setKey(e.target.value)}
-                        autoComplete="off"
-                        placeholder="Если задан в Runtime"
-                      />
-                    </label>
-                  </div>
-                  <div className="form-grid">
-                    <label>
-                      ID модели
-                      <input
-                        list="model-ids"
-                        value={model}
-                        onChange={(e) => setModel(e.target.value)}
-                      />
-                      <datalist id="model-ids">
-                        {models.map((m) => (
-                          <option key={m.id} value={m.id} />
-                        ))}
-                      </datalist>
-                    </label>
-                    <div className="button-row">
-                      <button
-                        disabled={busy}
-                        onClick={() =>
-                          act(async () => {
-                            const data = await api("/providers/probe", {
-                              base_url: base,
-                              model,
-                              api_key: key,
-                            });
-                            setConnection(data);
-                            setModels(data.models);
-                            if (!model && data.models.length)
-                              setModel(data.models[0].id);
-                          })
-                        }
-                      >
-                        Проверить связь
-                      </button>
-                      <button
-                        className="primary"
-                        disabled={busy || !model}
-                        onClick={() =>
-                          act(async () => {
-                            const p = await api<Provider>("/providers", {
-                              name: "Local AI Runtime",
-                              base_url: base,
-                              model,
-                              api_key: key,
-                            });
-                            setProvider(p.id);
-                            setKey("");
-                            setPanel("none");
-                          })
-                        }
-                      >
-                        Сохранить
-                      </button>
-                    </div>
-                  </div>
-                  {connection && (
-                    <div className="connection-result">
-                      {connection.snapshot ? (
-                        "Снимок сохранён: " + connection.snapshot
-                      ) : (
-                        <>
-                          <strong>Связь установлена</strong>
-                          <p>
-                            Состояние: {connection.ready?.state}. Моделей:{" "}
-                            {connection.models?.length}.{" "}
-                            {connection.capabilities &&
-                              `Контекст: ${connection.capabilities.context_window}; tools: ${connection.capabilities.tools.supported ? "поддерживаются" : "требуется загрузка модели"}.`}
-                          </p>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  {boot.providers.map((p) => (
-                    <p className="provider-row" key={p.id}>
-                      <strong>{p.name}</strong>
-                      <code>{p.base_url}</code>
-                      <span>{p.model}</span>
-                    </p>
-                  ))}
-                  <p className="muted">
-                    Облачный ключ DeepSeek не нужен. Модель загружается в
-                    отдельном Runtime; закрытие Workspace оставляет Runtime
-                    работающим.
-                  </p>
-                </div>
-              )}
-              {panel === "connector" && (
-                <div>
-                  <p className="muted">
-                    Первый адаптер подключает локальное приложение из
-                    examples/notes_app.py. Чтение и запись выполняются
-                    отдельными действиями.
-                  </p>
-                  <label>
-                    Адрес приложения
-                    <input
-                      value={connectorUrl}
-                      onChange={(e) => setConnectorUrl(e.target.value)}
-                    />
-                  </label>
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      act(() =>
-                        api("/connectors", {
-                          name: "Local Notes",
-                          base_url: connectorUrl,
-                          allow_write: approveWrite,
-                        }),
-                      )
-                    }
-                  >
-                    Добавить подключение
-                  </button>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={approveWrite}
-                      onChange={(e) => setApproveWrite(e.target.checked)}
-                    />
-                    Разрешить запись и подтвердить создание записи ниже
-                  </label>
-                  <div className="form-grid">
-                    <label>
-                      Название записи
-                      <input
-                        value={noteTitle}
-                        onChange={(e) => setNoteTitle(e.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Текст записи
-                      <input
-                        value={noteBody}
-                        onChange={(e) => setNoteBody(e.target.value)}
-                      />
-                    </label>
-                  </div>
-                  {boot.connectors.map((c) => (
-                    <div className="provider-row" key={c.id}>
-                      <strong>{c.name}</strong>
-                      <code>{c.base_url}</code>
-                      <button
-                        onClick={() =>
-                          act(async () =>
-                            setConnectorResult(
-                              JSON.stringify(
-                                await api("/connectors/" + c.id + "/items"),
-                                null,
-                                2,
-                              ),
-                            ),
-                          )
-                        }
-                      >
-                        Прочитать
-                      </button>
-                      <button
-                        disabled={!approveWrite || !c.allow_write || !noteTitle}
-                        onClick={() =>
-                          act(async () =>
-                            setConnectorResult(
-                              JSON.stringify(
-                                await api("/connectors/" + c.id + "/items", {
-                                  title: noteTitle,
-                                  body: noteBody,
-                                  approved: true,
-                                  action_id: crypto.randomUUID(),
-                                }),
-                                null,
-                                2,
-                              ),
-                            ),
-                          )
-                        }
-                      >
-                        Создать подтверждённую запись
-                      </button>
-                    </div>
-                  ))}
-                  {connectorResult && (
-                    <pre className="connector-output">{connectorResult}</pre>
-                  )}
-                </div>
-              )}
-            </section>
-          </SettingsDialog>
-        )}
         {!selected ? (
-          <section className="welcome">
-            <div className="welcome-symbol">⌘</div>
-            <span className="eyebrow">ОДНА ЗАДАЧА — ПОНЯТНЫЙ РЕЗУЛЬТАТ</span>
-            <h2>Что сделаем в проекте?</h2>
-            <p>
-              Проверьте тесты, исправьте ошибку или разберитесь в коде.
-              <br />
-              Действия, разрешения и изменения файлов останутся в истории
-              задачи.
+          <section className="welcome-chat">
+            <span className="eyebrow">LOCAL AI</span>
+            <h2>Новый диалог</h2>
+            <p className="muted">
+              Общайтесь с моделью и сохраняйте историю переписки.
             </p>
-            <div className="new-task">
-              <label>
-                Проект
-                <select
-                  aria-label="Проект новой задачи"
-                  value={project}
-                  onChange={(e) => setProject(e.target.value)}
-                >
-                  <option value="">Выберите проект</option>
-                  {boot.projects.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <textarea
-                aria-label="Новая задача"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Найди причину падающего теста, исправь код и проверь результат…"
-                rows={5}
-              />
-              {!!boot.connectors.length && (
-                <details className="task-connectors">
-                  <summary>
-                    Приложения для этой задачи ({connectorIds.length})
-                  </summary>
-                  {boot.connectors.map((c) => (
-                    <label className="check" key={c.id}>
-                      <input
-                        type="checkbox"
-                        checked={connectorIds.includes(c.id)}
-                        onChange={(e) =>
-                          setConnectorIds((old) =>
-                            e.target.checked
-                              ? [...old, c.id]
-                              : old.filter((id) => id !== c.id),
-                          )
-                        }
-                      />
-                      {c.name} ·{" "}
-                      {c.allow_write
-                        ? "чтение и запись с подтверждением"
-                        : "только чтение"}
-                    </label>
-                  ))}
-                </details>
-              )}
-              <div className="compose-options">
-                <select
-                  aria-label="Модель для задачи"
-                  value={provider || boot.providers[0]?.id || ""}
-                  onChange={(e) => setProvider(e.target.value)}
-                >
-                  <option value="" disabled>
-                    Подключите Runtime
-                  </option>
-                  {boot.providers.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.model}
-                    </option>
-                  ))}
-                </select>
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={write}
-                    onChange={(e) => setWrite(e.target.checked)}
-                  />
-                  Запись в проект
-                </label>
-                <button
-                  className="primary"
-                  disabled={
-                    busy || !project || !prompt.trim() || !boot.providers.length
-                  }
-                  onClick={() => act(createTask)}
-                >
-                  Запустить задачу ↗
-                </button>
-              </div>
-            </div>
-            <div className="welcome-links">
-              <button onClick={() => setPanel("project")}>
-                ＋ Добавить проект
+            {compose}
+            {!boot.providers.length && (
+              <button className="link" onClick={() => setSettings(true)}>
+                Подключить модель
               </button>
-              <button onClick={() => setPanel("provider")}>
-                ⚙ Подключить модель
+            )}
+            <div className="welcome-links">
+              <button onClick={() => setAddProject(true)}>
+                ＋ Создать проект
               </button>
             </div>
           </section>
         ) : (
-          <section className="task-view">
-            <header className="task-header">
+          <section className="conversation task-view">
+            <header className="conversation-header">
               <div>
-                <h2>{task?.title || "Загрузка задачи…"}</h2>
+                <h2>{current?.title || "Открываю диалог…"}</h2>
                 <p className="muted">
-                  {boot.projects.find((p) => p.id === task?.project_id)?.path}
+                  {current ? modelName(current.provider_id) : ""}
+                  {agent ? " · Работа с файлами" : ""}
                 </p>
               </div>
-              <span className={"status " + task?.status}>
-                {labels[task?.status || ""] || task?.status}
-              </span>
-            </header>
-            <nav className="tabs">
-              <button
-                className={tab === "activity" ? "current" : ""}
-                onClick={() => setTab("activity")}
-              >
-                Действия и результат
-              </button>
-              <button
-                className={tab === "diff" ? "current" : ""}
-                onClick={() => setTab("diff")}
-              >
-                Изменения файлов
-              </button>
-              <div className="task-controls">
-                {working && (
-                  <button
-                    className="stop"
-                    onClick={() =>
-                      act(async () => {
-                        const current = await api<Task>("/tasks/" + selected);
-                        await api("/tasks/" + selected + "/stop", {
-                          revision: current.revision,
-                        });
-                      })
-                    }
-                  >
-                    ■ Остановить
-                  </button>
-                )}
-                {task &&
-                  ["interrupted", "uncertain", "cancelled", "failed"].includes(
-                    task.status,
-                  ) && (
-                    <button
-                      disabled={busy}
-                      onClick={() =>
-                        act(() =>
-                          api("/tasks/" + selected + "/restore", {
-                            revision: task.revision,
-                          }),
-                        )
-                      }
-                    >
-                      Восстановить историю
-                    </button>
-                  )}
-                <button
-                  onClick={() =>
-                    act(() => api("/tasks/" + selected + "/reconcile", {}))
-                  }
-                >
-                  Сверить историю
+              {agent && (
+                <button aria-expanded={tools} onClick={() => setTools(!tools)}>
+                  Действия и файлы
                 </button>
-              </div>
-            </nav>
-            {tab === "activity" ? (
-              <div
-                className="activity-scroll"
-                ref={scroll}
-                onScroll={(e) => {
-                  const el = e.currentTarget;
-                  sticky.current =
-                    el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-                }}
-              >
-                {events.map((event) => (
-                  <EventCard key={event.seq} event={event} />
-                ))}
-                {working && (
-                  <p className="working">
-                    <span className="pulse" />
-                    Агент работает. Действия появятся после сохранения событий.
-                  </p>
-                )}
-                {task?.approvals?.map((approval) => (
-                  <div className="permission-card" key={approval.id}>
-                    <h3>
-                      {approval.kind === "question"
-                        ? "Вопрос агента"
-                        : "Разрешить это действие?"}
-                    </h3>
-                    <pre>
-                      {JSON.stringify(approval.payload.payload, null, 2)}
-                    </pre>
-                    {approval.kind !== "question" ? (
-                      <div className="button-row">
-                        <button
-                          className="primary"
-                          onClick={() =>
-                            act(() =>
-                              api("/approvals/" + approval.id, {
-                                outcome: "allowed-once",
-                              }),
-                            )
-                          }
-                        >
-                          Разрешить один раз
-                        </button>
-                        <button
-                          onClick={() =>
-                            act(() =>
-                              api("/approvals/" + approval.id, {
-                                outcome: "rejected",
-                              }),
-                            )
-                          }
-                        >
-                          Отклонить
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <textarea
-                          aria-label="Ответ агенту"
-                          value={questionText[approval.id] || ""}
-                          onChange={(e) =>
-                            setQuestionText({
-                              ...questionText,
-                              [approval.id]: e.target.value,
-                            })
-                          }
-                        />
-                        <button
-                          onClick={() =>
-                            act(() =>
-                              api("/approvals/" + approval.id, {
-                                answers: (
-                                  approval.payload.payload?.questions || []
-                                ).map((q: any) => ({
-                                  id: q.id,
-                                  selected: [],
-                                  custom: questionText[approval.id] || "",
-                                })),
-                              }),
-                            )
-                          }
-                        >
-                          Ответить
-                        </button>
-                      </>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="diff-scroll">
-                <p className="muted">
-                  Изменения относительно начала этой задачи. Исходные правки
-                  пользователя сохранены.
-                </p>
-                <div className="file-chips">
-                  {diff?.files?.map((f: any) => (
-                    <span key={f.path}>
-                      {f.added ? "+ " : f.deleted ? "− " : ""}
-                      {f.path}
-                    </span>
-                  ))}
-                </div>
-                <pre className="diff">
-                  {diff?.diff
-                    ? diff.diff.split("\n").map((line: string, i: number) => (
-                        <div
-                          key={i}
-                          className={
-                            line.startsWith("+")
-                              ? "add"
-                              : line.startsWith("-")
-                                ? "remove"
-                                : line.startsWith("@@")
-                                  ? "hunk"
-                                  : ""
-                          }
-                        >
-                          {line || " "}
-                        </div>
-                      ))
-                    : "Изменений файлов пока нет."}
-                </pre>
-              </div>
-            )}
-            {task &&
-              !working &&
-              [
-                "completed",
-                "restored",
-                "failed",
-                "cancelled",
-                "queued",
-              ].includes(task.status) && (
-                <div className="followup">
-                  <textarea
-                    aria-label="Продолжение задачи"
-                    rows={2}
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    placeholder="Новая инструкция в этой сессии…"
-                  />
+              )}
+              {current &&
+                ["interrupted", "uncertain"].includes(current.status) && (
                   <button
-                    className="primary"
-                    disabled={busy || !prompt.trim()}
+                    disabled={busy}
                     onClick={() =>
-                      act(async () => {
-                        await api(
-                          "/tasks/" +
-                            selected +
-                            (task.status === "queued" ? "/start" : "/continue"),
-                          { revision: task.revision, prompt: prompt },
-                        );
-                        setPrompt("");
-                      })
+                      act(() =>
+                        api("/chats/" + selected + "/restore", {
+                          revision: current.revision,
+                        }),
+                      )
                     }
                   >
-                    {task.status === "queued" ? "Запустить" : "Продолжить"} ↗
+                    Восстановить историю
                   </button>
-                </div>
-              )}
-            {task && ["interrupted", "uncertain"].includes(task.status) && (
-              <div className="recovery-note">
-                Действия могли успеть выполниться. Восстановите и проверьте
-                историю и diff. Предыдущая команда автоматически не
-                отправляется.
-              </div>
+                )}
+            </header>
+            <ChatHistory events={events} current={current} />
+            {current && agent && tools && (
+              <AgentPanel current={current} events={events} act={act} />
             )}
+            {compose}
           </section>
+        )}
+        {settings && (
+          <WorkspaceSettings
+            boot={boot}
+            close={() => setSettings(false)}
+            reload={reload}
+          />
+        )}
+        {addProject && (
+          <ProjectDialog
+            close={() => setAddProject(false)}
+            created={(p) => {
+              setProject(p.id);
+              newChat();
+              setAddProject(false);
+              reload();
+            }}
+          />
         )}
       </main>
     </div>
   );
 }
 createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    {location.pathname === "/mini" ? <MiniApp /> : <App />}
-  </React.StrictMode>,
+  location.pathname === "/mini" ? <MiniApp /> : <App />,
 );

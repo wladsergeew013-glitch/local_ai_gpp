@@ -258,3 +258,82 @@
     font-size: 12px;
   }
 }
+.mini-conversation {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mini-compose {
+  flex: none;
+  padding: 10px 12px;
+  border-top: 1px solid #dce5f4;
+  background: white;
+}
+.mini-compose textarea {
+  width: 100%;
+  min-height: 54px;
+  max-height: 160px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid #dce5f4;
+  border-radius: 10px;
+  font: inherit;
+  line-height: 1.5;
+}
+.mini-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.mini-controls select {
+  max-width: 150px;
+  font-size: 11px;
+}
+.mini-conversation .conversation-messages {
+  padding: 14px;
+  min-height: 0;
+}
+.mini-conversation .chat-message {
+  max-width: 88%;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.mini-conversation .chat-message.user {
+  margin-left: auto;
+  margin-right: 0;
+}
+.mini-conversation .chat-message.assistant {
+  margin-right: 12%;
+}
+.mini-welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  text-align: center;
+  color: #6b819e;
+}
+.mini-welcome strong {
+  font-size: 20px;
+  color: #123958;
+}
+.mini-notice {
+  padding: 10px;
+  background: #fff6df;
+  font-size: 12px;
+}
+.mini-notice button {
+  font-size: 12px;
+}
+.mini-error {
+  padding: 8px;
+  color: #a63d39;
+  font-size: 12px;
+}

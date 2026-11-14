@@ -4,10 +4,9 @@ from __future__ import annotations
 import json
 import threading
 import time
-from pathlib import Path
 import webview
 from workspace.app import desktop_host
-from workspace.app.mini_avatar import MiniAvatar, icon_path, work_area
+from workspace.app.mini_avatar import MiniAvatar, icon_path
 
 
 class WorkspaceShell:
@@ -17,7 +16,6 @@ class WorkspaceShell:
         self.thread = thread
         self.root = root
         self.quitting = False
-        self.mini_visible = False
         self.tray = None
         self.quit_lock = threading.Lock()
         self.base = f"http://127.0.0.1:{port}"
@@ -29,25 +27,18 @@ class WorkspaceShell:
             min_size=(900, 640),
             background_color="#f4f6fa",
         )
-        self.mini = webview.create_window(
-            "Local AI Workspace · мини-помощник",
-            self.base + "/mini",
-            width=650,
-            height=500,
-            min_size=(440, 340),
-            hidden=True,
-            frameless=True,
-            easy_drag=False,
-            on_top=True,
-            background_color="#f4f7fc",
-        )
         self.avatar = MiniAvatar(
-            root, self.toggle_mini, self.show_main, self.request_exit
+            root,
+            self.toggle_mini,
+            self.show_main,
+            self.request_exit,
+            api_base=self.base,
         )
         self.main.events.closing += self._close_main
-        self.mini.events.closing += self._close_mini
         desktop_host.register(
             show_main=self.show_main,
+            show_avatar=self.show_avatar,
+            choose_folder=self.choose_folder,
             show_mini=self.show_mini,
             hide_mini=self.hide_mini,
             exit=self.request_exit,
@@ -60,12 +51,6 @@ class WorkspaceShell:
             return True
         self.main.hide()
         self.avatar.show()
-        return False
-
-    def _close_mini(self):
-        if self.quitting:
-            return True
-        self.hide_mini()
         return False
 
     def show_main(self, payload=None):
@@ -87,33 +72,37 @@ class WorkspaceShell:
 
     def show_mini(self, payload=None):
         self.avatar.show()
-        self.mini.show()
-        self.mini.restore()
-        self.mini_visible = True
+        self.avatar.show_chat()
         return {"ok": True}
 
+    def show_avatar(self, payload=None):
+        self.avatar.show()
+        return {"ok": True}
+
+    def choose_folder(self, payload=None):
+        chosen = self.main.create_file_dialog(webview.FileDialog.FOLDER)
+        return {"path": chosen[0] if chosen else ""}
+
     def hide_mini(self, payload=None):
-        self.mini.hide()
-        self.mini_visible = False
+        self.avatar.hide_chat()
         return {"ok": True}
 
     def toggle_mini(self, position=None):
-        if self.mini_visible:
-            return self.hide_mini()
-        if position:
-            x, y = position
-            left, top, right, bottom = work_area(x, y)
-            px = max(left, min(x - 665, right - 650))
-            py = max(top, min(y - 100, bottom - 500))
-            self.mini.move(px, py)
-        return self.show_mini()
+        self.avatar.toggle_chat()
+        return {"ok": True}
 
     def activity(self, state):
         self.avatar.set_state(
             "awaiting_permission"
             if state == "awaiting_permission"
             else (
-                "thinking" if state in {"starting", "running", "stopping"} else "ready"
+                "error"
+                if state == "error"
+                else (
+                    "thinking"
+                    if state in {"starting", "running", "stopping"}
+                    else "ready"
+                )
             )
         )
 
@@ -132,7 +121,6 @@ class WorkspaceShell:
                 self.avatar.close()
                 if self.tray:
                     self.tray.stop()
-                self.mini.destroy()
                 self.main.destroy()
 
         threading.Thread(target=shutdown, daemon=False, name="workspace-exit").start()
@@ -153,7 +141,7 @@ class WorkspaceShell:
                 pystray.MenuItem(
                     "Открыть Workspace", lambda *_: self.show_main(), default=True
                 ),
-                pystray.MenuItem("Мини-помощник", lambda *_: self.show_mini()),
+                pystray.MenuItem("Мини-помощник", lambda *_: self.show_avatar()),
                 pystray.MenuItem("Скрыть помощника", lambda *_: self.avatar.hide()),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Выход из Workspace", lambda *_: self.request_exit()),

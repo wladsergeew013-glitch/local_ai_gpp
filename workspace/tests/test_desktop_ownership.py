@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 import tempfile
 import threading
@@ -9,7 +10,7 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 from workspace.app.main import create_app
 from workspace.app import desktop_host
-from workspace.app.mini_avatar import clamp_position
+from workspace.app.mini_avatar import clamp_position, position_window
 
 
 class Hook:
@@ -74,7 +75,58 @@ class DesktopOwnershipTests(unittest.TestCase):
             app.state.tasks.close.assert_called_once()
             self.assertTrue(server.should_exit)
             avatar.close.assert_called_once()
-            shell.mini.destroy.assert_called_once()
+            fake.create_window.assert_called_once()
+
+    def test_footer_shows_avatar_and_dialog_uses_native_panel_without_webview_window(
+        self,
+    ):
+        module, fake = self.shell()
+        avatar = Mock()
+        with patch.object(module, "webview", fake), patch.object(
+            module, "MiniAvatar", return_value=avatar
+        ), patch.object(module.WorkspaceShell, "_start_tray"), patch.object(
+            desktop_host, "_callbacks", {}
+        ):
+            shell = module.WorkspaceShell(
+                Mock(), Mock(), Mock(), 8776, Path("owned-workspace")
+            )
+            shell.show_avatar()
+            avatar.show.assert_called_once()
+            avatar.show_chat.assert_not_called()
+            shell.toggle_mini((300, 300))
+            avatar.toggle_chat.assert_called_once()
+            fake.create_window.assert_called_once()
+
+    @unittest.skipUnless(os.name == "nt", "Windows native positioning")
+    def test_hidden_avatar_position_does_not_pollute_webview_ctypes_functions(self):
+        import ctypes
+        import tkinter as tk
+        from ctypes import wintypes
+
+        original = ctypes.windll.user32.SetWindowPos.argtypes
+        root = tk.Tk()
+        root.withdraw()
+        root.overrideredirect(True)
+        root.geometry("40x40")
+        try:
+            position_window(root, -120, -70)
+            self.assertIs(ctypes.windll.user32.SetWindowPos.argtypes, original)
+            api = ctypes.WinDLL("user32", use_last_error=True)
+            api.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            api.GetAncestor.restype = ctypes.c_void_p
+            api.GetWindowRect.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(wintypes.RECT),
+            ]
+            rect = wintypes.RECT()
+            self.assertTrue(
+                api.GetWindowRect(
+                    api.GetAncestor(root.winfo_id(), 2), ctypes.byref(rect)
+                )
+            )
+            self.assertEqual((rect.left, rect.top), (-120, -70))
+        finally:
+            root.destroy()
 
     def test_headless_has_task_mini_page_but_no_native_shell(self):
         with tempfile.TemporaryDirectory() as root, patch.object(

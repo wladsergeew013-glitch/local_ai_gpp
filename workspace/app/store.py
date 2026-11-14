@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ACTIVE = {"starting", "running", "awaiting_permission", "stopping"}
 
 
@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL R
 CREATE TABLE IF NOT EXISTS connectors(id TEXT PRIMARY KEY,name TEXT NOT NULL,base_url TEXT NOT NULL,api_key TEXT NOT NULL DEFAULT '',allow_write INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS connector_actions(action_id TEXT PRIMARY KEY,connector_id TEXT NOT NULL REFERENCES connectors(id),payload TEXT NOT NULL,status TEXT NOT NULL,result TEXT,created_at TEXT NOT NULL);
 PRAGMA user_version=1;
+"""
+                )
+        if version < 2:
+            with self.connection:
+                self.connection.executescript(
+                    """
+CREATE TABLE IF NOT EXISTS project_sources(project_id TEXT PRIMARY KEY REFERENCES projects(id),source TEXT NOT NULL,url TEXT NOT NULL DEFAULT '');
+PRAGMA user_version=2;
 """
                 )
 
@@ -118,11 +126,43 @@ PRAGMA user_version=1;
         return self.one("tasks", task_id)
 
     def recover(self):
-        for row in self.rows("SELECT id,status FROM tasks"):
+        for row in self.rows("SELECT id,status,details FROM tasks"):
             if row["status"] in ACTIVE:
+                recovered_status = "interrupted"
+                details = json.loads(row["details"])
+                if details.get("mode") == "chat":
+                    users = self.rows(
+                        "SELECT payload FROM events WHERE task_id=? AND kind='chat_message' AND json_extract(payload,'$.role')='user' ORDER BY seq DESC LIMIT 1",
+                        (row["id"],),
+                    )
+                    if users:
+                        turn_id = json.loads(users[0]["payload"])["turn_id"]
+                        existing = self.rows(
+                            "SELECT payload FROM events WHERE task_id=? AND kind='chat_message' AND json_extract(payload,'$.turn_id')=? AND json_extract(payload,'$.role')='assistant' ORDER BY seq DESC LIMIT 1",
+                            (row["id"], turn_id),
+                        )
+                        if existing:
+                            if (
+                                json.loads(existing[0]["payload"]).get("phase")
+                                == "done"
+                            ):
+                                recovered_status = "completed"
+                        else:
+                            self.event(
+                                row["id"],
+                                "chat_message",
+                                {
+                                    "turn_id": turn_id,
+                                    "role": "assistant",
+                                    "text": details.get("partial", ""),
+                                    "phase": "error",
+                                    "error": "Ответ прерван при закрытии приложения.",
+                                },
+                                "recovery:" + turn_id,
+                            )
                 self.update_task(
                     row["id"],
-                    "interrupted",
+                    recovered_status,
                     {
                         "recovery": "The owning Workspace stopped. No input or action was replayed."
                     },

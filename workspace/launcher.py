@@ -18,6 +18,9 @@ def main():
     parser.add_argument(
         "--self-test-avatar", action="store_true", help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--self-test-bubble", action="store_true", help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
     if args.data_dir:
         os.environ["LOCAL_AI_WORKSPACE_DATA_DIR"] = str(Path(args.data_dir).resolve())
@@ -33,6 +36,51 @@ def main():
             sys.stderr = stream
     import uvicorn
     from workspace.app.main import create_app
+
+    if args.self_test_bubble:
+        import json
+        import tkinter as tk
+        from workspace.app.native_chat import NativeChatBubble
+        from workspace.app.store import data_root
+
+        ui = tk.Tk()
+        ui.withdraw()
+        panel = NativeChatBubble(
+            ui,
+            "http://127.0.0.1:1",
+            lambda: (1000, 500),
+            lambda *_: None,
+            lambda: None,
+            hidden=True,
+            transport=lambda *_: {"providers": [], "tasks": []},
+        )
+        try:
+            panel.show()
+            ui.update_idletasks()
+            result = {
+                "passed": True,
+                "renderer": "native-tk",
+                "modal": ui.grab_current() is not None,
+                "side": panel.anchor["side"],
+                "tail_polygons": len(panel.tail_canvas.find_all()),
+                "width": panel.width,
+                "height": panel.height,
+            }
+            assert (
+                not result["modal"]
+                and result["side"] == "left"
+                and result["tail_polygons"] == 2
+            )
+        finally:
+            panel.close()
+            ui.destroy()
+        root = data_root()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "bubble-self-test.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        print(json.dumps(result))
+        return 0
 
     if args.self_test_avatar:
         import json

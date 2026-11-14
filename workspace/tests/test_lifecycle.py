@@ -230,6 +230,7 @@ class LifecycleTests(unittest.TestCase):
             directory = store.root / "tasks" / task["id"] / "dsh"
             directory.mkdir(parents=True)
             (directory / "example").write_text("durable")
+            (store.root / "mini-helper.json").write_text('{"chat":{"selected":"keep"}}')
             result = service.snapshot()
             snapshot = Path(result["path"])
             db = sqlite3.connect(snapshot / "workspace.sqlite3")
@@ -237,11 +238,27 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(
                     db.execute("SELECT prompt FROM tasks").fetchone()[0], "Work"
                 )
+                self.assertEqual(
+                    result["schema_version"],
+                    db.execute("PRAGMA user_version").fetchone()[0],
+                )
+                self.assertEqual(
+                    result["schema_version"],
+                    json.loads((snapshot / "manifest.json").read_text())[
+                        "schema_version"
+                    ],
+                )
             finally:
                 db.close()
             self.assertEqual(
                 (snapshot / "tasks" / task["id"] / "dsh" / "example").read_text(),
                 "durable",
+            )
+            self.assertEqual(
+                json.loads((snapshot / "mini-helper.json").read_text())["chat"][
+                    "selected"
+                ],
+                "keep",
             )
             store.close()
 
