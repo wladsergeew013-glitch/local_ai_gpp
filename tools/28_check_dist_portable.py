@@ -130,6 +130,7 @@ def main() -> int:
                 error(errors[-1])
 
     site_packages = DIST / "worker_runtime" / "Lib" / "site-packages"
+    require(site_packages, 'worker site-packages', errors)
     if site_packages.exists():
         llama_candidates = list(site_packages.glob("llama_cpp*"))
         if llama_candidates:

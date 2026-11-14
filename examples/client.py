@@ -3,7 +3,6 @@ import argparse
 import json
 import os
 import urllib.request
-import re
 
 
 class LocalAI:
@@ -36,7 +35,7 @@ class LocalAI:
                   data=json.dumps(payload).encode(), headers=self.headers, method='POST')
         with urllib.request.urlopen(request, timeout=200) as response:
             if stream:
-                pieces, done, finish_reason = [], False, None
+                pieces, done, finish_reason, metadata = [], False, None, {}
                 for line in response:
                     if not line.startswith(b'data: '): continue
                     frame = line[6:].decode().strip()
@@ -45,6 +44,7 @@ class LocalAI:
                         break
                     chunk = json.loads(frame)
                     if 'error' in chunk: raise RuntimeError(chunk['error']['message'])
+                    metadata = chunk.get('_local_ai_gpp') or metadata
                     for choice in chunk.get('choices', []):
                         finish_reason = choice.get('finish_reason') or finish_reason
                         piece = choice.get('delta', {}).get('content', '')
@@ -54,19 +54,22 @@ class LocalAI:
                 answer = ''.join(pieces)
                 print()
             else:
-                choice = json.load(response)['choices'][0]
+                result = json.load(response)
+                metadata = result.get('_local_ai_gpp') or {}
+                choice = result['choices'][0]
                 answer = choice['message']['content']
                 finish_reason = choice.get('finish_reason')
         if finish_reason == 'length':
             raise RuntimeError('Token limit reached: increase --max-tokens and model context; answer may be incomplete.')
+        final = metadata.get('answer', answer)
+        if (metadata.get('answer_state') in {'empty', 'missing_after_reasoning'}
+                or metadata.get('reasoning_truncated') or not isinstance(final, str) or not final.strip()):
+            raise RuntimeError('The model did not produce a final answer. History was not changed.')
+        if finish_reason not in {None, 'stop'}:
+            raise RuntimeError('Generation did not finish successfully: ' + str(finish_reason))
         if self.memory:
-            # Qwen templates can prefill <think>, leaving only </think> in output.
-            # Previous turns should contain final answers, without reasoning.
-            final = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL | re.IGNORECASE)
-            if re.search(r'</think\s*>', final, re.IGNORECASE):
-                final = re.split(r'</think\s*>', final, maxsplit=1, flags=re.IGNORECASE)[1]
             self.history.extend([{'role':'user','content':text},{'role':'assistant','content':final.strip()}])
-        return answer
+        return final
 
 
 def main():

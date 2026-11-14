@@ -6,7 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from backend.app.core import collect_local_llama_diagnostics
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from backend.app.core import get_runtime_diagnostics
 
 
 def run_nvidia_smi() -> dict[str, object]:
@@ -31,7 +32,7 @@ def run_nvidia_smi() -> dict[str, object]:
 
 
 def main() -> int:
-    diagnostics = collect_local_llama_diagnostics()
+    diagnostics = get_runtime_diagnostics()
     report = {
         "python": sys.executable,
         "cwd": str(Path.cwd()),

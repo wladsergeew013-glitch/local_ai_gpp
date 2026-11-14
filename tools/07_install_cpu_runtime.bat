@@ -42,6 +42,7 @@ if errorlevel 1 goto fail_with_log
 
 echo [INFO] Runtime verification:
 "%VENV_PY%" -c "import llama_cpp; print('version=', getattr(llama_cpp, '__version__', '')); from llama_cpp import llama_cpp as l; print('supports_gpu_offload=', getattr(l, 'llama_supports_gpu_offload', lambda: None)()); info=getattr(l, 'llama_print_system_info', lambda: b'')(); print(info.decode('utf-8', 'replace') if isinstance(info, bytes) else info)" > "%LOG_DIR%\install_cpu_runtime_verify.txt" 2>&1
+if errorlevel 1 goto fail_with_log
 type "%LOG_DIR%\install_cpu_runtime_verify.txt"
 type "%LOG_DIR%\install_cpu_runtime_verify.txt" >> "%LOG_FILE%"
 

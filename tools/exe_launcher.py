@@ -40,6 +40,7 @@ assistant_agent: "NativeAssistantAgent | None" = None
 tray_icon: Any | None = None
 webview_module: Any | None = None
 quitting = False
+desktop_ui_enabled = False
 
 
 def monitor_work_area(x: int, y: int) -> tuple[int, int, int, int] | None:
@@ -100,7 +101,7 @@ def app_state_dir() -> Path:
 def assistant_state_dir() -> Path:
     # V54: assistant UI settings and position are portable with the EXE.
     # In a built desktop package this is dist\assistant_state, not %LOCALAPPDATA%.
-    path = runtime_dir() / "assistant_state"
+    path = __import__('backend.app.model_paths', fromlist=['data_root']).data_root(runtime_dir()) / 'assistant_state'
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -155,6 +156,9 @@ def configure_local_runtime_environment() -> None:
 
 configure_local_runtime_environment()
 
+# Reuse the entry module when backend.main installs the shared HTTP routes.
+if __name__ == '__main__':
+    sys.modules['tools.exe_launcher'] = sys.modules[__name__]
 from backend.app.main import app  # noqa: E402
 from backend.app.version import APP_VERSION  # noqa: E402
 from backend.app.core import MODELS_DIR, load_settings  # noqa: E402
@@ -196,6 +200,7 @@ def desktop_response_headers(extra: dict[str, str] | None = None) -> dict[str, s
         "Pragma": "no-cache",
         "Expires": "0",
         "X-Local-AI-GPP-Sync": LAUNCHER_VERSION_MARKER,
+        "X-Local-AI-GPP-Desktop": '1' if desktop_ui_enabled else '0',
     }
     if extra:
         headers.update(extra)
@@ -209,6 +214,7 @@ def desktop_json_response(data: Any, *, status_code: int = 200) -> JSONResponse:
 def ensure_desktop_marker(response: Any) -> Any:
     try:
         response.headers["X-Local-AI-GPP-Sync"] = LAUNCHER_VERSION_MARKER
+        response.headers['X-Local-AI-GPP-Desktop'] = '1' if desktop_ui_enabled else '0'
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -373,8 +379,8 @@ def unload_models_from_tray() -> None:
             if not model_id:
                 continue
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/models/{urllib.parse.quote(model_id)}/unload", method="POST")
-            with contextlib.suppress(Exception):
-                urllib.request.urlopen(req, timeout=10).read()
+            with urllib.request.urlopen(req, timeout=10) as response:
+                response.read()
         if assistant_agent is not None:
             assistant_agent.set_state("ready", "Помощник", "Модели выгружены.")
     except Exception as exc:
@@ -392,6 +398,7 @@ def _new_conversation(*, conversation_id: str | None = None, title: str | None =
         "title": str(title or SHARED_CHAT_TITLE),
         "createdAt": str(created_at or time.strftime("%Y-%m-%dT%H:%M:%S")),
         "messages": list(messages or []),
+        "clearedVersion": 0,
     }
 
 
@@ -399,6 +406,7 @@ def _default_chat_state() -> dict[str, Any]:
     now = time.time() * 1000.0
     return {
         "version": 0,
+        "storeId": uuid.uuid4().hex,
         "updatedAt": now,
         "source": "launcher-init",
         "activeConversationId": SHARED_CHAT_CONVERSATION_ID,
@@ -408,9 +416,14 @@ def _default_chat_state() -> dict[str, Any]:
     }
 
 
-chat_sync_lock = threading.Lock()
+chat_sync_lock = threading.RLock()
 generation_lock = threading.Lock()
+_chat_generation_context = threading.local()
 _chat_state_cache: tuple[Any, dict[str, Any]] | None = None
+
+
+class ChatStateFormatError(ValueError):
+    pass
 
 
 def _chat_file_signature(path: Path | None = None) -> Any:
@@ -425,15 +438,20 @@ def _chat_file_signature(path: Path | None = None) -> Any:
 def _read_cached_chat_state(path: Path) -> dict[str, Any]:
     """Called under chat_sync_lock; callers receive their own mutable state."""
     global _chat_state_cache
-    signature = _chat_file_signature(path)
-    if _chat_state_cache is not None and _chat_state_cache[0] == signature:
-        return copy.deepcopy(_chat_state_cache[1])
-    state = _normalize_chat_state(json.loads(path.read_text(encoding='utf-8')), touch=False)
-    if signature == _chat_file_signature(path):
-        _chat_state_cache = (signature, copy.deepcopy(state))
-    else:
-        _chat_state_cache = None
-    return state
+    with chat_sync_lock:
+        signature = _chat_file_signature(path)
+        cached = _chat_state_cache
+        if cached is not None and cached[0] == signature:
+            return copy.deepcopy(cached[1])
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(raw, dict) or not isinstance(raw.get('conversations'), list):
+            raise ChatStateFormatError('Некорректная структура истории.')
+        state = _normalize_chat_state(raw, touch=False)
+        if signature == _chat_file_signature(path):
+            _chat_state_cache = (signature, copy.deepcopy(state))
+        else:
+            _chat_state_cache = None
+        return state
 
 
 def message_completion_error(message: dict[str, Any]) -> str:
@@ -497,7 +515,9 @@ def _normalize_chat_conversation(item: Any, fallback_index: int) -> dict[str, An
             if normalized:
                 messages.append(normalized)
         messages = _merge_message_lists([], messages)
-    return _new_conversation(conversation_id=conversation_id, title=title, created_at=created_at, messages=messages)
+    result = _new_conversation(conversation_id=conversation_id, title=title, created_at=created_at, messages=messages)
+    result['clearedVersion'] = max(0, int(item.get('clearedVersion') or 0))
+    return result
 
 
 def _message_count(state: dict[str, Any]) -> int:
@@ -555,6 +575,8 @@ def _normalize_chat_state(payload: Any, *, touch: bool = False) -> dict[str, Any
         version = 0
     return {
         "version": version,
+        "storeId": str(payload.get('storeId') or 'legacy'),
+        "resetVersion": max(0, int(payload.get('resetVersion') or 0)),
         "updatedAt": updated_at,
         "source": str(payload.get("source") or ""),
         "activeConversationId": active_id,
@@ -565,12 +587,18 @@ def _normalize_chat_state(payload: Any, *, touch: bool = False) -> dict[str, Any
 def _write_chat_state_raw(state: dict[str, Any]) -> dict[str, Any]:
     # V64+: file write only. Do NOT call Tk or WebView from FastAPI/worker threads.
     global _chat_state_cache
-    path = chat_sync_file()
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
-    _chat_state_cache = None
-    return state
+    with chat_sync_lock:
+        path = chat_sync_file()
+        temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+        state['version'] = int(state.get('version') or 0) + 1
+        state['updatedAt'] = time.time() * 1000.0
+        try:
+            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        _chat_state_cache = None
+        return state
 
 
 def notify_main_chat_sync(state: dict[str, Any]) -> None:
@@ -587,7 +615,7 @@ def read_chat_state() -> dict[str, Any]:
             return state
         try:
             return _read_cached_chat_state(path)
-        except Exception:
+        except (json.JSONDecodeError, UnicodeError, ChatStateFormatError):
             # Keep the damaged history for recovery instead of overwriting it.
             path.replace(path.with_name(path.name + f'.corrupt-{time.time_ns()}'))
             state = _default_chat_state()
@@ -672,9 +700,16 @@ def _merge_incoming_chat_state_unlocked(incoming: dict[str, Any], existing: dict
 
     if source == "reset":
         state = _default_chat_state()
-        state["updatedAt"] = time.time() * 1000.0
+        state['version'] = result['version']
+        state['storeId'] = result.get('storeId', 'legacy')
+        state['resetVersion'] = result['version'] + 1
         state["source"] = "reset"
         return state
+
+    if incoming['version'] < result.get('resetVersion', 0):
+        return result
+    if source == 'import-browser' and result.get('resetVersion', 0):
+        return result
 
     result_conversations = [dict(conv) for conv in result.get("conversations", []) if isinstance(conv, dict)]
     if not result_conversations:
@@ -694,6 +729,9 @@ def _merge_incoming_chat_state_unlocked(incoming: dict[str, Any], existing: dict
             result_conversations.insert(0, incoming_target)
         else:
             target["messages"] = []
+        target = _find_conversation(result_conversations, target_id)
+        if target is not None:
+            target['clearedVersion'] = result['version'] + 1
         active_id = target_id
     else:
         incoming_order = [str(conv.get("id") or "") for conv in incoming_conversations if str(conv.get("id") or "")]
@@ -705,7 +743,12 @@ def _merge_incoming_chat_state_unlocked(incoming: dict[str, Any], existing: dict
             if existing_conv is None:
                 result_conversations.insert(0, incoming_conv)
                 continue
-            existing_conv["title"] = incoming_conv.get("title") or existing_conv.get("title") or SHARED_CHAT_TITLE
+            if incoming['version'] < existing_conv.get('clearedVersion', 0):
+                continue
+            if source == 'import-browser' and existing_conv.get('clearedVersion', 0):
+                continue
+            if incoming['version'] >= result['version']:
+                existing_conv["title"] = incoming_conv.get("title") or existing_conv.get("title") or SHARED_CHAT_TITLE
             existing_conv["createdAt"] = existing_conv.get("createdAt") or incoming_conv.get("createdAt") or time.strftime("%Y-%m-%dT%H:%M:%S")
             incoming_messages = incoming_conv.get("messages") if isinstance(incoming_conv.get("messages"), list) else []
             if incoming_messages:
@@ -720,9 +763,11 @@ def _merge_incoming_chat_state_unlocked(incoming: dict[str, Any], existing: dict
         ids = {str(conv.get("id") or "") for conv in result_conversations}
         active_id = incoming_active_id if incoming_active_id in ids else str(result.get("activeConversationId") or result_conversations[0].get("id") or SHARED_CHAT_CONVERSATION_ID)
 
-    version = max(int(result.get("version") or 0), int(incoming.get("version") or 0)) + 1
+    version = int(result.get("version") or 0)
     return {
         "version": version,
+        "storeId": result.get('storeId', 'legacy'),
+        "resetVersion": result.get('resetVersion', 0),
         "updatedAt": time.time() * 1000.0,
         "source": source,
         "activeConversationId": active_id,
@@ -730,7 +775,7 @@ def _merge_incoming_chat_state_unlocked(incoming: dict[str, Any], existing: dict
     }
 
 
-def upsert_shared_chat_message(payload: Any) -> dict[str, Any]:
+def upsert_shared_chat_message(payload: Any, *, begin_generation: bool = False) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return read_chat_state()
     message = payload.get("message")
@@ -744,11 +789,17 @@ def upsert_shared_chat_message(payload: Any) -> dict[str, Any]:
         requested_id = str(payload.get("conversationId") or payload.get("activeConversationId") or "").strip()
         active_id = str(existing.get("activeConversationId") or "")
         conversation_id = requested_id or active_id or SHARED_CHAT_CONVERSATION_ID
-        conversation_title = str(payload.get("conversationTitle") or "").strip() or SHARED_CHAT_TITLE
+        existing_conv = _find_conversation(existing['conversations'], conversation_id) or {}
+        token = message.get('generationId')
+        if token and not begin_generation:
+            original = next((m for m in existing_conv.get('messages', []) if m.get('id') == message.get('id')), {})
+            if original.get('generationId') != token:
+                return existing
+        conversation_title = str(payload.get("conversationTitle") or existing_conv.get('title') or SHARED_CHAT_TITLE)
         created_at = str(payload.get("conversationCreatedAt") or time.strftime("%Y-%m-%dT%H:%M:%S"))
         conv = _new_conversation(conversation_id=conversation_id, title=conversation_title, created_at=created_at, messages=[message])
         state = {
-            "version": 0,
+            "version": int(payload.get('baseVersion', existing['version'])),
             "updatedAt": time.time() * 1000.0,
             "source": str(payload.get("source") or ""),
             "activeConversationId": conversation_id if payload.get("activateConversation", True) else active_id,
@@ -771,19 +822,24 @@ def write_chat_state(payload: Any, *, allow_empty_replace: bool = False) -> dict
 
 
 def read_chat_state_unlocked() -> dict[str, Any]:
-    path = chat_sync_file()
-    if not path.exists():
-        return _default_chat_state()
-    try:
-        return _read_cached_chat_state(path)
-    except Exception:
-        path.replace(path.with_name(path.name + f'.corrupt-{time.time_ns()}'))
-        return _default_chat_state()
+    with chat_sync_lock:
+        path = chat_sync_file()
+        if not path.exists():
+            return _default_chat_state()
+        try:
+            return _read_cached_chat_state(path)
+        except (json.JSONDecodeError, UnicodeError, ChatStateFormatError):
+            path.replace(path.with_name(path.name + f'.corrupt-{time.time_ns()}'))
+            return _default_chat_state()
 
 
 def reset_chat_state() -> dict[str, Any]:
     with chat_sync_lock:
+        existing = read_chat_state_unlocked()
         state = _default_chat_state()
+        state['version'] = existing['version']
+        state['storeId'] = existing.get('storeId', 'legacy')
+        state['resetVersion'] = existing['version'] + 1
         state["updatedAt"] = time.time() * 1000.0
         state["source"] = "reset"
         return _write_chat_state_raw(state)
@@ -795,6 +851,7 @@ def clear_chat_conversation(conversation_id: str | None = None) -> dict[str, Any
         target_id = str(conversation_id or existing.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
         incoming = {
             "source": "clear-conversation",
+            "version": existing['version'],
             "activeConversationId": target_id,
             "conversations": [_new_conversation(conversation_id=target_id, title=SHARED_CHAT_TITLE, messages=[])],
         }
@@ -802,7 +859,7 @@ def clear_chat_conversation(conversation_id: str | None = None) -> dict[str, Any
         return _write_chat_state_raw(merged)
 
 
-def append_shared_message(role: str, text: str, *, message_id: str | None = None, conversation_id: str | None = None, conversation_title: str | None = None, conversation_created_at: str | None = None, **extra: Any) -> dict[str, Any]:
+def append_shared_message(role: str, text: str, *, message_id: str | None = None, conversation_id: str | None = None, conversation_title: str | None = None, conversation_created_at: str | None = None, base_version: int | None = None, _begin_generation: bool = False, **extra: Any) -> dict[str, Any]:
     role = "user" if role == "user" else "assistant"
     clean = str(text or "").strip()
     message = {
@@ -813,6 +870,9 @@ def append_shared_message(role: str, text: str, *, message_id: str | None = None
         "syncUpdatedAt": time.time() * 1000.0,
     }
     message.update(extra)
+    generation = getattr(_chat_generation_context, 'value', None)
+    if generation and role == 'assistant' and message['id'] == generation[0]:
+        message['generationId'] = generation[1]
     state = read_chat_state_unlocked()
     target_id = str(conversation_id or state.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
     conversation = _find_conversation(state.get('conversations') or [], target_id) or {}
@@ -821,13 +881,14 @@ def append_shared_message(role: str, text: str, *, message_id: str | None = None
     return upsert_shared_chat_message(
         {
             "source": "assistant",
+            "baseVersion": state.get('version', 0) if base_version is None else base_version,
             "activeConversationId": target_id,
             "conversationId": target_id,
             "conversationTitle": title,
             "conversationCreatedAt": created_at,
             "activateConversation": False,
             "message": message,
-        }
+        }, begin_generation=_begin_generation
     )
 
 
@@ -891,6 +952,7 @@ def _select_desktop_chat_config(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, conversation_id: str, lock_already_acquired: bool = True) -> None:
+    _chat_generation_context.value = (assistant_id, payload.get('_generation_id')) if payload.get('_generation_id') else None
     try:
         config = _select_desktop_chat_config(payload)
         port = int(server_port or 0)
@@ -993,6 +1055,7 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
         append_shared_message("assistant", partial or 'Ответ не получен.', answer=partial or 'Ответ не получен.',
                               error=str(exc), message_id=assistant_id, conversation_id=conversation_id, pending=False, phase="error")
     finally:
+        _chat_generation_context.value = None
         if lock_already_acquired:
             with contextlib.suppress(Exception):
                 generation_lock.release()
@@ -1004,89 +1067,59 @@ def submit_shared_chat_message(payload: dict[str, Any]) -> dict[str, Any] | JSON
         return JSONResponse({"ok": False, "message": "Пустой запрос."}, status_code=400)
     if not generation_lock.acquire(blocking=False):
         return JSONResponse({"ok": False, "busy": True, "message": "Уже идёт генерация. Вторую модель не запускаю."}, status_code=409)
-    stamp = int(time.time() * 1000)
-    user_id = str(payload.get("user_id") or f"shared-user-{stamp}")
-    assistant_id = str(payload.get("assistant_id") or f"shared-assistant-{stamp}")
-    current_state = read_chat_state_unlocked()
-    conversation_id = str(payload.get("conversationId") or payload.get("activeConversationId") or current_state.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
-    conversation_title = str(payload.get("conversationTitle") or SHARED_CHAT_TITLE)
-    conversation_created_at = str(payload.get("conversationCreatedAt") or time.strftime("%Y-%m-%dT%H:%M:%S"))
-    conversation = _find_conversation(current_state.get('conversations') or [], conversation_id) or {}
-    payload = dict(payload)
-    payload['history'] = [
-        {'role': item['role'], 'content': str(item.get('answer') or item.get('text') or '')}
-        for item in (conversation.get('messages') or [])[-64:]
-        if item.get('role') in {'user', 'assistant'} and not item.get('pending')
-        and not message_completion_error(item) and (item.get('answer') or item.get('text'))
-    ]
+    started = False
+    assistant_id = str(payload.get('assistant_id') or uuid.uuid4())
+    conversation_id = ''
     try:
-        # Validate model config before writing the user message, so a bad config does not create a half-dialog.
+        # Check input before publishing a pending turn. Every failure releases the lease.
         _select_desktop_chat_config(payload)
+        with chat_sync_lock:
+            current_state = read_chat_state_unlocked()
+            conversation_id = str(payload.get('conversationId') or payload.get('activeConversationId') or current_state['activeConversationId'])
+            conversation = _find_conversation(current_state['conversations'], conversation_id) or {}
+            base = int(payload.get('baseVersion', current_state['version']))
+            if base < max(current_state.get('resetVersion', 0), conversation.get('clearedVersion', 0)):
+                return JSONResponse({'ok': False, 'message': 'Диалог был очищен. Обновите состояние и повторите запрос.', 'state': current_state}, status_code=409)
+            title = str(payload.get('conversationTitle') or conversation.get('title') or SHARED_CHAT_TITLE)
+            created = str(payload.get('conversationCreatedAt') or conversation.get('createdAt') or time.strftime('%Y-%m-%dT%H:%M:%S'))
+            payload = dict(payload)
+            payload['_generation_id'] = uuid.uuid4().hex
+            payload['history'] = [
+                {'role': item['role'], 'content': str(item.get('answer') if item.get('answer') is not None else item.get('text', ''))}
+                for item in conversation.get('messages', [])
+                if item.get('role') in {'user', 'assistant'} and not item.get('pending')
+                and not message_completion_error(item) and (item.get('answer') if item.get('answer') is not None else item.get('text'))
+            ]
+            user_id = str(payload.get('user_id') or uuid.uuid4())
+            append_shared_message('user', text, message_id=user_id, conversation_id=conversation_id,
+                                  conversation_title=title, conversation_created_at=created)
+            state = append_shared_message('assistant', 'Модель готовит ответ. Финальный текст появится здесь же.',
+                message_id=assistant_id, conversation_id=conversation_id, conversation_title=title,
+                conversation_created_at=created, pending=True, phase='thinking',
+                generationId=payload['_generation_id'], _begin_generation=True)
+        threading.Thread(target=_shared_chat_generation_worker, args=(payload, assistant_id, conversation_id, True), daemon=True).start()
+        started = True
+        return {'ok': True, 'user_id': user_id, 'assistant_id': assistant_id, 'conversationId': conversation_id, 'state': state}
     except Exception as exc:
-        with contextlib.suppress(Exception):
+        if conversation_id:
+            with contextlib.suppress(Exception):
+                append_shared_message('assistant', 'Запрос не запущен.', message_id=assistant_id,
+                    conversation_id=conversation_id, pending=False, phase='error', error=str(exc))
+        return JSONResponse({'ok': False, 'message': str(exc)}, status_code=400)
+    finally:
+        if not started:
             generation_lock.release()
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    append_shared_message("user", text, message_id=user_id, conversation_id=conversation_id, conversation_title=conversation_title, conversation_created_at=conversation_created_at, source=str(payload.get("source") or "desktop"))
-    state = append_shared_message(
-        "assistant",
-        "Модель готовит ответ. Финальный текст появится здесь же.",
-        message_id=assistant_id,
-        conversation_id=conversation_id,
-        conversation_title=conversation_title,
-        conversation_created_at=conversation_created_at,
-        pending=True,
-        phase="thinking",
-        source=str(payload.get("source") or "desktop"),
-    )
-    threading.Thread(target=_shared_chat_generation_worker, args=(dict(payload), assistant_id, conversation_id, True), daemon=True).start()
-    return {"ok": True, "user_id": user_id, "assistant_id": assistant_id, "conversationId": conversation_id, "state": state}
 
 
 @app.middleware("http")
 async def canonical_desktop_sync_middleware(request: Request, call_next):
-    """Hard owner for desktop chat sync endpoints.
-
-    This middleware runs before Starlette route dispatch. It prevents any stale
-    backend route, cached PyInstaller module or accidentally re-added router from
-    serving /api/desktop/chat-sync without the canonical header. The mini helper
-    and the main WebView therefore always hit the same v67.4 shared store.
-    """
-    path = request.url.path.rstrip("/")
-    method = request.method.upper()
-    try:
-        if path == "/api/desktop/chat-sync":
-            if method == "GET":
-                return desktop_json_response(read_chat_state())
-            if method in {"POST", "PUT"}:
-                try:
-                    payload = await request.json()
-                except Exception:
-                    payload = {}
-                return desktop_json_response(write_chat_state(payload))
-            if method == "DELETE":
-                return desktop_json_response(reset_chat_state())
-        if path == "/api/desktop/chat-message" and method == "POST":
-            try:
-                payload = await request.json()
-            except Exception:
-                payload = {}
-            return desktop_json_response(upsert_shared_chat_message(payload))
-        if path == "/api/desktop/chat-reset" and method == "POST":
-            return desktop_json_response(reset_chat_state())
-        if path == "/api/desktop/chat-send" and method == "POST":
-            try:
-                payload = await request.json()
-            except Exception:
-                payload = {}
-            result = submit_shared_chat_message(payload)
-            if isinstance(result, JSONResponse):
-                return ensure_desktop_marker(result)
-            return desktop_json_response(result)
-        if path == "/api/desktop/diagnostics" and method == "GET":
-            return desktop_json_response(desktop_diagnostics())
-    except Exception as exc:
-        return desktop_json_response({"ok": False, "message": str(exc)}, status_code=500)
-
+    """Annotate the shared protocol; security/CORS and typed routes own dispatch."""
+    global server_port
+    path = request.scope.get('path', '').rstrip('/')
+    if not desktop_ui_enabled and request.scope.get('server'):
+        port = request.scope['server'][1]
+        if isinstance(port, int) and 0 < port <= 65535:
+            server_port = port
     response = await call_next(request)
     if path.startswith("/api/desktop"):
         ensure_desktop_marker(response)
@@ -1742,7 +1775,7 @@ class NativeAssistantAgent:
             if self.tail is not None:
                 self.tail.lift()
             self.root.lift()
-        self.settings = write_assistant_settings({**self.settings, "chat_width": self.chat_w, "chat_height": self.chat_h})
+        self.settings = write_assistant_settings({"chat_width": self.chat_w, "chat_height": self.chat_h})
         if avatar_moved:
             self._save_position()
 
@@ -1977,7 +2010,7 @@ class NativeAssistantAgent:
             return
         state = read_chat_state()
         conversation = _find_conversation(state.get('conversations') or [], state.get('activeConversationId')) or {}
-        history = [{'content': str(m.get('answer') or m.get('text') or '')} for m in (conversation.get('messages') or [])[-64:]
+        history = [{'content': str(m.get('answer') or m.get('text') or '')} for m in (conversation.get('messages') or [])
                    if not m.get('pending') and not message_completion_error(m)]
         messages = [{'content': 'Ты локальный корпоративный помощник Local AI GPP. Отвечай кратко и по делу на русском языке.'},
                     *history, {'content': input_text}]
@@ -2076,7 +2109,10 @@ class NativeAssistantAgent:
             stamp = path.stat().st_mtime_ns
             if stamp == self.runtime_settings_stamp:
                 return
-            runtime = _read_json_file(path, {}).get('runtime') or {}
+            settings = _read_json_file(path, {})
+            if not isinstance(settings, dict) or not isinstance(settings.get('runtime', {}), dict):
+                raise ValueError('Некорректная структура настроек.')
+            runtime = settings.get('runtime') or {}
             self.runtime = dict(runtime)
             self.max_tokens = int(runtime.get('max_tokens', 1024))
             self.temperature = float(runtime.get('temperature', 0.2))
@@ -2543,7 +2579,7 @@ class NativeAssistantAgent:
             return
         current = bool(self.root.attributes("-topmost"))
         self.always_on_top = not current
-        write_assistant_settings({**self.settings, "always_on_top": self.always_on_top})
+        self.settings = write_assistant_settings({"always_on_top": self.always_on_top})
         self.root.attributes("-topmost", self.always_on_top)
         if self.chat is not None:
             self.chat.attributes("-topmost", self.always_on_top)
@@ -2773,12 +2809,18 @@ class NativeAssistantAgent:
     def _schedule_chat_sync_poll(self) -> None:
         if self.root is None:
             return
-        while not self.ui_events.empty():
-            self.ui_events.get_nowait()()
-        self._refresh_runtime_settings()
-        self._render_shared_history(force=False)
-        self._refresh_context_hint()
-        self.sync_poll_after = self.root.after(500, self._schedule_chat_sync_poll)
+        try:
+            while not self.ui_events.empty():
+                with contextlib.suppress(Exception):
+                    self.ui_events.get_nowait()()
+            self._refresh_runtime_settings()
+            self._render_shared_history(force=False)
+            self._refresh_context_hint()
+        except Exception:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                self.sync_poll_after = self.root.after(500, self._schedule_chat_sync_poll)
 
     def _append_history(self, role: str, text: str, persist: bool = True) -> None:
         clean = self._strip_prefix(role, text)
@@ -2849,17 +2891,23 @@ class NativeAssistantAgent:
             self._set_state('error', 'Настройки контекста', str(exc))
             self._show_context_dialog()
             return
-        self.input_var.set("")
+        try:
+            state = read_chat_state()
+            conversation_id = str(state.get('activeConversationId') or SHARED_CHAT_CONVERSATION_ID)
+            self.busy_request = True
+            self.awaiting_answer = True
+            threading.Thread(target=self._send_message_worker,
+                             args=(text, conversation_id, state.get('version', 0)), daemon=True).start()
+        except Exception as exc:
+            self.busy_request = self.awaiting_answer = False
+            self._set_state('error', 'Запрос не отправлен', str(exc))
+            return
+        self.input_var.set('')
         if not self.bubble_open:
             self.show_chat()
-        self._set_state("thinking", "Думаю", "Отправил запрос в общий диалог")
-        self.awaiting_answer = True
-        self.busy_request = True
-        state = read_chat_state()
-        conversation_id = str(state.get("activeConversationId") or SHARED_CHAT_CONVERSATION_ID)
-        threading.Thread(target=self._send_message_worker, args=(text, conversation_id), daemon=True).start()
+        self._set_state('thinking', 'Думаю', 'Отправил запрос в общий диалог')
 
-    def _send_message_worker(self, text: str, conversation_id: str) -> None:
+    def _send_message_worker(self, text: str, conversation_id: str, base_version: int | None = None) -> None:
         try:
             payload = {
                 "source": "assistant",
@@ -2874,13 +2922,23 @@ class NativeAssistantAgent:
                 # asking from the mini helper reuses a manually warmed worker.
                 "runtime": {key: self.runtime[key] for key in ('n_ctx', 'context_overflow', 'enable_thinking', 'warm_policy') if key in self.runtime},
             }
+            if base_version is not None:
+                payload['baseVersion'] = base_version
             result = self._json_request("POST", "/api/desktop/chat-send", payload, timeout=20)
             if not result.get("ok"):
                 raise RuntimeError(str(result.get("message") or "Запрос не принят."))
             # No Tk calls from this worker thread. The assistant window polls shared_chat_v65.json.
         except Exception as exc:
             message = str(exc)
-            append_shared_message("assistant", f"Ошибка: {message}", message_id=f"native-error-{int(time.time() * 1000)}", conversation_id=conversation_id, pending=False, phase="error")
+            with contextlib.suppress(Exception):
+                append_shared_message('assistant', f'Ошибка: {message}', message_id=f'native-error-{uuid.uuid4().hex}',
+                                      conversation_id=conversation_id, base_version=base_version, pending=False, phase='error')
+            def failed() -> None:
+                if self.input_var is not None and not self.input_var.get():
+                    self.input_var.set(text)
+                self.awaiting_answer = False
+                self._set_state('error', 'Запрос не отправлен', message)
+            self.ui_events.put(failed)
             # No Tk calls from this worker thread. The assistant window polls shared_chat_v65.json.
         finally:
             self.busy_request = False
@@ -3080,8 +3138,9 @@ def start_tray() -> None:
     threading.Thread(target=tray_icon.run, daemon=True).start()
 
 
-def main() -> None:
-    global main_window, server, server_thread, server_port, webview_module, assistant_agent
+def _run_desktop() -> None:
+    global main_window, server, server_thread, server_port, webview_module, assistant_agent, desktop_ui_enabled
+    desktop_ui_enabled = True
     configure_windows_app_identity()
     if not FRONTEND_DIST.exists():
         show_error(APP_NAME, f"Frontend bundle not found:\n{FRONTEND_DIST}")
@@ -3099,12 +3158,12 @@ def main() -> None:
         return
 
     webview_module = webview
-    recover_interrupted_chat()
     try:
         server_port = find_free_port()
     except OSError:
         show_error(APP_NAME, 'Порт Local AI занят. Закрой предыдущий экземпляр или задай LOCAL_AI_GPP_PORT.')
         return
+    recover_interrupted_chat()
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -3153,6 +3212,22 @@ def main() -> None:
         if not quitting:
             # webview loop ended; keep clean shutdown rather than ghost process.
             request_exit()
+
+
+def main() -> None:
+    from backend.app.instance_lock import InstanceAlreadyRunning, InstanceLock
+    try:
+        with InstanceLock(assistant_state_dir() / '.instance.lock'):
+            _run_desktop()
+    except InstanceAlreadyRunning:
+        # A second launch only focuses the live owner; it never runs recovery.
+        with contextlib.suppress(Exception):
+            info = _read_json_file(instance_file(), {})
+            port = int(info.get('port') or 0)
+            if 0 < port <= 65535:
+                request = urllib.request.Request(f'http://127.0.0.1:{port}/api/desktop/show-main', method='POST')
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    response.read()
 
 
 if __name__ == "__main__":

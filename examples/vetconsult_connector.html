@@ -33,9 +33,8 @@ field('save').onclick = () => run(async () => {
   const catalog = await request('/llm/connections');
   const items = Array.isArray(catalog) ? catalog : catalog.items || [];
   const existing = items.find(item => item.id === 'local-ai-gpp');
-  if (existing) return {ok:true,already_saved:true,item:existing};
-  return request('/llm/connections', {id:'local-ai-gpp',name:'Local AI GPP (CUDA)',provider:'openai_compat',expected_revision:0,
-    config:{base_url:field('local').value,model:field('model').value,api_key:'',temperature:0.2,max_tokens:256,max_context_tokens:2048,timeout_sec:200}});
+  return request('/llm/connections', {id:'local-ai-gpp',name:'Local AI GPP',provider:'openai_compat',expected_revision:existing?.revision || 0,
+    config:{...(existing?.config || {}),base_url:field('local').value,model:field('model').value,api_key:'',temperature:0.2,max_tokens:256,max_context_tokens:2048,timeout_sec:200}});
 });
 field('test').onclick = () => run(() => request('/llm/test', {connection_id:'local-ai-gpp',prompt:field('prompt').value}));
 </script></html>

@@ -78,11 +78,15 @@ if errorlevel 1 goto fail_with_log
 
 echo.
 echo [OK] Containers are running.
-echo Frontend: http://127.0.0.1:8080
-echo Backend:  http://127.0.0.1:18765/api/health
+for /f "delims=" %%P in ('%COMPOSE% port frontend 80') do set "WEB_ADDRESS=%%P"
+for /f "delims=" %%P in ('%COMPOSE% port backend 8000') do set "API_ADDRESS=%%P"
+if not defined WEB_ADDRESS goto fail
+if not defined API_ADDRESS goto fail
+echo Frontend: http://%WEB_ADDRESS%
+echo Backend:  http://%API_ADDRESS%/api/health
 echo.
 echo [INFO] Opening browser...
-start "" "http://127.0.0.1:8080"
+start "" "http://%WEB_ADDRESS%"
 
 echo [INFO] Following logs. Press Ctrl+C to stop viewing logs.
 echo [INFO] Containers will keep running in background.

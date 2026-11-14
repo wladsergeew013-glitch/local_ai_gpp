@@ -28,6 +28,8 @@ export type ThemeSettings = {
   panel_alt: string;
   border: string;
   text: string;
+  error?: string;
+  status?: string;
   muted: string;
   user_bubble: string;
   assistant_bubble: string;
@@ -146,6 +148,8 @@ export type ChatMessage = {
   syncUpdatedAt?: number;
   role: 'user' | 'assistant';
   text: string;
+  error?: string;
+  status?: string;
   answer?: string;
   reasoning?: string;
   pending?: boolean;

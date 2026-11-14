@@ -107,14 +107,6 @@ function normalizeMessageText(role: AgentMessage['role'], value: string): string
   return text;
 }
 
-function stripThinking(value: string): string {
-  if (!value) return '';
-  return value
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .replace(/<think>[\s\S]*/gi, '')
-    .trim();
-}
-
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return String(error || 'Неизвестная ошибка');
@@ -148,6 +140,8 @@ export default function AssistantOverlayApp() {
   const [settings, setSettings] = useState<EngineSettings | null>(null);
   const [runtimeStatuses, setRuntimeStatuses] = useState<RuntimeStatus[]>([]);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const [input, setInput] = useState('');
   const [agentState, setAgentState] = useState<AgentState>('ready');
   const [frame, setFrame] = useState(0);
@@ -170,8 +164,16 @@ export default function AssistantOverlayApp() {
   useEffect(() => {
     document.documentElement.classList.add('assistant-transparent-page');
     document.body.classList.add('assistant-transparent-page');
-    void bootstrap();
+    let stopped = false;
+    let timer = 0;
+    async function poll() {
+      await bootstrap(() => stopped);
+      if (!stopped) timer = window.setTimeout(() => void poll(), 2500);
+    }
+    void poll();
     return () => {
+      stopped = true;
+      window.clearTimeout(timer);
       document.documentElement.classList.remove('assistant-transparent-page');
       document.body.classList.remove('assistant-transparent-page');
     };
@@ -201,19 +203,22 @@ export default function AssistantOverlayApp() {
     setAvatarPos((prev) => clampAvatarPoint(prev, viewport));
   }, [viewport]);
 
-  async function bootstrap() {
+  async function bootstrap(stopped: () => boolean = () => false) {
     try {
       const [boot, runtime] = await Promise.all([
         fetchBootstrap(),
         fetchRuntimeStatus().catch(() => [] as RuntimeStatus[]),
       ]);
+      if (stopped()) return;
       const llms = (boot.models || []).filter((item) => item.type === 'LLM' && item.file_exists !== false);
       setModels(llms);
       setSettings(boot.settings);
       setRuntimeStatuses(runtime);
-      setAgentState(llms.length ? 'ready' : 'error');
+      setAgentState(previous => previous === 'thinking' || previous === 'speaking'
+        || (previous === 'error' && messagesRef.current.slice(-1)[0]?.phase === 'error') ? previous : llms.length ? 'ready' : 'error');
     } catch (error) {
-      setAgentState('error');
+      if (stopped()) return;
+      setAgentState(previous => previous === 'thinking' || previous === 'speaking' ? previous : 'error');
       console.error('Assistant bootstrap failed', error);
     }
   }
@@ -227,7 +232,8 @@ export default function AssistantOverlayApp() {
   const runtime = useMemo(() => ({
     ...DEFAULT_RUNTIME,
     ...(settings?.runtime || {}),
-  } as RuntimeSettings), [settings?.runtime]);
+    ...(activeModel?.runtime || {}),
+  } as RuntimeSettings), [settings?.runtime, activeModel?.runtime]);
 
   const avatarFrame = useMemo(() => {
     if (agentState === 'thinking') return `/assistant/frames/thinking_${frame}.png`;
@@ -239,6 +245,7 @@ export default function AssistantOverlayApp() {
   const badge = stateBadge(agentState);
   const generating = agentState === 'thinking' || agentState === 'speaking';
   const availableHeight = Math.max(180, viewport.height - EDGE * 2);
+  const displayedBubbleWidth = Math.max(1, Math.min(BUBBLE_SIZE.width, viewport.width - EDGE * 2));
   const displayedBubbleHeight = Math.min(
     Math.max(bubbleHeight, generating ? 445 : BUBBLE_SIZE.height),
     availableHeight,
@@ -246,12 +253,12 @@ export default function AssistantOverlayApp() {
 
   const bubbleLayout = useMemo(() => {
     const avatarMiddleY = avatarPos.y + AVATAR_SIZE.height / 2;
-    const canPlaceLeft = avatarPos.x >= BUBBLE_SIZE.width + GAP + EDGE;
+    const canPlaceLeft = avatarPos.x >= displayedBubbleWidth + GAP + EDGE;
     const direction = canPlaceLeft ? 'left' : 'right';
     const left = direction === 'left'
-      ? avatarPos.x - BUBBLE_SIZE.width - GAP
+      ? avatarPos.x - displayedBubbleWidth - GAP
       : avatarPos.x + AVATAR_SIZE.width + GAP;
-    const clampedLeft = clamp(left, EDGE, viewport.width - BUBBLE_SIZE.width - EDGE);
+    const clampedLeft = clamp(left, EDGE, Math.max(EDGE, viewport.width - displayedBubbleWidth - EDGE));
     const top = clamp(avatarPos.y - 32, EDGE, Math.max(EDGE, viewport.height - displayedBubbleHeight - EDGE));
     const tailTop = clamp(avatarMiddleY - top - 18, 52, displayedBubbleHeight - 68);
     const tailSide = direction === 'left' ? 'right' : 'left';
@@ -261,7 +268,7 @@ export default function AssistantOverlayApp() {
       tailTop,
       tailSide,
     };
-  }, [avatarPos, viewport, displayedBubbleHeight]);
+  }, [avatarPos, viewport, displayedBubbleHeight, displayedBubbleWidth]);
 
   function beginResize(event: ReactPointerEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -352,7 +359,7 @@ export default function AssistantOverlayApp() {
     const userId = `agent-u-${Date.now()}`;
     const assistantId = `agent-a-${Date.now()}`;
     setMessages((prev) => [
-      ...prev.slice(-9),
+      ...prev,
       { id: userId, role: 'user', text },
       { id: assistantId, role: 'assistant', text: '', pending: true },
     ]);
@@ -379,7 +386,7 @@ export default function AssistantOverlayApp() {
             setAgentState('speaking');
             setMessages((prev) => prev.map((item) => (
               item.id === assistantId
-                ? { ...item, text: normalizeMessageText('assistant', stripThinking(answer)), pending: true }
+                ? { ...item, text: normalizeMessageText('assistant', answer), pending: true }
                 : item
             )));
             return;
@@ -439,6 +446,7 @@ export default function AssistantOverlayApp() {
             left: `${bubbleLayout.left}px`,
             top: `${bubbleLayout.top}px`,
             height: `${displayedBubbleHeight}px`,
+            width: `${displayedBubbleWidth}px`,
             ['--agent-tail-top' as string]: `${bubbleLayout.tailTop}px`,
           } as CSSProperties}
         >

@@ -110,7 +110,7 @@ class MemoryAndStorageTests(unittest.TestCase):
                 self.assertEqual(core.external_worker_python(), str(python))
 
     def test_prompt_supplied_open_think_tag(self):
-        result = split_reasoning('Thinking Process: 2+2=4.\n</think>\nFour.')
+        result = split_reasoning('Thinking Process: 2+2=4.\n</think>\nFour.', thinking=True)
         self.assertEqual(result['answer'], 'Four.')
         self.assertEqual(result['reasoning'], 'Thinking Process: 2+2=4.')
         self.assertFalse(result['reasoning_truncated'])
@@ -175,7 +175,7 @@ class MemoryAndStorageTests(unittest.TestCase):
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(app)
+        self.client = TestClient(app, base_url='http://127.0.0.1')
         self.addCleanup(self.client.close)
 
     def test_auth_and_disabled_models(self):

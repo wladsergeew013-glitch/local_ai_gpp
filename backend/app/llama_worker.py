@@ -41,7 +41,6 @@ def build_llama_kwargs(payload: dict) -> dict:
         # /dev/null during load. That drops our JSON heartbeats on slow disks.
         # Native diagnostics go to the parent's independently drained stderr.
         'use_mlock': bool(cfg.get('use_mlock', False)), 'verbose': True,
-        'seed': _int_value(cfg.get('seed'), -1),
     }
     split = _tensor_split(cfg.get('tensor_split'))
     if split: kwargs['tensor_split'] = split
@@ -68,6 +67,11 @@ def fit_messages(runtime: Any, messages: list[dict], max_tokens: int, n_ctx: int
         count = len(runtime.tokenize(text.encode('utf-8'), special=True)) + 32 * len(kept) + 128
         if count + max_tokens <= n_ctx: return kept, dropped
         start = next((i for i, m in enumerate(kept) if m.get('role') == 'user'), -1)
+        prefix = next((i for i, m in enumerate(kept) if m.get('role') != 'system'), -1)
+        if truncate and 0 <= prefix < start:
+            dropped += start - prefix
+            del kept[prefix:start]
+            continue
         end = next((i for i in range(start + 1, len(kept)) if kept[i].get('role') == 'user'), -1)
         if not truncate or start < 0 or end < 0:
             raise ValueError(context_limit_message(n_ctx, count, max_tokens, history=not truncate and end >= 0))
@@ -88,6 +92,9 @@ def serve(payloads) -> int:
                 from llama_cpp import Llama
                 requested_kwargs = _filter_supported_kwargs(Llama, build_llama_kwargs(payload))
                 kwargs = dict(requested_kwargs)
+                cfg = payload.get('runtime') or {}
+                if runtime is not None and summary.get('fallback_reason') and not cfg.get('gpu_fallback_to_cpu', True):
+                    runtime.close(); runtime = None; config = None
                 if requested_kwargs != config or runtime is None:
                     if runtime is not None:
                         runtime.close()
@@ -111,7 +118,6 @@ def serve(payloads) -> int:
                     summary = {'mode': 'CPU fallback' if fallback else ('CUDA' if kwargs.get('n_gpu_layers') else 'CPU'),
                                'n_gpu_layers': kwargs.get('n_gpu_layers', 0), 'fallback_reason': fallback, 'backend': details,
                                'worker_pid': os.getpid(), 'load_elapsed_ms': round((time.perf_counter()-started)*1000)}
-                cfg = payload.get('runtime') or {}
                 summary.update(apply_model_adapter(runtime, cfg))
                 write_event({'type': 'runtime', 'mode': summary['mode'], 'runtime': summary})
                 if payload.get('operation') == 'load':

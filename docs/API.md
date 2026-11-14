@@ -37,11 +37,11 @@ python examples/check_api.py --model "Qwen3.5 4B:Qwen3.5-4B-Q4_K_M.gguf"
 - `POST /api/models/{model_id}/start` — загрузить, необязательное тело `{"runtime":{"n_gpu_layers":-1}}`.
 - `POST /api/models/{model_id}/unload` — выгрузить.
 - `POST /api/runtime/unload-all` — освободить память всех моделей.
-- `POST /api/runtime/cancel` — прекратить активную генерацию, завершив worker.
+- `POST /api/runtime/cancel` — прекратить загрузку/разогрев или генерацию, завершив worker.
 
 При первом inference модель загружается автоматически. Загружена одна LLM одновременно.
 Sampler настройки не требуют перезагрузки; изменение n_ctx/GPU layers требует её.
-`keep_loaded` сохраняет модель, `unload_after_idle` выгружает после idle_unload_sec.
+`keep_hot` (или `manual`) сохраняет модель, `unload_after_idle` выгружает после idle_unload_sec.
 model_id в URL кодируйте через percent encoding.
 
 Три режима задаются `runtime.n_gpu_layers`: `0` — только CPU (KV и операции тоже остаются CPU),
@@ -242,3 +242,21 @@ model — точный ID, timeout_sec=200, max_tokens=256.
 ```powershell
 & C:\Gavno\VetConsult\RAG_assistant_\venv\Scripts\python.exe tools/check_vetconsult_client.py --vetconsult-root C:\Gavno\VetConsult\RAG_assistant_ --model 'ID из /v1/models'
 ```
+
+
+## История и целостность ответа (1.4.4)
+
+Браузер, Docker web и мини-помощник используют общий серверный файл диалогов.
+`version` монотонно возрастает; клиент не применяет более старый ответ HTTP после нового poll.
+Очистка устанавливает барьер версии: старый snapshot или поздний worker не восстанавливает удалённые реплики.
+Python `LocalAI` хранит свою память в экземпляре клиента; на `/v1` сервер не создаёт диалоги автоматически.
+Лимит запроса — 8192 сообщения, затем действует реальный лимит контекста модели; клиент не обрезает историю скрыто.
+
+У Qwen с включённым адаптером финальный ответ находится в `choices[0].message.content`,
+рассуждение — в `reasoning_content`. `_local_ai_gpp.answer_state` и `reasoning_truncated`
+показывают отсутствие финального ответа. В SSE эти поля приходят в `_local_ai_gpp` завершающего chunk.
+Незавершённый ответ не добавляется в память Python-клиента. В обычном тексте XML-теги `<think>` сохраняются.
+
+Сервис предназначен для loopback. Браузерные запросы проверяют Host и Origin до выполнения действий;
+обычный Python/curl без Origin продолжает работать. Дополнительные браузерные origins задаются явно
+через `server.cors_origins` или `LOCAL_AI_GPP_CORS_ORIGINS`; после изменения нужен перезапуск.

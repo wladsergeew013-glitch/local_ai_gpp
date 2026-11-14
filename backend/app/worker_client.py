@@ -6,6 +6,8 @@ import os
 import queue
 import re
 import subprocess
+import contextlib
+import signal
 import threading
 import time
 from collections import deque
@@ -17,6 +19,9 @@ from fastapi import HTTPException
 class WorkerClient:
     def __init__(self, command: list[str], **kwargs: Any):
         self.job = None
+        self.command_lock = threading.Lock()
+        self.writer_done: threading.Event | None = None
+        self.owns_process_group = os.name != 'nt' and kwargs.setdefault('start_new_session', True)
         if os.name == 'nt':
             from backend.app.windows_job import WorkerJob
             self.job = WorkerJob()
@@ -83,23 +88,37 @@ class WorkerClient:
 
     def events(self, payload: dict[str, Any], *, timeout: float = 180,
                idle_timeout: float = 60) -> Iterator[dict[str, Any]]:
+        if not self.command_lock.acquire(blocking=False):
+            raise HTTPException(409, 'Worker is busy.')
         complete = False
         started = activity = heartbeat = time.monotonic()
+        written = threading.Event()
+        self.writer_done = written
+        errors: list[BaseException] = []
+        def write_request():
+            try:
+                assert self.process.stdin is not None
+                self.process.stdin.write((json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8'))
+                self.process.stdin.flush()
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                written.set()
         try:
-            assert self.process.stdin is not None
-            self.process.stdin.write((json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8'))
-            self.process.stdin.flush()
+            threading.Thread(target=write_request, daemon=True).start()
             while True:
                 now = time.monotonic()
                 if now - started >= timeout or now - activity >= idle_timeout:
                     raise HTTPException(504, 'Inference timeout; worker stopped. Retry the request.')
+                if written.is_set() and errors:
+                    raise HTTPException(502, f'Inference worker pipe failed: {errors[0]}')
                 try:
                     event = self.output.get(timeout=min(0.2, max(0.01, timeout - (now - started))))
                 except queue.Empty:
                     if self.process.poll() is not None:
                         raise HTTPException(502, 'Inference worker exited: ' + ''.join(self.stderr)[-4000:])
                     # Let HTTP streams observe a disconnected client during model loading/prefill.
-                    if now - heartbeat >= 2:
+                    if now - heartbeat >= .1:
                         heartbeat = now
                         yield {'type': 'heartbeat'}
                     continue
@@ -118,8 +137,11 @@ class WorkerClient:
             raise HTTPException(502, f'Inference worker pipe failed: {exc}') from exc
         finally:
             # A timeout, disconnect or abandoned iterator must release native RAM/VRAM.
-            if not complete:
-                self.close()
+            try:
+                if not complete:
+                    self.close()
+            finally:
+                self.command_lock.release()
 
     def close(self) -> None:
         with self.close_lock:
@@ -127,12 +149,20 @@ class WorkerClient:
             self.stopped.set()
             if self.job:
                 self.job.close()
-            if self.process.poll() is None:
-                self.process.kill()
+            with contextlib.suppress(OSError):
+                if self.owns_process_group:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                elif self.process.poll() is None:
+                    self.process.kill()
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+            if self.writer_done is not None:
+                self.writer_done.wait(.2)
             for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
                 if pipe:
-                    pipe.close()
+                    if pipe is self.process.stdin and self.writer_done is not None and not self.writer_done.is_set():
+                        continue
+                    with contextlib.suppress(OSError):
+                        pipe.close()

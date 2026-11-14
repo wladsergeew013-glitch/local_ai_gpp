@@ -63,7 +63,7 @@ if exist "%ROOT%\backend\app\main.py" (
   >>"%LOG%" echo [OK] backend desktop route owner absent.
 )
 
-"%WORKER%" -c "from pathlib import Path; p=Path(r'%PTH_FILE%'); lines=[x.strip().lstrip('\ufeff') for x in p.read_text(encoding='utf-8', errors='replace').splitlines()]; raise SystemExit(0 if '..' in lines else 1)" >nul 2>>"%LOG%"
+"%WORKER%" -c "from pathlib import Path; import sys; p=Path(sys.argv[1]); lines=[x.strip().lstrip('\ufeff') for x in p.read_text(encoding='utf-8', errors='replace').splitlines()]; raise SystemExit(0 if '..' in lines else 1)" "%PTH_FILE%" >nul 2>>"%LOG%"
 if errorlevel 1 (
   echo [ERROR] worker_runtime\python312._pth does not contain exact ".." line.
   >>"%LOG%" echo [ERROR] python312._pth missing exact .. line.
@@ -80,7 +80,7 @@ if not "%RC%"=="0" goto fail_with_log
 
 echo.
 echo [OK] Smoke test completed.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '%LOG%' -Tail 120"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath $env:LOG -Tail 120"
 exit /b 0
 
 :check_file
@@ -95,7 +95,7 @@ exit /b 0
 
 :fail_with_log
 echo [ERROR] Smoke test failed. Last log lines:
-powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path -LiteralPath '%LOG%') { Get-Content -LiteralPath '%LOG%' -Tail 180 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path -LiteralPath $env:LOG) { Get-Content -LiteralPath $env:LOG -Tail 180 }"
 
 :fail
 echo.

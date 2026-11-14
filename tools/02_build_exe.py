@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import stat
+import uuid
 import json
 import os
 import shutil
@@ -12,8 +15,10 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 TOOLS = ROOT / "tools"
 OUT = TOOLS / "out"
+DIST = None
 LOG = OUT / "build_exe.log"
 DOWNLOADS = OUT / "downloads"
 PY_EMBED_VERSION = os.environ.get("LOCAL_AI_GPP_EMBED_PYTHON_VERSION", "3.12.10")
@@ -250,14 +255,14 @@ def build_pyinstaller(venv_py: Path) -> None:
     launcher = TOOLS / "exe_launcher.py"
     if not launcher.exists():
         raise SystemExit("[ERROR] tools/exe_launcher.py not found. Apply proxy bypass v34/v35 package first.")
-    dist_exe = ROOT / "dist" / "LocalAIGPP.exe"
-    if dist_exe.exists():
-        try:
-            dist_exe.unlink()
-        except PermissionError as exc:
-            raise SystemExit("[ERROR] Cannot replace dist/LocalAIGPP.exe. Close LocalAIGPP.exe from tray/Task Manager and rebuild.") from exc
+    dist_exe = (DIST or ROOT / 'dist') / 'LocalAIGPP.exe'
+    pyinstaller_output = OUT / ('pyinstaller-output-' + uuid.uuid4().hex)
+    checked_build_path(pyinstaller_output)
+    pyinstaller_output.mkdir(parents=True)
     build_dir = OUT / "pyinstaller_build"
     spec_dir = OUT / "pyinstaller_spec"
+    checked_build_path(build_dir)
+    checked_build_path(spec_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
     spec_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -270,7 +275,7 @@ def build_pyinstaller(venv_py: Path) -> None:
         "--noconfirm", "--clean", "--onefile", "--windowed",
         "--name", "LocalAIGPP",
         "--icon", str(ROOT / "models_storage" / "branding" / "icons" / "mini_agent_head_v2.ico"),
-        "--distpath", str(ROOT / "dist"),
+        "--distpath", str(pyinstaller_output),
         "--workpath", str(build_dir),
         "--specpath", str(spec_dir),
         "--paths", str(ROOT),
@@ -298,8 +303,11 @@ def build_pyinstaller(venv_py: Path) -> None:
         str(launcher),
     ]
     run(cmd, cwd=ROOT, env=env)
-    if not dist_exe.exists():
-        raise SystemExit("[ERROR] dist/LocalAIGPP.exe was not created")
+    candidate_exe = pyinstaller_output / 'LocalAIGPP.exe'
+    if not candidate_exe.is_file() or not candidate_exe.stat().st_size:
+        raise SystemExit('[ERROR] PyInstaller did not produce an executable')
+    dist_exe.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(candidate_exe, dist_exe)
 
 
 def ignore_junk(_dir: str, names: list[str]) -> set[str]:
@@ -309,7 +317,8 @@ def ignore_junk(_dir: str, names: list[str]) -> set[str]:
 def _safe_model_folder_name(record: dict[str, object], fallback_index: int) -> str:
     raw = str(record.get("name") or record.get("id") or f"model_{fallback_index}").strip()
     safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw)
-    return safe.strip("._")[:80] or f"model_{fallback_index}"
+    identity = str(record.get('id') or fallback_index) + '\0' + str(record.get('path') or '')
+    return (safe.strip('._')[:60] or 'model') + '-' + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
 def _path_is_inside(child: Path, parent: Path) -> bool:
@@ -320,10 +329,31 @@ def _path_is_inside(child: Path, parent: Path) -> bool:
         return False
 
 
+def checked_build_path(target: Path) -> Path:
+    # Inspect lexical components before resolving: a junction can point back into source.
+    target = Path(os.path.abspath(target))
+    root = Path(os.path.abspath(ROOT))
+    if target == root or not target.is_relative_to(root):
+        raise ValueError(f'Refusing build operation outside workspace: {target}')
+    allowed = (target.is_relative_to(OUT) or
+               target in {root / 'dist/backend', root / 'dist/worker_runtime'} or
+               (target.name == '__pycache__' and any(target.is_relative_to(root / part) for part in ('backend', 'tools'))))
+    if not allowed:
+        raise ValueError(f'Not a disposable build directory: {target}')
+    for component in (target, *target.parents):
+        if component == root:
+            break
+        try:
+            info = component.lstat()
+        except FileNotFoundError:
+            continue
+        if component.is_symlink() or getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f'Refusing aliased build path: {component}')
+    return target
+
+
 def remove_build_tree(target: Path) -> None:
-    target = target.resolve()
-    if target == ROOT.resolve() or not _path_is_inside(target, ROOT):
-        raise ValueError(f"Refusing to delete outside the build workspace: {target}")
+    target = checked_build_path(target)
     if target.exists():
         shutil.rmtree(target)
 
@@ -360,14 +390,15 @@ def _copy_portable_model_registry(models_src: Path, models_dst: Path, *, package
             continue
         record = dict(item)
         path_value = str(record.get("path") or "").strip()
-        source_path = Path(path_value) if path_value else None
+        from backend.app.model_paths import model_path
+        source_path = model_path(path_value, models_src, ROOT) if path_value else None
         if source_path and source_path.exists() and source_path.is_file() and source_path.suffix.lower() in MODEL_EXTENSIONS:
             if package_models:
                 folder = _safe_model_folder_name(record, index)
                 dest = models_dst / folder / source_path.name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    if not dest.exists() or dest.stat().st_size != source_path.stat().st_size:
+                    if source_path.resolve() != dest.resolve():
                         log(f"[INFO] Packaging model into dist: {source_path} -> {dest}")
                         shutil.copy2(source_path, dest)
                     record["path"] = str(Path("models_storage") / folder / source_path.name)
@@ -406,7 +437,7 @@ def _copy_portable_model_registry(models_src: Path, models_dst: Path, *, package
 
 
 def copy_portable_backend_and_metadata() -> None:
-    dist = ROOT / "dist"
+    dist = DIST or ROOT / "dist"
     dist.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / "VERSION", dist / "VERSION")
     backend_src = ROOT / "backend" / "app"
@@ -428,7 +459,8 @@ def copy_portable_backend_and_metadata() -> None:
     models_dst = dist / "models_storage"
     new_store = not models_dst.exists()
     (models_dst / "branding").mkdir(parents=True, exist_ok=True)
-    models_src = Path(os.environ.get("LOCAL_AI_GPP_DATA_DIR", str(ROOT))) / "models_storage"
+    from backend.app.model_paths import data_root
+    models_src = data_root(ROOT) / 'models_storage'
     settings_src = models_src / "settings.json"
     settings_dst = models_dst / "settings.json"
     if not settings_dst.exists():
@@ -471,14 +503,28 @@ def copy_portable_backend_and_metadata() -> None:
 
 def download_once(url: str, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and target.stat().st_size > 0:
+    valid = target.is_file() and target.stat().st_size > 0
+    if valid and target.suffix.lower() == '.zip':
+        try:
+            with zipfile.ZipFile(target) as archive:
+                valid = archive.testzip() is None
+        except (OSError, zipfile.BadZipFile):
+            valid = False
+    if valid:
         log(f"[OK] Using cached {target.name}")
         return
     log(f"[INFO] Downloading {url}")
     partial = target.with_suffix(target.suffix + ".partial")
     with urllib.request.urlopen(url, timeout=30) as response, partial.open("wb") as output:
         shutil.copyfileobj(response, output)
-    partial.replace(target)
+    try:
+        if target.suffix.lower() == '.zip':
+            with zipfile.ZipFile(partial) as archive:
+                if archive.testzip() is not None:
+                    raise ValueError('Corrupt downloaded ZIP')
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def configure_embedded_python(worker_runtime: Path) -> None:
@@ -512,7 +558,7 @@ def verify_worker_runtime(worker_py: Path, runtime_kind: str, dist: Path) -> dic
         "'system_info':lib.llama_print_system_info().decode('utf-8','replace')}))"
     )
     checked = subprocess.run([str(worker_py), "-c", script], cwd=str(dist),
-                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     if checked.returncode:
         raise SystemExit("[ERROR] Packaged runtime failed verification: " + (checked.stderr or checked.stdout))
     details = json.loads(checked.stdout.strip().splitlines()[-1])
@@ -525,7 +571,7 @@ def verify_worker_runtime(worker_py: Path, runtime_kind: str, dist: Path) -> dic
 
 
 def create_worker_runtime(runtime_kind: str, dist: Path | None = None) -> None:
-    dist = dist if dist is not None else ROOT / "dist"
+    dist = dist if dist is not None else (DIST or ROOT / "dist")
     worker_runtime = dist / "worker_runtime"
     worker_py = worker_runtime / "python.exe"
     if worker_runtime.exists():
@@ -547,7 +593,7 @@ def create_worker_runtime(runtime_kind: str, dist: Path | None = None) -> None:
     if req.exists():
         run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "-r", str(req)], cwd=dist)
     else:
-        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "fastapi==0.116.1", "uvicorn==0.35.0", "python-multipart==0.0.20", "httpx==0.28.1"], cwd=dist)
+        run([str(worker_py), "-m", "pip", "install", "--no-warn-script-location", "fastapi==0.141.1", "starlette==1.3.1", "uvicorn==0.35.0", "python-multipart==0.0.32", "httpx==0.28.1"], cwd=dist)
 
     runtime_kind = (runtime_kind or "cpu").lower()
     if runtime_kind.startswith("cu"):
@@ -587,6 +633,7 @@ def create_worker_runtime(runtime_kind: str, dist: Path | None = None) -> None:
     (dist / "runtime_info.json").write_text(
         json.dumps(
             {
+                "app_version": app_version(),
                 "effective": runtime_kind,
                 "supports_gpu_offload": verified["supports_gpu_offload"],
                 "llama_cpp_version": verified["llama_cpp"],
@@ -611,7 +658,7 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
     tools folder. These helpers use the embedded worker_runtime\\python.exe, so
     they do not require installed Python.
     """
-    dist = ROOT / "dist"
+    dist = DIST or ROOT / "dist"
     readme = dist / "README_PORTABLE_DIST.txt"
     shutil.copy2(ROOT / "models_storage/branding/icons/mini_agent_head_v2.ico", dist / "LocalAIGPP.ico")
     readme.write_text(
@@ -678,6 +725,8 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
         "    print('[ERROR] cannot read models.json:', repr(exc))\n"
         "    models = []\n"
         "    errors += 1\n"
+        "if not isinstance(models, list):\n"
+        "    print('[ERROR] models.json must be a list'); errors += 1\n"
         "if isinstance(models, list):\n"
         "    llms = [m for m in models if isinstance(m, dict) and m.get('type') == 'LLM']\n"
         "    print('LLM models=', len(llms))\n"
@@ -690,7 +739,7 @@ def write_dist_portable_helpers(runtime_kind: str) -> None:
         "            inside = True\n"
         "        except Exception:\n"
         "            inside = False\n"
-        "        ok = p.exists() and inside\n"
+        "        ok = bool(m.get('path')) and p.is_file() and inside\n"
         "        print(('[OK] ' if ok else '[ERROR] ') + str(m.get('id')) + ' -> ' + str(p))\n"
         "        errors += 0 if ok else 1\n"
         "print('errors=', errors)\n"
@@ -781,15 +830,53 @@ def prepare_worker_runtime(runtime_kind: str, reuse_source: Path | None = None) 
         if info.get("effective") != runtime_kind or not (source / "python.exe").is_file():
             raise SystemExit("[ERROR] Reused runtime does not match the requested CPU/CUDA variant.")
         shutil.copytree(source, stage / "worker_runtime", ignore=ignore_junk)
+        run([str(stage / 'worker_runtime/python.exe'), '-m', 'pip', 'install', '-r', str(ROOT / 'backend/requirements-base.txt')], cwd=stage)
         details = verify_worker_runtime(stage / "worker_runtime/python.exe", runtime_kind, stage)
         if details.get("llama_cpp") != (CUDA_VERSION if runtime_kind.startswith("cu") else CPU_VERSION):
             raise SystemExit("[ERROR] Reused runtime has an unexpected llama-cpp-python version.")
-        shutil.copy2(info_path, stage / "runtime_info.json")
+        info['app_version'] = app_version()
+        info['app_built_at'] = datetime.now().isoformat(timespec='seconds')
+        (stage / 'runtime_info.json').write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding='utf-8')
     return stage
 
 
+def promote_distribution(candidate):
+    destination = ROOT / 'dist'
+    # The previous executable and runtime remain intact until every build step passes.
+    if destination.is_symlink() or (destination.exists() and getattr(destination.lstat(), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise ValueError('Refusing aliased distribution')
+    previous = OUT / ('previous-dist-' + uuid.uuid4().hex)
+    moved = []
+    had_previous = destination.exists()
+    if had_previous:
+        destination.rename(previous)
+    try:
+        for name in ('models_storage', 'assistant_state', 'logs'):
+            source = previous / name if had_previous else ROOT / name
+            if not source.is_dir():
+                continue
+            target = candidate / name
+            if target.exists():
+                remove_build_tree(target)
+            if had_previous:
+                source.rename(target)
+                moved.append(name)
+            elif name == 'assistant_state':
+                shutil.copytree(source, target)
+        candidate.rename(destination)
+    except BaseException:
+        for name in reversed(moved):
+            (candidate / name).rename(previous / name)
+        if had_previous:
+            previous.rename(destination)
+        raise
+    log(f'[OK] Previous program retained: {previous}' if had_previous else '[OK] Distribution installed')
+
+
 def main() -> int:
+    global DIST
     args = parse_args()
+    checked_build_path(OUT)
     OUT.mkdir(parents=True, exist_ok=True)
     reset_log_file("Local AI GPP desktop exe builder v67.4")
     runtime_kind = choose_runtime_kind(args)
@@ -805,16 +892,21 @@ def main() -> int:
         os.environ["LOCAL_AI_GPP_PACKAGE_MODELS"] = "0"
     # Install and verify CUDA plus its DLLs before replacing the current EXE.
     worker_stage = prepare_worker_runtime(runtime_kind, getattr(args, "reuse_worker_runtime", None))
+    DIST = OUT / ('candidate-dist-' + uuid.uuid4().hex)
+    checked_build_path(DIST)
+    DIST.mkdir()
     clean_python_caches()
     build_frontend()
     build_pyinstaller(venv_py)
     copy_portable_backend_and_metadata()
-    worker_target = ROOT / "dist/worker_runtime"
+    worker_target = DIST / "worker_runtime"
     if worker_target.exists():
         remove_build_tree(worker_target)
     shutil.move(str(worker_stage / "worker_runtime"), str(worker_target))
-    shutil.copy2(worker_stage / "runtime_info.json", ROOT / "dist/runtime_info.json")
+    shutil.copy2(worker_stage / "runtime_info.json", DIST / "runtime_info.json")
     write_dist_portable_helpers(runtime_kind)
+    promote_distribution(DIST)
+    DIST = ROOT / 'dist'
     log("")
     log("=" * 60)
     log("DESKTOP EXE BUILD COMPLETE")

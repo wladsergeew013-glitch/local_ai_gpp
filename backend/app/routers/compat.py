@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.core import append_request_log, create_chat_completion, create_request_log, find_model, load_models, load_settings, stream_chat_completion
 from backend.app.streaming import event_response
+from backend.app.reasoning import split_reasoning, uses_reasoning
 
 router = APIRouter(tags=["openai-compatible"])
 
@@ -21,7 +22,7 @@ class OpenAIMessage(BaseModel):
 
 class OpenAIChatRequest(BaseModel):
     model: str
-    messages: list[OpenAIMessage] = Field(min_length=1, max_length=256)
+    messages: list[OpenAIMessage] = Field(min_length=1, max_length=8192)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(default=256, ge=1, le=8192)
     stream: bool = False
@@ -87,7 +88,10 @@ def openai_chat_completions(
         append_request_log(log_path, "openai_chat_failed", {"error": exc.detail, "request_id": request_id})
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         raise HTTPException(status_code=exc.status_code, detail=f"{detail} Лог выполнения: {log_path}") from exc
-    answer = result["choices"][0]["message"]["content"]
+    raw = result['choices'][0]['message']['content']
+    runtime = result.get('_local_ai_gpp', {}).get('runtime', {})
+    parsed = split_reasoning(raw, uses_reasoning(runtime))
+    answer = parsed['answer']
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -96,11 +100,12 @@ def openai_chat_completions(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": answer},
+                "message": {"role": "assistant", "content": answer, "reasoning_content": parsed["reasoning"]},
                 "finish_reason": result["choices"][0].get("finish_reason", "stop"),
             }
         ],
         "usage": result.get("usage", {}),
+        "_local_ai_gpp": {**parsed, "runtime": runtime},
     }
 
 
@@ -108,10 +113,12 @@ def openai_events(payload, messages, log_path):
     completion_id = f'chatcmpl-{uuid.uuid4().hex}'
     created = int(time.time())
 
-    def chunk(delta, finish=None, usage=None):
+    def chunk(delta, finish=None, usage=None, metadata=None):
         data = {'id': completion_id, 'object': 'chat.completion.chunk', 'created': created,
                 'model': payload.model,
                 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}
+        if metadata is not None:
+            data['_local_ai_gpp'] = metadata
         if usage is not None:
             data.update(choices=[], usage=usage)
         return 'data: ' + json.dumps(data, ensure_ascii=False) + '\n\n'
@@ -120,13 +127,27 @@ def openai_events(payload, messages, log_path):
     stream = stream_chat_completion(model_id=payload.model, messages=messages,
                                    temperature=payload.temperature, max_tokens=payload.max_tokens,
                                    request_log_path=log_path, runtime_override=template_runtime(payload))
+    full_text, sent_answer, runtime = '', 0, {}
     try:
         for event in stream:
             kind = event.get('type')
-            if kind == 'delta':
-                yield chunk({'content': event['text']})
+            if kind == 'runtime':
+                runtime = event.get('runtime') or {}
+            elif kind == 'delta':
+                full_text += event['text']
+                if uses_reasoning(runtime):
+                    # Wait for the phase delimiter; never emit reasoning as answer content.
+                    parsed = split_reasoning(full_text, True)
+                    answer = parsed['answer']
+                    if len(answer) > sent_answer:
+                        yield chunk({'content': answer[sent_answer:]})
+                        sent_answer = len(answer)
+                else:
+                    yield chunk({'content': event['text']})
             elif kind == 'done':
-                yield chunk({}, event.get('finish_reason') or 'stop')
+                runtime = event.get('runtime') or runtime
+                parsed = split_reasoning(event.get('content') or full_text, uses_reasoning(runtime))
+                yield chunk({}, event.get('finish_reason') or 'stop', metadata={**parsed, 'runtime': runtime})
                 if payload.stream_options.get('include_usage'):
                     yield chunk({}, usage=event.get('usage') or {})
             elif kind == 'error':

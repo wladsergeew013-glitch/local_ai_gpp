@@ -6,6 +6,7 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 COPY frontend ./
+COPY examples/vetconsult_connector.html /examples/vetconsult_connector.html
 COPY VERSION /VERSION
 ARG VITE_API_BASE=
 ENV VITE_API_BASE=${VITE_API_BASE}
