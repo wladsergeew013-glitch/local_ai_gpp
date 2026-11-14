@@ -173,6 +173,8 @@ def serve(payloads) -> int:
                             if calls:
                                 message['tool_calls'] = calls
                                 choice['finish_reason'] = 'tool_calls'
+                        if not payload.get('parallel_tool_calls',True) and len(message.get('tool_calls') or [])>1:
+                            raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
                     result['_local_ai_gpp'] = {'runtime': summary, 'history_dropped': dropped,
                                                'generation_elapsed_ms': round((time.perf_counter()-generated)*1000)}
                     write_event({'type': 'result', 'result': result})
@@ -192,6 +194,8 @@ def serve(payloads) -> int:
                 if tools and not tool_calls:
                     content, tool_calls = decode_qwen_tools(content, tools, tool_choice, finish)
                 if tools:
+                    if not payload.get('parallel_tool_calls',True) and len(tool_calls)>1:
+                        raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
                     if content:
                         write_event({'type': 'delta', 'text': content})
                     for index, call in enumerate(tool_calls):

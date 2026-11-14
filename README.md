@@ -1,7 +1,7 @@
 <div align="center">
   <img src="models_storage/branding/icons/mini_agent_head_v2.png" width="108" alt="Local AI GPP">
-  <h1>Local AI GPP</h1>
-  <p><strong>Ваш мини-помощник. Ваши модели. Локальный inference.</strong></p>
+  <h1>Local AI · Runtime + Workspace</h1>
+  <p><strong>Ваши модели. Ваши проекты. Локальный inference и агент.</strong></p>
   <p>
     <a href="https://github.com/wladsergeew013-glitch/local_ai_gpp/actions/workflows/ci.yml"><img src="https://github.com/wladsergeew013-glitch/local_ai_gpp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
@@ -13,6 +13,15 @@
 </div>
 
 Local AI запускает GGUF-модели на вашем компьютере и предоставляет OpenAI-compatible API другим приложениям. Основной интерфейс — Windows EXE с мини-помощником и общей историей. В браузере — компактный сине-белый чат с отдельными диалогами.
+
+В репозитории два независимых приложения. **Runtime 1.5** загружает модель, предоставляет API и сохраняет диагностические диалоги. **Workspace 0.1** ведёт проекты, задачи, действия, разрешения и diff; он запускает DeepSeek Harness через отдельный адаптер и обращается к Runtime только по HTTP. Закрытие Workspace оставляет Runtime работающим. [Запуск Workspace, границы и восстановление →](docs/WORKSPACE.md)
+
+| Приложение | Windows | Локальный адрес | Данные |
+|---|---|---|---|
+| Runtime | `LocalAIGPP.exe` + mini-helper | `http://127.0.0.1:8765` | `models_storage`, `assistant_state` |
+| Workspace | `LocalAIWorkspace.exe` | `http://127.0.0.1:8776` | `%LOCALAPPDATA%/LocalAIWorkspace` |
+
+Для агентной задачи нужна загруженная модель с подтверждённым шаблоном tools и контекстом от 8192 токенов. Для Qwen3.5 4B используйте 16384 и резерв ответа 2048; при нехватке VRAM выберите смешанный режим. Возможности и фактическое состояние доступны через API, без чтения файлов Runtime.
 
 ![Чат Local AI: Qwen4B, CUDA и продолжение диалога](docs/images/chat.png)
 
@@ -101,7 +110,7 @@ docker compose up -d --build --wait
 | http://127.0.0.1:8080/v1 | Base URL для приложений |
 | http://127.0.0.1:18765/docs | API напрямую / Swagger |
 
-В настройках чата укажите путь **внутри контейнера**, например `/models/Qwen3.5-4B-Q4_K_M.gguf`, и выберите CPU. История браузера остаётся в браузере; реестр, настройки и логи сервера — в Docker volume. [Порты, хранение и проверка inference →](docs/DOCKER.md)
+В настройках чата укажите путь **внутри контейнера**, например `/models/Qwen3.5-4B-Q4_K_M.gguf`, и выберите CPU. Общая история диагностического чата, реестр, настройки и логи сохраняются сервером в Docker volume; локальная копия браузера служит кэшем. API `/v1/chat/completions` остаётся stateless: историю передаёт клиент. [Порты, хранение и проверка inference →](docs/DOCKER.md)
 
 Для NVIDIA GPU на Linux x86_64 установите совместимый драйвер и NVIDIA Container Toolkit, затем запустите CUDA-вариант:
 

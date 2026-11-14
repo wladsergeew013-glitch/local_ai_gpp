@@ -71,7 +71,7 @@ def openai_chat_completions(
             max_tokens=payload.max_tokens,
             request_log_path=log_path,
             runtime_override=template_runtime(payload),
-            tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, lease=lease,
+            tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, parallel_tool_calls=payload.parallel_tool_calls, lease=lease,
         )
     except HTTPException as exc:
         append_request_log(log_path, "openai_chat_failed", {"error": exc.detail, "request_id": request_id})
@@ -82,6 +82,8 @@ def openai_chat_completions(
     raw = result_message.get('content') or ''
     runtime = result.get('_local_ai_gpp', {}).get('runtime', {})
     parsed = split_reasoning(raw, uses_reasoning(runtime))
+    if result_message.get('tool_calls'):
+        parsed['answer_state'] = 'tool_calls'
     answer = parsed['answer']
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -120,7 +122,7 @@ def openai_events(payload, messages, log_path, lease=None):
     stream = stream_chat_completion(model_id=payload.model, messages=messages,
                                    temperature=payload.temperature, max_tokens=payload.max_tokens,
                                    request_log_path=log_path, runtime_override=template_runtime(payload),
-                                   tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, lease=lease)
+                                   tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, parallel_tool_calls=payload.parallel_tool_calls, lease=lease)
     full_text, sent_answer, runtime = '', 0, {}
     try:
         for event in stream:
@@ -141,14 +143,17 @@ def openai_events(payload, messages, log_path, lease=None):
             elif kind == 'done':
                 runtime = event.get('runtime') or runtime
                 parsed = split_reasoning(event.get('content') or full_text, uses_reasoning(runtime))
+                if event.get('tool_calls'):
+                    parsed['answer_state'] = 'tool_calls'
                 yield chunk({}, event.get('finish_reason') or 'stop', metadata={**parsed, 'runtime': runtime})
                 if payload.stream_options.get('include_usage'):
                     yield chunk({}, usage=event.get('usage') or {})
             elif kind == 'tool_delta':
                 yield chunk({'tool_calls': event['tool_calls']})
             elif kind == 'error':
+                from backend.app.api_errors import error_code
                 yield 'data: ' + json.dumps({'error': {'message': event.get('message'),
-                    'type': 'inference_error', 'code': event.get('status_code', 500)}}) + '\n\n'
+                    'type': 'inference_error', 'code': error_code(event.get('status_code',500),event.get('message'))}}) + '\n\n'
             else:
                 yield ': keepalive\n\n'
         yield 'data: [DONE]\n\n'

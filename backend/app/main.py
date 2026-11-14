@@ -5,7 +5,8 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -128,22 +129,26 @@ app.include_router(system_router)
 app.include_router(runtime_api_router)
 
 
-@app.exception_handler(__import__('fastapi').HTTPException)
+@app.exception_handler(HTTPException)
 async def runtime_http_error(request: Request, exc):
     from fastapi.responses import JSONResponse
     if not request.url.path.startswith('/v1/'):
         return JSONResponse({'detail': exc.detail}, status_code=exc.status_code, headers=exc.headers)
     detail = exc.detail
     message = detail.get('message', str(detail)) if isinstance(detail, dict) else str(detail)
-    known = ('SETTINGS_POLICY_UNAVAILABLE', 'TOOL_CALL_INCOMPLETE', 'TOOL_CALL_INVALID', 'TOOL_CALL_REQUIRED',
-             'TOOL_CHOICE_MISMATCH', 'TOOLS_UNSUPPORTED')
-    code = detail.get('code') if isinstance(detail, dict) else next((c for c in known if message.startswith(c)), None)
-    if not code:
-        code = {401:'AUTH_REQUIRED',403:'FORBIDDEN',404:'MODEL_NOT_FOUND',409:'RUNTIME_BUSY',499:'REQUEST_CANCELLED',
-                502:'WORKER_FAILED',503:'RUNTIME_UNAVAILABLE',504:'WORKER_TIMEOUT'}.get(exc.status_code, 'INVALID_REQUEST' if exc.status_code < 500 else 'INFERENCE_FAILED')
-        if 'контекст' in message.lower() or 'context' in message.lower():
-            code = 'CONTEXT_OVERFLOW'
+    from backend.app.api_errors import error_code
+    code = error_code(exc.status_code,detail)
     return JSONResponse({'detail': detail, 'error': {'code': code, 'message': message}}, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def runtime_validation_error(request:Request,exc):
+    from fastapi.responses import JSONResponse
+    from fastapi.exception_handlers import request_validation_exception_handler
+    if not request.url.path.startswith('/v1/'):
+        return await request_validation_exception_handler(request,exc)
+    fields=[{'loc':list(item['loc']),'type':item['type'],'msg':item['msg']} for item in exc.errors()]
+    return JSONResponse({'detail':fields,'error':{'code':'INVALID_REQUEST','message':'Request does not match the chat/tool contract.'}},status_code=422)
 
 
 # The ASGI service owns its routes, storage and static UI; no desktop imports.

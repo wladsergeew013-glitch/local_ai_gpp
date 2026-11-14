@@ -25,6 +25,7 @@ from backend.app.core import (
     upsert_model,
     update_model_fields,
     validate_model_registry,
+    save_model_profile,
 )
 
 router = APIRouter(tags=["models"])
@@ -111,7 +112,10 @@ def start_model(model_id: str, payload: dict | None = None) -> dict:
 @router.post("/api/models/{model_id}/prewarm")
 def prewarm_model(model_id: str, payload: dict | None = None) -> dict:
     runtime = payload.get("runtime") if isinstance(payload, dict) and isinstance(payload.get("runtime"), dict) else None
-    return prewarm_runtime(model_id, runtime_override=runtime)
+    result=prewarm_runtime(model_id, runtime_override=runtime)
+    if runtime is not None and (payload or {}).get('save_profile') is True:
+        result=save_model_profile(model_id,runtime)
+    return result
 
 
 @router.post("/api/models/{model_id}/unload")

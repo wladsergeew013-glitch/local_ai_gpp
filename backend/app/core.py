@@ -1129,13 +1129,40 @@ def get_runtime(model, settings, request_log_path=None, runtime_override=None):
         return _get_runtime(model, settings, request_log_path, runtime_override)
 
 
+LOAD_PROFILE_FIELDS = {'n_ctx','n_batch','n_threads','n_threads_batch','n_gpu_layers','main_gpu','split_mode','tensor_split',
+                       'offload_kqv','flash_attn','op_offload','swa_full','use_mmap','use_mlock','gpu_fallback_to_cpu'}
+
+
+def selected_load_profile(model):
+    entry=RUNTIMES.get(model['id']) or {}
+    worker=entry.get('runtime')
+    if (not entry.get('model_loaded') or worker is None or worker.process.poll() is not None
+            or entry.get('model_signature') != model_file_signature(model['path'])):
+        return {}
+    return {key:value for key,value in (entry.get('config') or {}).items() if key in LOAD_PROFILE_FIELDS}
+
+
+def save_model_profile(model_id, runtime):
+    partial=validate_runtime(runtime)
+    with JSON_LOCK:
+        models,model,index=find_model(model_id)
+        model['runtime']=validate_runtime({**(model.get('runtime') or {}),**partial})
+        models[index]=model
+        save_models(models)
+    return model
+
+
 def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
                        request_log_path=None, runtime_override=None, truncate_history=False,
-                       tools=None, tool_choice='auto', lease=None):
+                       tools=None, tool_choice='auto', parallel_tool_calls=True, lease=None):
     from backend.app.runtime_manager import runtime_manager
     with runtime_manager.operation(lease) as admitted:
         _, model, _ = find_model(model_id)
         settings = load_settings()
+        # Other applications address the profile the user has actually loaded.
+        # Sampling and policy still use current settings; explicit request values win.
+        explicit_override=validate_runtime(runtime_override if runtime_override is not None else {})
+        runtime_override={**selected_load_profile(model),**explicit_override}
         cfg = _merge_runtime(model, settings, runtime_override)
         from backend.app.context_budget import validate_context
         try:
@@ -1150,7 +1177,7 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
         try:
             append_request_log(request_log_path, "generation_start", {"message_count": len(messages), "worker_pid": worker.process.pid})
             events = _worker_events(worker, _worker_payload(model, cfg, messages=messages, temperature=temperature,
-                max_tokens=max_tokens, stream=stream, tools=tools or [], tool_choice=tool_choice,
+                max_tokens=max_tokens, stream=stream, tools=tools or [], tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
                 truncate_history=truncate_history and cfg.get('context_overflow', 'trim') == 'trim'))
             for event in events:
                 admitted.check()
@@ -1161,6 +1188,9 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
                 if event.get("type") in {"done", "result"}:
                     append_request_log(request_log_path, "generation_complete", {"type": event["type"], "worker_pid": worker.process.pid})
                 yield event
+        except HTTPException:
+            admitted.check()
+            raise
         finally:
             if events is not None:
                 events.close()
@@ -1172,11 +1202,11 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
 
 
 def create_chat_completion(*, model_id, messages, temperature, max_tokens, request_log_path=None,
-                           runtime_override=None, truncate_history=False, tools=None, tool_choice='auto', lease=None):
+                           runtime_override=None, truncate_history=False, tools=None, tool_choice='auto', parallel_tool_calls=True, lease=None):
     for event in _completion_events(model_id=model_id, messages=messages, temperature=temperature,
                                    max_tokens=max_tokens, stream=False, request_log_path=request_log_path,
                                    runtime_override=runtime_override, truncate_history=truncate_history,
-                                   tools=tools, tool_choice=tool_choice, lease=lease):
+                                   tools=tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls, lease=lease):
         if event.get("type") == "result":
             return event["result"]
     raise HTTPException(502, "Worker did not return a completion.")

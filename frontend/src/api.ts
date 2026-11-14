@@ -59,7 +59,7 @@ export async function prewarmModel(modelId: string, runtime?: Record<string, unk
   return readJson<ModelRecord>(await fetch(apiUrl(`/api/models/${encodeURIComponent(modelId)}/prewarm`), {
     method: 'POST',
     headers: runtime ? { 'Content-Type': 'application/json' } : undefined,
-    body: runtime ? JSON.stringify({ runtime }) : undefined,
+    body: runtime ? JSON.stringify({ runtime, save_profile: true }) : undefined,
     signal,
   }));
 }
