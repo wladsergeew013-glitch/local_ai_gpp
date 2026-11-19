@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from workspace.app.main import create_app
 from workspace.app import desktop_host
 from workspace.app.mini_avatar import clamp_position, position_window
+from workspace.app.control_access import UI_TOKEN_HEADER
 
 
 class Hook:
@@ -132,6 +133,7 @@ class DesktopOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch.object(
             desktop_host, "_callbacks", {}
         ), TestClient(create_app(root), base_url="http://127.0.0.1") as client:
+            client.headers[UI_TOKEN_HEADER] = client.app.state.ui_token
             status = client.get("/api/host/status").json()
             self.assertFalse(status["desktop"])
             self.assertEqual(status["mini_helper_owner"], "workspace")

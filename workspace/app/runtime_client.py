@@ -55,6 +55,21 @@ class RuntimeClient:
             raise ValueError("Unsupported Runtime API version.")
         return result
 
+    def probe(self):
+        models = self.request("GET", "models", timeout=5).get("data", [])
+        readiness = self.request("GET", "runtime/readiness", timeout=5)
+        available = (
+            any(row.get("id") == self.model for row in models) if self.model else None
+        )
+        return {
+            "models": models,
+            "ready": readiness,
+            "model_available": available,
+            "model_loaded": bool(
+                available and self.model in readiness.get("ready_model_ids", [])
+            ),
+        }
+
     def cancel_owner(self, owner_id, token):
         return self.request(
             "POST",

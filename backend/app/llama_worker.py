@@ -11,7 +11,8 @@ from backend.app.core import _filter_supported_kwargs, _float_value, _int_value,
 from backend.app.cuda_runtime import configure_cuda_dlls
 from backend.app.context_budget import validate_context, context_limit_message
 from backend.app.model_adapters import apply_model_adapter
-from backend.app.tool_calls import decode_qwen_tools, merge_tool_delta
+from backend.app.reasoning import split_reasoning, uses_reasoning
+from backend.app.tool_calls import decode_qwen_tools
 
 _output_lock = threading.Lock()
 
@@ -82,6 +83,31 @@ def fit_messages(runtime: Any, messages: list[dict], max_tokens: int, n_ctx: int
         del kept[start:end]
 
 
+def finish_tool_turn(choice, tools, tool_choice, summary, parallel):
+    message = choice['message']
+    raw = message.get('content') or ''
+    finish = choice.get('finish_reason')
+    calls = message.pop('tool_calls', None) or []
+    if uses_reasoning(summary):
+        # Structured calls from the native handler do not carry a phase.
+        # Only the text after the reasoning delimiter can supply an action.
+        phases = split_reasoning(raw, True)
+        answer, calls = decode_qwen_tools(phases['answer'], tools, tool_choice, finish)
+        if not phases['reasoning_truncated']:
+            message['content'] = phases['reasoning'] + '</think>' + (answer or '')
+    elif not calls:
+        message['content'], calls = decode_qwen_tools(raw, tools, tool_choice, finish)
+    if calls:
+        if finish == 'length':
+            raise ValueError('TOOL_CALL_INCOMPLETE: truncated completion; no action was emitted.')
+        if not parallel and len(calls) > 1:
+            raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
+        message['tool_calls'] = calls
+        choice['finish_reason'] = 'tool_calls'
+    elif finish == 'tool_calls':
+        choice['finish_reason'] = 'stop'
+
+
 def serve(payloads) -> int:
     runtime, config, summary = None, None, {}
     active, stop = threading.Event(), threading.Event()
@@ -138,12 +164,10 @@ def serve(payloads) -> int:
                     write_event({'type': 'ready', 'runtime': summary})
                     continue
                 max_tokens = int(payload.get('max_tokens', 512))
-                tools = payload.get('tools') or []
                 tool_choice = payload.get('tool_choice', 'auto')
+                tools = [] if tool_choice == 'none' else payload.get('tools') or []
                 if tools and summary.get('tool_calling') not in {'qwen3-json', 'qwen35-xml'}:
                     raise ValueError('TOOLS_UNSUPPORTED: this model template has no validated tool-call adapter.')
-                if tool_choice == 'none':
-                    tools = []
                 messages, dropped = fit_messages(runtime, payload['messages'], max_tokens, int(cfg.get('n_ctx', 4096)), bool(payload.get('truncate_history')), tools)
                 if summary.get('tool_calling') == 'qwen35-xml':
                     # The official 3.5 template iterates argument mappings; the HTTP API carries JSON strings.
@@ -165,16 +189,13 @@ def serve(payloads) -> int:
                 generated = time.perf_counter()
                 result = runtime.create_chat_completion(**_filter_supported_kwargs(runtime.create_chat_completion, chat_kwargs))
                 if not payload.get('stream') or tools:
+                    choice = result['choices'][0]
                     if tools:
-                        choice = result['choices'][0]
-                        message = choice['message']
-                        if not message.get('tool_calls'):
-                            message['content'], calls = decode_qwen_tools(message.get('content') or '', tools, tool_choice, choice.get('finish_reason'))
-                            if calls:
-                                message['tool_calls'] = calls
-                                choice['finish_reason'] = 'tool_calls'
-                        if not payload.get('parallel_tool_calls',True) and len(message.get('tool_calls') or [])>1:
-                            raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
+                        finish_tool_turn(choice, tools, tool_choice, summary, payload.get('parallel_tool_calls', True))
+                    else:
+                        choice['message'].pop('tool_calls', None)
+                        if choice.get('finish_reason') == 'tool_calls':
+                            choice['finish_reason'] = 'stop'
                     result['_local_ai_gpp'] = {'runtime': summary, 'history_dropped': dropped,
                                                'generation_elapsed_ms': round((time.perf_counter()-generated)*1000)}
                     if payload.get('stream'):
@@ -190,33 +211,19 @@ def serve(payloads) -> int:
                         continue
                     write_event({'type': 'result', 'result': result})
                     continue
-                content, finish, calls = '', 'stop', {}
+                content, finish = '', 'stop'
                 for chunk in result:
                     choice = (chunk.get('choices') or [{}])[0]
                     finish = choice.get('finish_reason') or finish
                     text = str((choice.get('delta') or {}).get('content') or '')
-                    merge_tool_delta(calls, choice.get('delta') or {})
                     if text:
                         content += text
-                        # Buffer tool-enabled turns until a complete, validated action is available.
-                        if not tools:
-                            write_event({'type': 'delta', 'text': text})
-                tool_calls = [calls[i] for i in sorted(calls)]
-                if tools and not tool_calls:
-                    content, tool_calls = decode_qwen_tools(content, tools, tool_choice, finish)
-                if tools:
-                    if not payload.get('parallel_tool_calls',True) and len(tool_calls)>1:
-                        raise ValueError('TOOL_CALL_INVALID: parallel tool calls were disabled by the client.')
-                    if content:
-                        write_event({'type': 'delta', 'text': content})
-                    for index, call in enumerate(tool_calls):
-                        write_event({'type': 'tool_delta', 'tool_calls': [{'index': index, **call}]})
-                    if tool_calls:
-                        finish = 'tool_calls'
-                content = content or ''
+                        write_event({'type': 'delta', 'text': text})
+                if finish == 'tool_calls':
+                    finish = 'stop'
                 prompt_tokens = len(runtime.tokenize(json.dumps(messages, ensure_ascii=False).encode('utf-8')))
                 completion_tokens = len(runtime.tokenize(content.encode('utf-8'), add_bos=False))
-                write_event({'type': 'done', 'content': content, 'tool_calls': tool_calls, 'finish_reason': finish, 'runtime': summary, 'history_dropped': dropped,
+                write_event({'type': 'done', 'content': content, 'tool_calls': [], 'finish_reason': finish, 'runtime': summary, 'history_dropped': dropped,
                              'elapsed_ms': round((time.perf_counter()-started)*1000),
                              'usage': {'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens,
                                        'total_tokens': prompt_tokens+completion_tokens, 'estimated': True}})

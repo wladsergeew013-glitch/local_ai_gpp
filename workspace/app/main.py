@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import secrets
 import sys
 import os
 from contextlib import asynccontextmanager
@@ -15,12 +16,18 @@ from workspace.app.task_service import TaskService
 from workspace.app.runtime_client import RuntimeClient, local_url
 from workspace.app.history import reconcile
 from workspace.app.instance import Instance
+from workspace.app.control_access import (
+    UI_TOKEN_HEADER,
+    operator_token,
+    requires_operator,
+)
 
 from workspace.app.version import VERSION
 
 
-def create_app(root=None):
+def create_app(root=None, *, ui_token=None):
     root = Path(root or data_root())
+    ui_token = operator_token(ui_token)
 
     @asynccontextmanager
     async def lifespan(application):
@@ -39,6 +46,7 @@ def create_app(root=None):
                 store.close()
 
     app = FastAPI(title="Local AI Workspace", version=VERSION, lifespan=lifespan)
+    app.state.ui_token = ui_token
 
     @app.middleware("http")
     async def boundary(request, call_next):
@@ -54,6 +62,16 @@ def create_app(root=None):
                 or parsed.netloc != request.headers.get("host")
             ):
                 return JSONResponse({"detail": "Foreign browser origin denied"}, 403)
+        if requires_operator(request.scope["path"], request.method):
+            supplied = request.headers.get(UI_TOKEN_HEADER, "")
+            if not secrets.compare_digest(supplied.encode(), ui_token.encode()):
+                return JSONResponse(
+                    {
+                        "detail": "WORKSPACE_ACCESS_REQUIRED: откройте Workspace из приложения или по ссылке из терминала."
+                    },
+                    401,
+                    headers={"Cache-Control": "no-store"},
+                )
         return await call_next(request)
 
     @app.exception_handler(ValueError)
@@ -162,12 +180,8 @@ def create_app(root=None):
     @app.post("/api/providers/probe")
     def probe(payload: ProviderInput):
         client = RuntimeClient(payload.model_dump())
-        models = client.request("GET", "models")
-        result = {
-            "models": models.get("data", []),
-            "ready": client.request("GET", "runtime/readiness"),
-        }
-        if payload.model:
+        result = client.probe()
+        if result["model_available"]:
             result["capabilities"] = client.capabilities()
         return result
 
@@ -203,10 +217,7 @@ def create_app(root=None):
         client = RuntimeClient(
             {**payload.model_dump(), "api_key": payload.api_key or old["api_key"]}
         )
-        return {
-            "models": client.request("GET", "models").get("data", []),
-            "ready": client.request("GET", "runtime/readiness"),
-        }
+        return client.probe()
 
     @app.post("/api/chats")
     @app.post("/api/tasks")
@@ -284,9 +295,13 @@ def create_app(root=None):
 
     @app.post("/api/chats/{task_id}/start")
     @app.post("/api/tasks/{task_id}/start")
-    def start(task_id: str, payload: TaskAction, request: Request):
+    def start(task_id: str, payload: StartAction, request: Request):
         return tasks(request).start(
-            task_id, payload.revision, workspace_url=str(request.base_url)
+            task_id,
+            payload.revision,
+            new_prompt=payload.prompt,
+            memory=payload.memory,
+            workspace_url=str(request.base_url),
         )
 
     @app.post("/api/chats/{task_id}/stop")
@@ -364,12 +379,6 @@ def create_app(root=None):
 
         return read_items(store(request).one("connectors", connector_id))
 
-    @app.post("/api/connectors/{connector_id}/items")
-    def connector_write(connector_id: str, payload: ConnectorWrite, request: Request):
-        from workspace.app.connectors import write_item
-
-        return write_item(store(request), connector_id, payload.model_dump())
-
     @app.post("/api/chats/{task_id}/mcp")
     @app.post("/api/tasks/{task_id}/mcp")
     def connector_mcp(task_id: str, payload: dict, request: Request):
@@ -440,6 +449,11 @@ class TaskAction(BaseModel):
     revision: int = Field(ge=1)
 
 
+class StartAction(TaskAction):
+    prompt: str | None = Field(default=None, min_length=1, max_length=100000)
+    memory: bool | None = None
+
+
 class Followup(TaskAction):
     memory: bool | None = None
     prompt: str = Field(min_length=1, max_length=100000)
@@ -450,13 +464,6 @@ class ConnectorInput(BaseModel):
     base_url: str
     api_key: str = ""
     allow_write: bool = False
-
-
-class ConnectorWrite(BaseModel):
-    title: str = Field(min_length=1, max_length=500)
-    body: str = Field(max_length=20000)
-    action_id: str = Field(min_length=16, max_length=128)
-    approved: bool = False
 
 
 app = create_app()

@@ -117,6 +117,11 @@ class OwnedProcess:
         except Exception as exc:
             error = str(exc)
         finally:
+            if error is None:
+                # EOF can arrive just before the child exits. Let Popen record
+                # its actual code before cleaning up any remaining descendants.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self.process.wait(timeout=1)
             self._kill_tree()
             self.writer.join(0.5)
             for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
@@ -138,6 +143,8 @@ class OwnedProcess:
                     os.killpg(self.process.pid, signal.SIGKILL)
             survivors = []
             for pid, created in list(self.known.items()):
+                if pid == self.process.pid:
+                    continue
                 try:
                     process = psutil.Process(pid)
                     if process.create_time() == created and process.is_running():
@@ -148,7 +155,10 @@ class OwnedProcess:
             _, alive = psutil.wait_procs(survivors, timeout=3)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self.process.wait(timeout=3)
-            return [p.pid for p in alive if p.is_running()]
+            remaining = [p.pid for p in alive if p.is_running()]
+            if self.process.returncode is None:
+                remaining.append(self.process.pid)
+            return remaining
 
     def stop(self, grace=2):
         with contextlib.suppress(Exception):
@@ -164,3 +174,7 @@ class OwnedProcess:
             "owned_pid": self.process.pid,
             "descendants": len(self.known) - 1,
         }
+
+    def abort(self):
+        """Signal the owned tree without waiting for the completion callback."""
+        self._kill_tree()

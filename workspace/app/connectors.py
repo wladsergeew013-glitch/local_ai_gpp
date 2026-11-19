@@ -2,8 +2,16 @@
 
 import json
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 from workspace.app.runtime_client import local_url
 from workspace.app.store import now
+
+
+class ConnectorWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=500)
+    body: str = Field(max_length=20000)
+    action_id: str = Field(min_length=16, max_length=128)
 
 
 def request(connector, method, body=None):
@@ -26,34 +34,67 @@ def read_items(connector):
     return request(connector, "GET")
 
 
-def write_item(store, connector_id, payload):
-    connector = store.one("connectors", connector_id)
-    if not connector["allow_write"] or payload.get("approved") is not True:
+def receipt(store, connector_id, write: ConnectorWrite):
+    rows = store.rows(
+        "SELECT * FROM connector_actions WHERE action_id=?", (write.action_id,)
+    )
+    if not rows:
+        return None
+    old = rows[0]
+    if (
+        old["connector_id"] != connector_id
+        or json.loads(old["payload"]) != write.model_dump()
+    ):
         raise ValueError(
-            "CONNECTOR_APPROVAL_REQUIRED: enable writes and approve this exact item."
+            "ACTION_CONFLICT: the action ID already describes a different write."
         )
-    action = payload["action_id"]
-    body = {"title": payload["title"], "body": payload["body"], "action_id": action}
-    encoded = json.dumps(body, ensure_ascii=False, sort_keys=True)
+    return {
+        "status": old["status"],
+        "result": json.loads(old["result"]) if old["result"] else None,
+        "resent": False,
+    }
+
+
+def write_item(store, task_id, connector_id, write: ConnectorWrite, approval_id):
+    body = write.model_dump()
+    action = write.action_id
     with store.transaction() as db:
-        rows = store.rows(
-            "SELECT * FROM connector_actions WHERE action_id=?", (action,)
-        )
-        if rows:
-            old = rows[0]
-            if old["connector_id"] != connector_id or old["payload"] != encoded:
-                raise ValueError(
-                    "ACTION_CONFLICT: the action ID already describes a different write."
-                )
-            return {
-                "status": old["status"],
-                "result": json.loads(old["result"]) if old["result"] else None,
-                "resent": False,
-            }
+        task = store.one("tasks", task_id)
+        connector = store.one("connectors", connector_id)
+        if (
+            connector_id not in task["details"].get("connector_ids", [])
+            or not connector["allow_write"]
+        ):
+            raise ValueError("Connector write is unavailable in this conversation.")
+        previous = receipt(store, connector_id, write)
+        if previous is not None:
+            return previous
+        row = db.execute(
+            "SELECT payload FROM approvals WHERE id=? AND task_id=? "
+            "AND kind='connector' AND status='granted'",
+            (approval_id, task_id),
+        ).fetchone()
+        proposal = json.loads(row["payload"]).get("payload", {}) if row else {}
+        if (
+            task["status"] not in {"running", "awaiting_permission"}
+            or proposal.get("connector_id") != connector_id
+            or any(proposal.get(key) != value for key, value in body.items())
+        ):
+            raise ValueError(
+                "CONNECTOR_APPROVAL_REQUIRED: approve this exact item in Workspace."
+            )
         db.execute(
             "INSERT INTO connector_actions VALUES(?,?,?,?,?,?)",
-            (action, connector_id, encoded, "sending", None, now()),
+            (
+                action,
+                connector_id,
+                json.dumps(body, ensure_ascii=False),
+                "sending",
+                None,
+                now(),
+            ),
         )
+        db.execute("UPDATE approvals SET status='consumed' WHERE id=?", (approval_id,))
     try:
         result = request(connector, "POST", body)
         status = "completed"

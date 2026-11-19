@@ -9,7 +9,7 @@ import httpx
 from fastapi import HTTPException
 from workspace.app.store import Store
 from workspace.app.task_service import TaskService
-from workspace.app.connectors import write_item
+from workspace.app.connectors import ConnectorWrite, write_item
 from workspace.app.connector_mcp import handle
 
 
@@ -43,21 +43,58 @@ class ConnectorTests(unittest.TestCase):
                 calls.append(args)
                 raise httpx.ReadTimeout("response lost after application commit")
 
-            payload = {
-                "title": "Example",
-                "body": "Approved item",
-                "action_id": "one-write-action-id",
-                "approved": True,
-            }
-            with patch("workspace.app.connectors.request", side_effect=lost):
-                first = write_item(store, "c", payload)
-                second = write_item(store, "c", payload)
+            payload = ConnectorWrite(
+                title="Example", body="Approved item", action_id="one-write-action-id"
+            )
+            task_id = task["id"]
+            store.update_task(task_id, "running")
+            with patch("workspace.app.connectors.request", side_effect=lost) as send:
+                with self.assertRaisesRegex(ValueError, "CONNECTOR_APPROVAL_REQUIRED"):
+                    write_item(store, task_id, "c", payload, "no-grant")
+                with store.transaction() as db:
+                    db.execute(
+                        "INSERT INTO approvals VALUES(?,?,?,?,?,?,?)",
+                        (
+                            "grant",
+                            task_id,
+                            "connector",
+                            json.dumps(
+                                {
+                                    "payload": {
+                                        "connector_id": "c",
+                                        **payload.model_dump(),
+                                    }
+                                }
+                            ),
+                            "granted",
+                            "now",
+                            "now",
+                        ),
+                    )
+                with self.assertRaisesRegex(ValueError, "CONNECTOR_APPROVAL_REQUIRED"):
+                    write_item(
+                        store,
+                        task_id,
+                        "c",
+                        payload.model_copy(update={"body": "Different"}),
+                        "grant",
+                    )
+                send.assert_not_called()
+                first = write_item(store, task_id, "c", payload, "grant")
+                second = write_item(store, task_id, "c", payload, None)
             self.assertEqual(len(calls), 1)
             self.assertEqual(first["status"], "uncertain")
             self.assertEqual(second["status"], "uncertain")
             self.assertFalse(second["resent"])
             with self.assertRaisesRegex(ValueError, "ACTION_CONFLICT"):
-                write_item(store, "c", {**payload, "body": "Changed intent"})
+                write_item(
+                    store,
+                    task_id,
+                    "c",
+                    payload.model_copy(update={"body": "Changed intent"}),
+                    "grant",
+                )
+            self.assertEqual(store.one("approvals", "grant")["status"], "consumed")
             store.close()
 
     def test_mcp_write_waits_for_exact_user_grant_and_receipts_duplicate_request(self):
@@ -65,6 +102,7 @@ class ConnectorTests(unittest.TestCase):
             store, service, task = self.prepare(Path(root))
             service.tokens[task["id"]] = "task-secret"
             service.processes[task["id"]] = Mock()
+            store.update_task(task["id"], "running")
             payload = {
                 "jsonrpc": "2.0",
                 "id": 7,

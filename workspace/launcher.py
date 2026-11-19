@@ -12,6 +12,11 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description="Local AI Workspace")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--ui-token-stdin",
+        action="store_true",
+        help="Read the headless operator token from stdin.",
+    )
     parser.add_argument("--port", type=int, default=8776)
     parser.add_argument("--data-dir")
     parser.add_argument("--smoke-seconds", type=float, help=argparse.SUPPRESS)
@@ -22,6 +27,8 @@ def main():
         "--self-test-bubble", action="store_true", help=argparse.SUPPRESS
     )
     args = parser.parse_args()
+    if args.ui_token_stdin and (not args.headless or sys.stdin is None):
+        parser.error("--ui-token-stdin requires --headless and an input stream")
     if args.data_dir:
         os.environ["LOCAL_AI_WORKSPACE_DATA_DIR"] = str(Path(args.data_dir).resolve())
     if sys.stdout is None or sys.stderr is None:
@@ -114,8 +121,21 @@ def main():
         return 0
 
     if args.headless:
+        try:
+            application = create_app(
+                ui_token=(
+                    sys.stdin.readline(130).strip() if args.ui_token_stdin else None
+                )
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if sys.stdout.isatty() and not args.ui_token_stdin:
+            print(
+                f"Workspace: http://127.0.0.1:{args.port}/#access={application.state.ui_token}",
+                flush=True,
+            )
         uvicorn.run(
-            create_app(),
+            application,
             host="127.0.0.1",
             port=args.port,
             access_log=False,

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { operatorToken } from "./access";
 export type Project = {
   id: string;
   name: string;
@@ -13,6 +14,11 @@ export type Provider = {
   model: string;
   api_key_configured?: boolean;
 };
+export type RuntimeProbe = {
+  models: { id: string }[];
+  model_available: boolean | null;
+  model_loaded: boolean;
+};
 export type Approval = {
   id: string;
   kind: string;
@@ -23,6 +29,7 @@ export type Conversation = {
   project_id: string | null;
   provider_id: string;
   title: string;
+  prompt?: string;
   status: string;
   revision: number;
   updated_at: string;
@@ -64,6 +71,7 @@ export const active = new Set([
 ]);
 export const states: Record<string, string> = {
   queued: "Новый диалог",
+  retryable: "Не удалось начать",
   starting: "Подключаюсь",
   running: "Пишет ответ",
   awaiting_permission: "Нужно разрешение",
@@ -76,16 +84,19 @@ export const states: Record<string, string> = {
   restored: "",
 };
 export async function api<T = any>(path: string, body?: unknown): Promise<T> {
-  const r = await fetch(
-    "/api" + path,
-    body === undefined
-      ? {}
-      : {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-  );
+  const token = await operatorToken;
+  if (!token)
+    throw new Error(
+      "Откройте Workspace из приложения или по ссылке из терминала.",
+    );
+  const headers = new Headers({ "X-Workspace-UI-Token": token });
+  if (body !== undefined) headers.set("Content-Type", "application/json");
+  const r = await fetch("/api" + path, {
+    headers,
+    method: body === undefined ? "GET" : "POST",
+    body: body === undefined ? undefined : JSON.stringify(body),
+    redirect: "error",
+  });
   const data = await r.json();
   if (!r.ok)
     throw new Error(
@@ -94,6 +105,45 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
         : JSON.stringify(data.detail || data),
     );
   return data;
+}
+
+export function submitMessage(row: Conversation, raw: string, memory: boolean) {
+  const action = ["queued", "retryable"].includes(row.status)
+    ? "start"
+    : "continue";
+  return api("/chats/" + row.id + "/" + action, {
+    revision: row.revision,
+    prompt: raw.trim(),
+    memory,
+  });
+}
+
+export function pendingPrompt(row: Conversation | null) {
+  return row && ["queued", "retryable"].includes(row.status)
+    ? String(row.details?.initial_prompt ?? row.prompt ?? "")
+    : "";
+}
+
+export function transferDraft(
+  drafts: Record<string, string>,
+  from: string,
+  to: string,
+  initial: string,
+) {
+  const next = { ...drafts, [to]: drafts[from] ?? initial };
+  delete next[from];
+  return next;
+}
+
+export function clearSentDraft(
+  drafts: Record<string, string>,
+  id: string,
+  sent: string,
+) {
+  if (drafts[id] !== sent) return drafts;
+  const next = { ...drafts };
+  delete next[id];
+  return next;
 }
 function text(value: any): string {
   return typeof value === "string"
@@ -115,6 +165,12 @@ export type Message = {
 export function messages(events: ChatEvent[]): Message[] {
   const out: Message[] = [];
   const hasPlain = events.some((e) => e.kind === "chat_message");
+  const canonicalUser = events.some(
+    (e) => e.kind === "dsh" && e.payload.type === "user/message",
+  );
+  const admitted = events.some(
+    (e) => e.kind === "input_admitted" && e.payload.prompt,
+  );
   for (const e of events) {
     const p = e.payload,
       kind = p.type,
@@ -127,7 +183,13 @@ export function messages(events: ChatEvent[]): Message[] {
       role = p.role;
       value = p.text || "";
       error = p.error || (p.phase === "cancelled" ? "Ответ остановлен." : "");
-    } else if (e.kind === "task_created" && !hasPlain) {
+    } else if (e.kind === "input_admitted" && !hasPlain && !canonicalUser) {
+      role = "user";
+      value = p.prompt || "";
+    } else if (
+      e.kind === "task_created" &&
+      !(hasPlain || canonicalUser || admitted)
+    ) {
       role = "user";
       value = p.prompt || "";
     } else if (

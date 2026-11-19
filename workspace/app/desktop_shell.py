@@ -4,9 +4,28 @@ from __future__ import annotations
 import json
 import threading
 import time
+from urllib.parse import urlsplit
 import webview
 from workspace.app import desktop_host
 from workspace.app.mini_avatar import MiniAvatar, icon_path
+
+
+class WindowAccess:
+    def __init__(self, base, token):
+        self._base = base
+        self._token = token
+        self._window = None
+
+    def workspace_token(self):
+        # The bridge only grants access to the packaged Workspace page.
+        current = urlsplit(self._window.get_current_url() or "")
+        if f"{current.scheme}://{current.netloc}" == self._base and current.path in {
+            "",
+            "/",
+            "/mini",
+        }:
+            return self._token
+        return None
 
 
 class WorkspaceShell:
@@ -19,6 +38,8 @@ class WorkspaceShell:
         self.tray = None
         self.quit_lock = threading.Lock()
         self.base = f"http://127.0.0.1:{port}"
+        token = application.state.ui_token
+        access = WindowAccess(self.base, token)
         self.main = webview.create_window(
             "Local AI Workspace",
             self.base,
@@ -26,13 +47,16 @@ class WorkspaceShell:
             height=900,
             min_size=(900, 640),
             background_color="#f4f6fa",
+            js_api=access,
         )
+        access._window = self.main
         self.avatar = MiniAvatar(
             root,
             self.toggle_mini,
             self.show_main,
             self.request_exit,
             api_base=self.base,
+            ui_token=token,
         )
         self.main.events.closing += self._close_main
         desktop_host.register(

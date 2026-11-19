@@ -13,6 +13,7 @@ import time
 import uuid
 import tkinter as tk
 import httpx
+from workspace.app.control_access import UI_TOKEN_HEADER
 
 BG = "#fbfdff"
 BORDER = "#0e4f97"
@@ -33,6 +34,7 @@ class NativeChatBubble:
         prefs=None,
         hidden=False,
         transport=None,
+        ui_token=None,
     ):
         self.root, self.base_url = root, base_url.rstrip("/")
         self.avatar_position, self.on_main, self.save = avatar_position, on_main, save
@@ -50,12 +52,15 @@ class NativeChatBubble:
         self.width = max(420, min(760, int(prefs.get("width", 512))))
         self.height = max(260, min(900, int(prefs.get("height", 304))))
         self.hidden_test, self.transport = hidden, transport
+        self.ui_token = ui_token
         self.visible = self.sidebar_open = self.polling = self.sending = self.closed = (
             False
         )
         self.boot, self.current, self.messages = {}, None, []
         self.version = -1
         self.memory_chat = None
+        self.send_error = ""
+        self.pending_revision = None
         self.dialog_ids, self.list_signature, self.history_signature = [], None, None
         self.outputs = queue.SimpleQueue()
         self.next_poll = 0
@@ -66,11 +71,19 @@ class NativeChatBubble:
         if self.transport:
             return self.transport(path, body)
         with httpx.Client(
-            base_url=self.base_url + "/api", trust_env=False, timeout=15
+            base_url=self.base_url + "/api",
+            trust_env=False,
+            timeout=15,
+            headers={UI_TOKEN_HEADER: self.ui_token} if self.ui_token else {},
         ) as client:
             response = (
                 client.get(path) if body is None else client.post(path, json=body)
             )
+            if response.is_error:
+                with contextlib.suppress(ValueError):
+                    detail = response.json().get("detail")
+                    if isinstance(detail, str):
+                        raise RuntimeError(detail)
             response.raise_for_status()
             return response.json()
 
@@ -346,6 +359,8 @@ class NativeChatBubble:
         self.version = -1
         self.current = None
         self.messages = []
+        self.send_error = ""
+        self.pending_revision = None
         self.history_signature = None
         self.input_var.set(self.drafts.get(chat_id, ""))
         self.next_poll = 0
@@ -441,7 +456,12 @@ class NativeChatBubble:
                 self.polling = False
             elif kind == "error":
                 self.status_label.configure(text="● " + item[1][:58], fg="#ffb2a6")
+            elif kind == "send_error":
+                _, chat_id, message = item
                 self.sending = False
+                if self.selected == chat_id:
+                    self.send_error = message
+                    self._render()
             elif kind == "poll":
                 _, selected, self.boot, current, page = item
                 rows = self.boot.get("tasks", [])
@@ -461,21 +481,22 @@ class NativeChatBubble:
                         if page["messages"] is not None:
                             self.messages = page["messages"]
                     self._render()
+            elif kind == "created":
+                _, chat_id, raw = item
+                self.drafts[chat_id] = self.drafts.get("", raw)
+                if not self.selected:
+                    self.select(chat_id)
+                self.drafts.pop("", None)
+                self.save()
             elif kind == "sent":
-                _, origin, chat_id, raw = item
+                _, chat_id, raw = item
                 self.sending = False
-                if self.selected == origin:
-                    typed = self.input_var.get()
-                    self.drafts[origin] = ""
-                    self.selected = chat_id
-                    self.version = -1
-                    self.current = None
-                    self.messages = []
-                    self.history_signature = None
-                    self.drafts[chat_id] = "" if typed == raw else typed
-                    self.input_var.set(self.drafts[chat_id])
-                    self.next_poll = 0
-                    self.save()
+                if self.drafts.get(chat_id) == raw:
+                    self.drafts[chat_id] = ""
+                    if self.selected == chat_id:
+                        self.input_var.set("")
+                self.next_poll = 0
+                self.save()
             elif kind == "stopped":
                 self.sending = False
                 self.next_poll = 0
@@ -494,6 +515,16 @@ class NativeChatBubble:
             self.memory_chat = current["id"]
             self.memory_var.set((current.get("details") or {}).get("memory", True))
         status = current.get("status", "")
+        if (
+            status in {"queued", "retryable"}
+            and current.get("revision") != self.pending_revision
+        ):
+            self.pending_revision = current["revision"]
+            if not self.input_var.get():
+                self.input_var.set(
+                    (current.get("details") or {}).get("initial_prompt")
+                    or current.get("prompt", "")
+                )
         provider = next(
             (
                 p
@@ -505,12 +536,13 @@ class NativeChatBubble:
         name = provider.get("model", "").split(":")[0]
         title = current.get("title") or "На связи"
         self.title_label.configure(text=title[:30])
-        state = {
+        state = self.send_error or {
             "starting": "Подключаюсь",
             "running": "Думаю",
             "awaiting_permission": "Нужно разрешение",
             "stopping": "Останавливаю",
             "failed": "Ошибка ответа",
+            "retryable": "Не удалось начать. Повторите отправку",
             "interrupted": "История прервана",
             "uncertain": "Нужна сверка",
         }.get(status, "Готов помочь")
@@ -520,7 +552,8 @@ class NativeChatBubble:
             + (state if provider else "Подключите модель в настройках"),
             fg=(
                 "#ffb2a6"
-                if status in {"failed", "interrupted", "uncertain"}
+                if self.send_error
+                or status in {"failed", "retryable", "interrupted", "uncertain"}
                 else "#53f079"
             ),
         )
@@ -582,9 +615,11 @@ class NativeChatBubble:
         if not working and (not raw.strip() or not self.boot.get("providers")):
             return
         self.sending = True
+        self.send_error = ""
         self._refresh_button()
 
         def request():
+            chat_id = selected
             try:
                 if working:
                     current = self._request("/chats/" + selected)
@@ -600,7 +635,11 @@ class NativeChatBubble:
                         raise ValueError(
                             "Откройте Workspace и восстановите историю перед продолжением."
                         )
-                    action = "/start" if current["status"] == "queued" else "/continue"
+                    action = (
+                        "/start"
+                        if current["status"] in {"queued", "retryable"}
+                        else "/continue"
+                    )
                     self._request(
                         "/chats/" + selected + action,
                         {
@@ -609,7 +648,6 @@ class NativeChatBubble:
                             "memory": memory,
                         },
                     )
-                    chat_id = selected
                 else:
                     chat = self._request(
                         "/chats",
@@ -622,12 +660,18 @@ class NativeChatBubble:
                         },
                     )
                     chat_id = chat["id"]
+                    self.outputs.put(("created", chat_id, raw))
                     self._request(
-                        "/chats/" + chat_id + "/start", {"revision": chat["revision"]}
+                        "/chats/" + chat_id + "/start",
+                        {
+                            "revision": chat["revision"],
+                            "prompt": raw.strip(),
+                            "memory": memory,
+                        },
                     )
-                self.outputs.put(("sent", selected, chat_id, raw))
+                self.outputs.put(("sent", chat_id, raw))
             except Exception as exc:
-                self.outputs.put(("error", str(exc)))
+                self.outputs.put(("send_error", chat_id, str(exc)))
 
         threading.Thread(target=request, daemon=True).start()
 
