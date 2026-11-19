@@ -48,7 +48,14 @@ class RuntimeClient:
 
     def capabilities(self, load=False):
         encoded = quote(self.model, safe="")
-        result = self.request("GET", "models/" + encoded + "/capabilities")
+        try:
+            result = self.request("GET", "models/" + encoded + "/capabilities")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ValueError(
+                    "Runtime не нашёл выбранную модель. Проверьте связь и выберите её ID в настройках Workspace."
+                ) from exc
+            raise
         if load and not result.get("loaded"):
             result = self.request("POST", "models/" + encoded + "/load")
         if str(result.get("api_version", "")).split(".")[0] != "1":

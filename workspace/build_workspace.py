@@ -160,6 +160,7 @@ def main():
     ]
     subprocess.run(agent, cwd=ROOT, check=True)
     shutil.move(str(output / "LocalAIWorkspaceAgent"), str(candidate / "agent"))
+    shutil.copy2(WORKSPACE / "local_ai_control.py", candidate / "local_ai_control.py")
     files = manifest(candidate)
     if not any(
         name.endswith("deepseek-harness-sdk-runtime-win-x64.exe") for name in files

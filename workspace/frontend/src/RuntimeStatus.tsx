@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { api, type Provider, type RuntimeProbe } from "./chat";
 
 const labels: Record<string, string> = {
-  ready: "Runtime подключён",
-  unloaded: "Runtime подключён",
+  ready: "Модель загружена",
+  unloaded: "Модель загрузится при запросе",
   missing: "Модель отсутствует в Runtime",
   choose: "Выберите модель Runtime",
   checking: "Проверяю Runtime…",
@@ -54,8 +54,6 @@ export function RuntimeStatus({
         {provider && (
           <small>
             {provider.model.split(":")[0]} · {new URL(provider.base_url).host}
-            {status === "unloaded" && " · модель выгружена"}
-            {status === "ready" && " · модель загружена"}
           </small>
         )}
       </span>

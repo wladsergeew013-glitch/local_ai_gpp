@@ -21,11 +21,20 @@ export function WorkspaceSettings({
     ),
     [model, setModel] = useState(first?.model || ""),
     [key, setKey] = useState("");
-  const [models, setModels] = useState<any[]>([]),
+  const [probe, setProbe] = useState<RuntimeProbe | null>(null),
     [notice, setNotice] = useState("");
   const [appUrl, setAppUrl] = useState("http://127.0.0.1:8890"),
     [appName, setAppName] = useState(""),
     [writes, setWrites] = useState(false);
+  const modelFound = probe?.models.some((entry) => entry.id === model) ?? false;
+  const modelLoaded = modelFound && !!probe?.ready?.ready_model_ids?.includes(model);
+  const latest = boot.tasks
+    .filter((task) => task.provider_id === existing)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+  function resetConnectionCheck() {
+    setProbe(null);
+    setNotice("");
+  }
   async function act(action: () => Promise<unknown>) {
     setBusy(true);
     setError("");
@@ -87,6 +96,7 @@ export function WorkspaceSettings({
                 Сохранённое подключение
                 <select
                   value={existing}
+                  disabled={busy}
                   onChange={(e) => {
                     const p = boot.providers.find(
                       (p) => p.id === e.target.value,
@@ -95,7 +105,7 @@ export function WorkspaceSettings({
                     setBase(p?.base_url || "http://127.0.0.1:8765/v1");
                     setModel(p?.model || "");
                     setKey("");
-                    setNotice("");
+                    resetConnectionCheck();
                   }}
                 >
                   <option value="">＋ Новое подключение</option>
@@ -110,14 +120,21 @@ export function WorkspaceSettings({
             <div className="form-grid">
               <label>
                 Адрес Runtime API
-                <input value={base} onChange={(e) => setBase(e.target.value)} />
+                <input value={base} disabled={busy} onChange={(e) => {
+                  setBase(e.target.value);
+                  resetConnectionCheck();
+                }} />
               </label>
               <label>
                 Локальный API-ключ
                 <input
                   type="password"
                   value={key}
-                  onChange={(e) => setKey(e.target.value)}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setKey(e.target.value);
+                    resetConnectionCheck();
+                  }}
                   autoComplete="off"
                   placeholder={
                     existing
@@ -129,38 +146,39 @@ export function WorkspaceSettings({
             </div>
             <label>
               Модель
-              <input
-                aria-label="ID модели"
-                list="workspace-models"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="Сначала проверьте связь"
-              />
-              <datalist id="workspace-models">
-                {models.map((m) => (
-                  <option key={m.id} value={m.id} />
-                ))}
-              </datalist>
+              {probe ? (
+                <select aria-label="ID модели" value={model} disabled={busy} onChange={(e) => {
+                  setModel(e.target.value);
+                  setNotice("");
+                }}>
+                  {!modelFound && <option value={model} disabled>Выберите доступную модель</option>}
+                  {probe.models.map((entry) => <option key={entry.id} value={entry.id}>{entry.id}</option>)}
+                </select>
+              ) : (
+                <input
+                  aria-label="ID модели"
+                  value={model}
+                  disabled={busy}
+                  onChange={(e) => { setModel(e.target.value); setNotice(""); }}
+                  placeholder="Сначала проверьте связь"
+                />
+              )}
             </label>
             <div className="button-row">
               <button
                 disabled={busy}
                 onClick={() =>
                   act(async () => {
+                    resetConnectionCheck();
                     const result = await api<RuntimeProbe>(
                       existing
                         ? "/providers/" + existing + "/probe"
                         : "/providers/probe",
                       { base_url: base, model, api_key: key },
                     );
-                    setModels(result.models);
-                    if (!model && result.models.length)
+                    setProbe(result);
+                    if (!model && result.models.length === 1)
                       setModel(result.models[0].id);
-                    setNotice(
-                      result.model_available === false
-                        ? "Runtime доступен. Сохранённая модель отсутствует. Выберите модель из списка."
-                        : "Связь установлена. Выберите модель и сохраните подключение.",
-                    );
                   })
                 }
               >
@@ -168,7 +186,7 @@ export function WorkspaceSettings({
               </button>
               <button
                 className="primary"
-                disabled={busy || !model}
+                disabled={busy || !model.trim() || (!!probe && !modelFound)}
                 onClick={() =>
                   act(async () => {
                     const p = await api(
@@ -189,6 +207,24 @@ export function WorkspaceSettings({
                 Сохранить подключение
               </button>
             </div>
+            {probe && (
+              <p role="status" className={`connection-result ${modelLoaded ? "model-ready" : !modelFound ? "model-missing" : ""}`}>
+                {modelLoaded
+                  ? "Runtime отвечает. Выбранная модель загружена."
+                  : modelFound
+                    ? "Runtime отвечает. Модель доступна и загрузится при запросе."
+                    : probe.models.length === 0
+                      ? "Runtime отвечает. Подключите GGUF в Runtime."
+                      : model
+                        ? "Runtime отвечает. Этот ID отсутствует. Выберите модель из списка."
+                        : "Runtime отвечает. Выберите модель из списка."}
+              </p>
+            )}
+            {(latest?.status === "failed" || latest?.status === "completed") && (
+              <p className={latest.status === "failed" ? "last-dialog-result failed" : "last-dialog-result"}>
+                {latest.status === "failed" ? "Последняя отправка завершилась ошибкой." : "Последняя отправка получила ответ."}
+              </p>
+            )}
             <details className="optional-connections">
               <summary>Доступ к приложениям · необязательно</summary>
               <p className="muted">

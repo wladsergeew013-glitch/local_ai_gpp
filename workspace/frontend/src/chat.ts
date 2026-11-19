@@ -16,6 +16,7 @@ export type Provider = {
 };
 export type RuntimeProbe = {
   models: { id: string }[];
+  ready?: { ready_model_ids?: string[] };
   model_available: boolean | null;
   model_loaded: boolean;
 };

@@ -35,6 +35,9 @@ function App() {
   );
   const [settings, setSettings] = useState(false),
     [addProject, setAddProject] = useState(false),
+    [projectsOpen, setProjectsOpen] = useState(
+      () => sessionStorage.getItem("workspace-projects-open") !== "false",
+    ),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const [provider, setProvider] = useState(""),
@@ -300,6 +303,28 @@ function App() {
     </div>
   );
   const shown = boot.tasks.filter((t) => !project || t.project_id === project);
+  const projectCounts = new Map<string, number>();
+  for (const chat of boot.tasks) {
+    if (chat.project_id) {
+      projectCounts.set(
+        chat.project_id,
+        (projectCounts.get(chat.project_id) || 0) + 1,
+      );
+    }
+  }
+  function openProject(next: string) {
+    setProject(next);
+    if (boot.tasks.some((chat) => chat.id === selected && chat.project_id === next)) {
+      return;
+    }
+    const first = boot.tasks.find((chat) => chat.project_id === next);
+    if (first) {
+      setSelected(first.id);
+      setError("");
+    } else {
+      newChat();
+    }
+  }
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -310,49 +335,59 @@ function App() {
             <small>Проекты и диалоги</small>
           </div>
         </div>
-        <div className="side-section">
-          <h2>
-            Проекты{" "}
+        <button className="sidebar-new-chat" onClick={newChat}>
+          <span aria-hidden="true">＋</span> Новый диалог
+        </button>
+        <button
+          className={"project all-conversations " + (!project ? "selected" : "")}
+          aria-current={!project ? "page" : undefined}
+          onClick={() => setProject("")}
+        >
+          <span className="project-name">Все диалоги</span>
+          <span className="project-count">{boot.tasks.length}</span>
+        </button>
+        <section className="side-section project-section" aria-label="Проекты">
+          <div className="side-section-heading">
+            <h2>
+              <button
+                className="side-section-toggle"
+                aria-controls="workspace-project-list"
+                aria-expanded={projectsOpen}
+                onClick={() => {
+                  sessionStorage.setItem("workspace-projects-open", String(!projectsOpen));
+                  setProjectsOpen(!projectsOpen);
+                }}
+              >
+                <span className="side-chevron" aria-hidden="true" /> Проекты
+              </button>
+            </h2>
             <button
+              className="side-section-action"
               aria-label="Добавить проект"
               title="Добавить проект"
               onClick={() => setAddProject(true)}
             >
               ＋
             </button>
-          </h2>
-          <button
-            className={"project " + (!project ? "selected" : "")}
-            onClick={() => setProject("")}
-          >
-            Все диалоги <span>{boot.tasks.length}</span>
-          </button>
-          {boot.projects.map((p) => (
-            <button
-              key={p.id}
-              className={"project " + (project === p.id ? "selected" : "")}
-              onClick={() => {
-                setProject(p.id);
-                newChat();
-              }}
-            >
-              <span>
-                {p.source === "github" ? "↗" : "□"} {p.name}
-              </span>
-            </button>
-          ))}
-        </div>
+          </div>
+          <nav id="workspace-project-list" hidden={!projectsOpen} aria-label="Список проектов">
+            {boot.projects.map((p) => (
+              <button
+                key={p.id}
+                className={"project " + (project === p.id ? "selected" : "")}
+                aria-current={project === p.id ? "page" : undefined}
+                title={p.name}
+                onClick={() => openProject(p.id)}
+              >
+                <span className="sidebar-folder" aria-hidden="true" />
+                <span className="project-name">{p.name}</span>
+                <span className="project-count">{projectCounts.get(p.id) || 0}</span>
+              </button>
+            ))}
+          </nav>
+        </section>
         <div className="side-section task-list">
-          <h2>
-            Диалоги{" "}
-            <button
-              aria-label="Новый диалог"
-              title="Новый диалог"
-              onClick={newChat}
-            >
-              ＋
-            </button>
-          </h2>
+          <h2>{project ? "Диалоги проекта" : "Диалоги"}</h2>
           {shown.map((t) => (
             <button
               key={t.id}

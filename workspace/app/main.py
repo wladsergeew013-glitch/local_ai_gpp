@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import logging
 import secrets
 import sys
 import os
@@ -21,11 +22,13 @@ from workspace.app.control_access import (
     operator_token,
     requires_operator,
 )
+from workspace.app.management import CONTROL_ROUTES, router as management_router
+from workspace.local_ai_control import CONTROL_TOKEN_HEADER, publish_control
 
 from workspace.app.version import VERSION
 
 
-def create_app(root=None, *, ui_token=None):
+def create_app(root=None, *, ui_token=None, control_port=None):
     root = Path(root or data_root())
     ui_token = operator_token(ui_token)
 
@@ -37,16 +40,34 @@ def create_app(root=None, *, ui_token=None):
             application.state.store = store
             application.state.tasks = service
             store.recover()
+            descriptor = None
             try:
+                if control_port is not None:
+                    token = secrets.token_urlsafe(32)
+                    try:
+                        descriptor = publish_control(store.root, control_port, token)
+                    except (OSError, ValueError):
+                        logging.getLogger(__name__).warning("Workspace local control could not start.", exc_info=True)
+                    else:
+                        application.state.control_token = token
                 yield
             finally:
                 import asyncio
 
-                await asyncio.to_thread(service.close)
-                store.close()
+                application.state.control_token = None
+                try:
+                    if descriptor is not None:
+                        descriptor.unlink(missing_ok=True)
+                finally:
+                    try:
+                        await asyncio.to_thread(service.close)
+                    finally:
+                        store.close()
 
     app = FastAPI(title="Local AI Workspace", version=VERSION, lifespan=lifespan)
     app.state.ui_token = ui_token
+    app.state.control_token = None
+    app.include_router(management_router)
 
     @app.middleware("http")
     async def boundary(request, call_next):
@@ -62,7 +83,13 @@ def create_app(root=None, *, ui_token=None):
                 or parsed.netloc != request.headers.get("host")
             ):
                 return JSONResponse({"detail": "Foreign browser origin denied"}, 403)
-        if requires_operator(request.scope["path"], request.method):
+        path = request.scope["path"]
+        if (request.method, path) in CONTROL_ROUTES:
+            token = app.state.control_token
+            supplied = request.headers.get(CONTROL_TOKEN_HEADER, "")
+            if token is None or not secrets.compare_digest(supplied.encode(), token.encode()):
+                return JSONResponse({"detail": "Workspace local control credential required."}, 401)
+        elif requires_operator(path, request.method):
             supplied = request.headers.get(UI_TOKEN_HEADER, "")
             if not secrets.compare_digest(supplied.encode(), ui_token.encode()):
                 return JSONResponse(

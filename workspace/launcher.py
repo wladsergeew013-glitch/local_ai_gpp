@@ -125,7 +125,8 @@ def main():
             application = create_app(
                 ui_token=(
                     sys.stdin.readline(130).strip() if args.ui_token_stdin else None
-                )
+                ),
+                control_port=args.port,
             )
         except ValueError as exc:
             parser.error(str(exc))
@@ -146,7 +147,7 @@ def main():
 
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(),
+            create_app(control_port=args.port),
             host="127.0.0.1",
             port=args.port,
             log_level="warning",
