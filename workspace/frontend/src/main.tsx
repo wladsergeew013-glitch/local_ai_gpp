@@ -149,8 +149,12 @@ function App() {
       setDrafts((old) => clearSentDraft(old, row.id, raw));
     });
   }
-  const modelName = (id: string) =>
-    boot.providers.find((p) => p.id === id)?.model.split(":")[0] || "Модель";
+  const liveChat = current?.id === selected ? current : null;
+  const selectedChat = liveChat || boot.tasks.find((chat) => chat.id === selected);
+  const projectName = boot.projects.find(
+    (entry) => entry.id === (selectedChat ? selectedChat.project_id : project),
+  )?.name;
+  const chatTitle = selectedChat?.title || "Открываю диалог…";
   const compose = (
     <div className="chat-composer">
       <textarea
@@ -316,21 +320,55 @@ function App() {
         openSettings={() => setSettings(true)}
       />
       <main>
-        <header className="topbar">
-          <div>
+        <header className={selected ? "topbar chat-topbar" : "topbar"}>
+          <div className="workspace-heading">
             <span className="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span>
-            <h1>
-              {boot.projects.find((p) => p.id === project)?.name || "Диалоги"}
-            </h1>
+            {selected ? (
+              <div className="workspace-heading-line">
+                <span className="workspace-project-name" title={projectName}>
+                  {projectName || "Без проекта"}
+                </span>
+                <span className="workspace-heading-divider" aria-hidden="true">/</span>
+                <h1 title={chatTitle}>{chatTitle}</h1>
+              </div>
+            ) : (
+              <h1>{projectName || "Диалоги"}</h1>
+            )}
           </div>
-          <RuntimeStatus
-            provider={
-              boot.providers.find(
-                (p) => p.id === (current?.provider_id || provider),
-              ) || boot.providers[0]
-            }
-            open={() => setSettings(true)}
-          />
+          <div className="workspace-header-actions">
+            {liveChat && agent && (
+              <button
+                className="workspace-header-action"
+                aria-expanded={tools}
+                onClick={() => setTools(!tools)}
+              >
+                Действия и файлы
+              </button>
+            )}
+            {liveChat && ["interrupted", "uncertain"].includes(liveChat.status) && (
+              <button
+                className="workspace-header-action"
+                disabled={busy}
+                onClick={() =>
+                  act(() =>
+                    api("/chats/" + liveChat.id + "/restore", {
+                      revision: liveChat.revision,
+                    }),
+                  )
+                }
+              >
+                Восстановить историю
+              </button>
+            )}
+            <RuntimeStatus
+              provider={
+                boot.providers.find(
+                  (p) => p.id === (selectedChat?.provider_id || provider),
+                ) || boot.providers[0]
+              }
+              open={() => setSettings(true)}
+            />
+          </div>
         </header>
         {(error || pollError) && (
           <div role="alert" className="alert">
@@ -353,43 +391,9 @@ function App() {
                 Подключить модель
               </button>
             )}
-            <div className="welcome-links">
-              <button onClick={() => setAddProject(true)}>
-                ＋ Создать проект
-              </button>
-            </div>
           </section>
         ) : (
           <section className="conversation task-view">
-            <header className="conversation-header">
-              <div>
-                <h2>{current?.title || "Открываю диалог…"}</h2>
-                <p className="muted">
-                  {current ? modelName(current.provider_id) : ""}
-                  {agent ? " · Работа с файлами" : ""}
-                </p>
-              </div>
-              {agent && (
-                <button aria-expanded={tools} onClick={() => setTools(!tools)}>
-                  Действия и файлы
-                </button>
-              )}
-              {current &&
-                ["interrupted", "uncertain"].includes(current.status) && (
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      act(() =>
-                        api("/chats/" + selected + "/restore", {
-                          revision: current.revision,
-                        }),
-                      )
-                    }
-                  >
-                    Восстановить историю
-                  </button>
-                )}
-            </header>
             {current?.status === "retryable" && (
               <p className="alert" role="status">
                 {current.details?.error ||

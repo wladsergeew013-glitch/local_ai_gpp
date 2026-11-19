@@ -1,4 +1,5 @@
 import importlib.util
+import argparse
 import io
 import json
 import tempfile
@@ -42,6 +43,38 @@ class RuntimeReviewTests(unittest.TestCase):
         with patch.multiple(builder,ROOT=self.root,OUT=self.root/'out'):
             with self.assertRaises(ValueError):builder.promote_distribution(candidate)
         self.assertEqual(old.read_bytes(),b'old')
+
+    def test_portable_layout_updates_runtime_beside_workspace(self):
+        candidate = self.root / 'out/candidate'
+        self.candidate(candidate)
+        workspace = self.root / 'dist/worker/LocalAIWorkspace.exe'
+        workspace.parent.mkdir(parents=True)
+        workspace.write_bytes(b'workspace')
+        runtime = self.root / 'dist/runtime'
+        (runtime / 'models_storage').mkdir(parents=True)
+        (runtime / 'models_storage/models.json').write_text('[]', encoding='utf-8')
+        (runtime / 'models_storage/settings.json').write_text('{"temperature": 0.1}', encoding='utf-8')
+        history = runtime / 'assistant_state/history.json'
+        history.parent.mkdir()
+        history.write_text('history', encoding='utf-8')
+        (runtime / 'runtime_info.json').write_text('{"effective": "cu124"}', encoding='utf-8')
+
+        with (
+            patch.multiple(builder, ROOT=self.root, OUT=self.root / 'out'),
+            patch.object(builder, 'log'),
+            patch.object(builder, 'find_nvidia_smi', return_value=''),
+        ):
+            args = argparse.Namespace(cpu=False, cuda=None, portable_layout=False)
+            self.assertEqual(builder.choose_runtime_kind(args), 'cu124')
+            destination = builder.distribution_destination(args)
+            self.assertEqual(destination, runtime)
+            builder.promote_distribution(candidate, destination)
+
+        self.assertEqual(workspace.read_bytes(), b'workspace')
+        self.assertEqual(history.read_text(encoding='utf-8'), 'history')
+        self.assertEqual((runtime / 'LocalAIGPP.exe').read_text(encoding='utf-8'), 'exe')
+        settings = json.loads((runtime / 'models_storage/settings.json').read_text(encoding='utf-8'))
+        self.assertEqual(settings['temperature'], 0.1)
 
     def test_F02_retirement_failure_cannot_delete_new_committed_blob(self):
         old=core.copy_uploaded_model('m','m.gguf',io.BytesIO(b'old'))

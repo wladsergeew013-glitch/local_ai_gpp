@@ -10,6 +10,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import stat
 import subprocess
 import sys
 import uuid
@@ -35,6 +36,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-frontend", action="store_true")
     parser.add_argument("--stage-only", action="store_true")
+    parser.add_argument("--portable-layout", action="store_true", help="Install Workspace into dist/worker beside dist/runtime")
     args = parser.parse_args()
     if sys.platform != "win32":
         raise SystemExit(
@@ -197,7 +199,13 @@ def main():
             )
         )
         return 0
-    destination = WORKSPACE / "dist"
+    dist = ROOT / "dist"
+    portable_layout = args.portable_layout or (dist / "runtime").exists() or (dist / "worker").exists()
+    destination = dist / "worker" if portable_layout else WORKSPACE / "dist"
+    for component in (destination.parent, destination):
+        if component.is_symlink() or (component.exists() and getattr(component.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise ValueError(f"Refusing aliased distribution: {component}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
     previous = WORKSPACE / ("build/previous-" + uuid.uuid4().hex)
     if destination.exists():
         destination.rename(previous)

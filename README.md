@@ -71,6 +71,21 @@ tools\06_install_cuda_runtime.bat cu124 0.3.36
 
 ### Собрать EXE
 
+Чтобы держать обе Windows-сборки в одном клоне, закройте приложения и соберите их из корня репозитория:
+
+```powershell
+py -3.12 tools/02_build_exe.py --portable-layout
+py -3.12 -m pip install -r workspace/requirements-desktop.txt
+py -3.12 workspace/build_workspace.py --portable-layout
+```
+
+- Runtime запускается из `dist/runtime/LocalAIGPP.exe`. Там же находится `CHECK_API.bat`.
+- Workspace с мини-помощником запускается из `dist/worker/LocalAIWorkspace.exe`.
+
+После первой сборки в эту структуру повторный запуск сборщиков использует те же папки. Настройки, модели и история Runtime сохраняются при замене сборки. Workspace хранит диалоги в `%LOCALAPPDATA%/LocalAIWorkspace`. Папка `dist` исключена из Git.
+
+Для отдельной сборки Runtime в новом клоне:
+
 ```powershell
 py -3.12 tools/02_build_exe.py
 # Явно собрать CUDA-поставку, в том числе на машине без GPU:
