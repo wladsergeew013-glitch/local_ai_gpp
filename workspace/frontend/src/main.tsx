@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./style.css";
 import { MiniApp } from "./MiniApp";
 import { WorkspaceSettings } from "./WorkspaceSettings";
+import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { ProjectDialog } from "./ProjectDialog";
 import { ChatHistory } from "./ChatHistory";
 import { AgentPanel } from "./AgentPanel";
@@ -12,7 +13,6 @@ import {
   api,
   active,
   agentTrustNotice,
-  states,
   emptyBoot,
   submitMessage,
   transferDraft,
@@ -35,9 +35,6 @@ function App() {
   );
   const [settings, setSettings] = useState(false),
     [addProject, setAddProject] = useState(false),
-    [projectsOpen, setProjectsOpen] = useState(
-      () => sessionStorage.getItem("workspace-projects-open") !== "false",
-    ),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const [provider, setProvider] = useState(""),
@@ -117,7 +114,8 @@ function App() {
       setBusy(false);
     }
   }
-  function newChat() {
+  function newChat(projectId = "") {
+    setProject(projectId);
     setSelected("");
     setFiles(false);
     setTools(false);
@@ -302,121 +300,21 @@ function App() {
       )}
     </div>
   );
-  const shown = boot.tasks.filter((t) => !project || t.project_id === project);
-  const projectCounts = new Map<string, number>();
-  for (const chat of boot.tasks) {
-    if (chat.project_id) {
-      projectCounts.set(
-        chat.project_id,
-        (projectCounts.get(chat.project_id) || 0) + 1,
-      );
-    }
-  }
-  function openProject(next: string) {
-    setProject(next);
-    if (boot.tasks.some((chat) => chat.id === selected && chat.project_id === next)) {
-      return;
-    }
-    const first = boot.tasks.find((chat) => chat.project_id === next);
-    if (first) {
-      setSelected(first.id);
-      setError("");
-    } else {
-      newChat();
-    }
-  }
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="mark">W</span>
-          <div>
-            Local AI <strong>Workspace</strong>
-            <small>Проекты и диалоги</small>
-          </div>
-        </div>
-        <button className="sidebar-new-chat" onClick={newChat}>
-          <span aria-hidden="true">＋</span> Новый диалог
-        </button>
-        <button
-          className={"project all-conversations " + (!project ? "selected" : "")}
-          aria-current={!project ? "page" : undefined}
-          onClick={() => setProject("")}
-        >
-          <span className="project-name">Все диалоги</span>
-          <span className="project-count">{boot.tasks.length}</span>
-        </button>
-        <section className="side-section project-section" aria-label="Проекты">
-          <div className="side-section-heading">
-            <h2>
-              <button
-                className="side-section-toggle"
-                aria-controls="workspace-project-list"
-                aria-expanded={projectsOpen}
-                onClick={() => {
-                  sessionStorage.setItem("workspace-projects-open", String(!projectsOpen));
-                  setProjectsOpen(!projectsOpen);
-                }}
-              >
-                <span className="side-chevron" aria-hidden="true" /> Проекты
-              </button>
-            </h2>
-            <button
-              className="side-section-action"
-              aria-label="Добавить проект"
-              title="Добавить проект"
-              onClick={() => setAddProject(true)}
-            >
-              ＋
-            </button>
-          </div>
-          <nav id="workspace-project-list" hidden={!projectsOpen} aria-label="Список проектов">
-            {boot.projects.map((p) => (
-              <button
-                key={p.id}
-                className={"project " + (project === p.id ? "selected" : "")}
-                aria-current={project === p.id ? "page" : undefined}
-                title={p.name}
-                onClick={() => openProject(p.id)}
-              >
-                <span className="sidebar-folder" aria-hidden="true" />
-                <span className="project-name">{p.name}</span>
-                <span className="project-count">{projectCounts.get(p.id) || 0}</span>
-              </button>
-            ))}
-          </nav>
-        </section>
-        <div className="side-section task-list">
-          <h2>{project ? "Диалоги проекта" : "Диалоги"}</h2>
-          {shown.map((t) => (
-            <button
-              key={t.id}
-              className={"task-link " + (selected === t.id ? "selected" : "")}
-              data-chat-id={t.id}
-              onClick={() => {
-                setSelected(t.id);
-                setProject(t.project_id || "");
-              }}
-            >
-              <span className={"dot " + t.status} />
-              <span>
-                {t.title}
-                {states[t.status] && <small>{states[t.status]}</small>}
-              </span>
-            </button>
-          ))}
-          {!shown.length && (
-            <p className="muted empty-side">Здесь появятся ваши диалоги.</p>
-          )}
-        </div>
-        <div className="side-footer">
-          <button onClick={() => act(() => api("/host/show-avatar", {}))}>
-            ◉ Мини-помощник
-          </button>
-          <button onClick={() => setSettings(true)}>⚙ Настройки</button>
-          <small>Workspace {boot.version}</small>
-        </div>
-      </aside>
+      <WorkspaceSidebar
+        boot={boot}
+        selected={selected}
+        newChat={newChat}
+        openChat={(chat) => {
+          setSelected(chat.id);
+          setProject(chat.project_id || "");
+          setError("");
+        }}
+        addProject={() => setAddProject(true)}
+        showAssistant={() => act(() => api("/host/show-avatar", {}))}
+        openSettings={() => setSettings(true)}
+      />
       <main>
         <header className="topbar">
           <div>
@@ -516,8 +414,7 @@ function App() {
           <ProjectDialog
             close={() => setAddProject(false)}
             created={(p) => {
-              setProject(p.id);
-              newChat();
+              newChat(p.id);
               setAddProject(false);
               reload();
             }}

@@ -91,109 +91,116 @@ pre {
   overflow: hidden;
 }
 .sidebar {
-  width: 272px;
+  width: 250px;
   flex-shrink: 0;
   background: #0d2343;
   color: #dce6f6;
   display: flex;
   flex-direction: column;
-  padding: 28px 16px 18px;
+  padding: 18px 12px 12px;
 }
 .brand {
   display: flex;
-  gap: 12px;
+  gap: 9px;
   align-items: center;
-  padding: 0 9px 22px;
-  font-size: 17px;
-  letter-spacing: -0.3px;
+  flex-shrink: 0;
+  padding: 0 6px 13px;
+  font-size: 14px;
 }
 .brand strong {
-  display: block;
   color: #fff;
   font-weight: 650;
-}
-.brand small {
-  display: block;
-  font-size: 10px;
-  margin-top: 7px;
-  color: #94abc8;
-  letter-spacing: 0;
 }
 .mark {
   display: grid;
   place-content: center;
   background: #2e6af2;
   border: 1px solid #6191ff;
-  width: 40px;
-  height: 44px;
-  border-radius: 12px;
+  width: 30px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 8px;
   font-weight: 800;
-  font-size: 26px;
+  font-size: 19px;
   color: #fff;
 }
-.side-section {
-  margin-bottom: 13px;
+.sidebar-navigation {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
-.side-section h2 {
-  padding: 0 12px;
-  color: #98acc9;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 1.2px;
+.side-section {
+  margin-bottom: 14px;
+}
+.side-section-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-height: 27px;
+  padding-left: 8px;
+  margin-bottom: 2px;
 }
-.sidebar button.project,
-.task-link {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  text-align: left;
+.side-section-heading h2 {
+  color: #a8bfdc;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .35px;
+  margin: 0;
+}
+.sidebar button {
   border: 0;
   background: transparent;
   color: #dce6f6;
-  padding: 9px 11px;
-  border-radius: 8px;
-  font-size: 13px;
+  border-radius: 6px;
 }
-.sidebar .selected {
-  background: #ffffff13 !important;
-  color: #fff !important;
+.sidebar .sidebar-new-chat,
+.sidebar .sidebar-project-toggle,
+.sidebar .task-link {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  gap: 8px;
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 13px;
 }
 .sidebar button:hover {
   background: #ffffff0b;
 }
+.sidebar button.selected,
+.sidebar button.selected:hover {
+  background: #ffffff19;
+  color: #fff;
+}
 .sidebar .sidebar-new-chat {
+  align-self: flex-start;
+  flex-shrink: 0;
+  color: #f5f8ff;
+  margin-bottom: 8px;
+}
+.sidebar-project-row {
   display: flex;
-  justify-content: flex-start;
   align-items: center;
-  gap: 8px;
-  background: #214777;
-  color: #f6f9ff;
-  border: 1px solid #315989;
-  padding: 9px 11px;
-  margin: 0 0 8px;
+  gap: 3px;
 }
-.sidebar .sidebar-new-chat:hover {
-  background: #2c5688;
-}
-.sidebar .project-name {
+.sidebar .sidebar-project-toggle {
+  flex: 1;
   min-width: 0;
+}
+.project-name,
+.sidebar-chat-title,
+.sidebar-chat-text small {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sidebar .project-count {
-  margin-left: auto;
-  font-size: 11px;
-  color: #99b2d5;
-}
 .sidebar-folder {
   position: relative;
-  width: 15px;
-  height: 11px;
+  width: 13px;
+  height: 10px;
   border: 1px solid currentColor;
   border-radius: 2px;
   flex-shrink: 0;
@@ -210,78 +217,46 @@ pre {
   border-bottom: 0;
   border-radius: 2px 2px 0 0;
 }
-.sidebar .all-conversations {
-  margin-bottom: 10px;
-}
-.project-section {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  max-height: 38vh;
-}
-.project-section nav {
-  overflow: auto;
-  scrollbar-width: thin;
-}
-.side-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 3px;
-}
-.side-section-heading h2 {
+.sidebar .side-section-action {
+  flex: none;
+  width: 25px;
+  height: 25px;
   padding: 0;
-  margin: 0;
-}
-.sidebar .side-section-toggle,
-.sidebar .side-section-action {
-  border: 0;
-  background: transparent;
-  color: #a8bfdc;
-}
-.sidebar .side-section-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font: inherit;
-  text-transform: inherit;
-  letter-spacing: inherit;
-  padding: 6px 10px;
-}
-.sidebar .side-section-action {
-  font-size: 18px;
-  padding: 2px 9px;
+  color: #9fb8d8;
+  font-size: 16px;
 }
 .side-chevron {
   width: 6px;
   height: 6px;
+  flex-shrink: 0;
+  color: #a8bfdc;
   border-bottom: 1px solid currentColor;
   border-right: 1px solid currentColor;
   transform: rotate(-45deg);
 }
-.side-section-toggle[aria-expanded="true"] .side-chevron {
+.sidebar-project-toggle[aria-expanded="true"] .side-chevron {
   transform: rotate(45deg) translateY(-2px);
 }
-.task-list {
-  overflow: auto;
-  flex: 1;
+.sidebar-project-chats {
+  margin: 0 0 4px 18px;
+  padding-left: 7px;
+  border-left: 1px solid #36516f;
 }
-.task-link {
+.sidebar .task-link {
+  width: 100%;
   align-items: flex-start;
-  padding: 13px 11px;
-  margin: 3px 0;
 }
-.task-link > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: block;
+.sidebar .task-link .dot {
+  margin-top: 6px;
 }
-.task-link small {
-  display: block;
+.sidebar-chat-text {
+  min-width: 0;
+  line-height: 18px;
+}
+.sidebar-chat-text small {
   font-size: 11px;
   color: #94a9c8;
-  margin-top: 7px;
+  line-height: 15px;
 }
 .dot {
   width: 7px;
@@ -308,8 +283,9 @@ pre {
   background: #f27889;
 }
 .side-footer {
+  flex-shrink: 0;
   border-top: 1px solid #29405e;
-  padding: 15px 6px 0;
+  padding: 6px 4px 0;
 }
 .side-footer button {
   display: block;
@@ -317,17 +293,18 @@ pre {
   border: 0;
   color: #bacbe2;
   font-size: 12px;
-  padding: 9px 4px;
+  padding: 7px 5px;
 }
 .side-footer small {
   display: block;
   color: #627e9e;
   font-size: 10px;
-  margin-top: 20px;
+  margin-top: 8px;
 }
 .empty-side {
-  padding: 8px 12px;
-  color: #8198b8 !important;
+  margin: 0;
+  padding: 5px 8px;
+  color: #94a9c8;
   font-size: 12px;
 }
 main {
@@ -926,17 +903,13 @@ h1 {
     padding: 18px 9px;
   }
   .brand {
-    font-size: 14px;
-    padding: 0 4px 24px;
-  }
-  .brand small {
-    display: none;
+    font-size: 13px;
+    padding: 0 4px 12px;
   }
   .mark {
-    font-size: 20px;
-    width: 32px;
-    height: 35px;
-    border-radius: 9px;
+    font-size: 17px;
+    width: 26px;
+    height: 28px;
   }
   .welcome {
     padding: 20px;
