@@ -24,23 +24,63 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .dialog-list a { font-size: 12px; text-decoration: none; color: #316296; padding: 6px; }
 .compact-chat { min-height: 0; min-width: 0; display: flex; flex-direction: column; background: #fff; }
 .model-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid #d8e4f1; }
-.model-toolbar select { min-width: 160px; max-width: 280px; }
+.model-toolbar select { min-width: 160px; max-width: min(330px, 100%); }
 .compact-app input:not([type="checkbox"]), .compact-app select, .compact-app textarea { border: 1px solid #b9cfe8; border-radius: 6px; padding: 8px 10px; color: #1a3658; background: #f7faff; }
 .compact-app :is(input, select, textarea):focus { outline: 2px solid #6ca5ef; outline-offset: 1px; }
 .runtime-label { font-size: 12px; color: #66809e; margin-right: auto; }
 .inline-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
 .compact-app input[type="checkbox"] { accent-color: #2465c7; }
-.compact-settings { padding: 16px 20px; background: #eef5ff; border-bottom: 1px solid #c9d9e9; max-height: 45vh; overflow: auto; }
-.settings-fields { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
-.compact-settings label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #476584; }
-.settings-fields input:not([type="checkbox"]) { width: 105px; }
-.compact-settings details { margin-top: 14px; font-size: 13px; }
-.compact-settings summary { color: #145aa0; cursor: pointer; padding: 4px 0; }
-.compact-settings details > label { margin-top: 12px; max-width: 650px; }
-.compact-settings code { overflow-wrap: anywhere; }
-.model-import { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding-top: 14px; }
-.model-import > input:nth-child(2) { flex: 1; min-width: 230px; }
-.model-import input[type="file"] { max-width: 240px; font-size: 12px; }
+.runtime-settings-dialog {
+  width: min(760px, calc(100vw - 36px));
+  max-height: calc(100dvh - 36px);
+  padding: 0;
+  border: 1px solid #d1dfee;
+  border-radius: 16px;
+  color: #152b46;
+  background: #fff;
+  box-shadow: 0 18px 65px #10254638;
+}
+.runtime-settings-dialog[open] { display: flex; flex-direction: column; }
+.runtime-settings-dialog::backdrop { background: #10254670; }
+.runtime-settings-header { display: flex; align-items: center; justify-content: space-between; padding: 17px 22px; border-bottom: 1px solid #dae5f2; }
+.runtime-settings-header h1 { font-size: 19px; margin: 0; font-weight: 650; }
+.runtime-settings-header .icon-button { width: 34px; height: 34px; padding: 0; border-color: transparent; font-size: 23px; }
+.runtime-settings-layout { display: grid; grid-template-columns: 156px minmax(0, 1fr); min-height: 0; }
+.runtime-settings-nav { display: flex; flex-direction: column; gap: 5px; border-right: 1px solid #e1eaf5; padding: 14px 10px; background: #f6f9fd; }
+.runtime-settings-nav button { text-align: left; border-color: transparent; background: transparent; color: #36536f; }
+.runtime-settings-nav button[aria-current] { color: #174e9a; background: #e6efff; font-weight: 650; }
+.runtime-settings-content { min-width: 0; overflow: auto; overscroll-behavior: contain; padding: 20px; }
+.runtime-setting-card { display: grid; gap: 12px; padding: 16px; border: 1px solid #dce6f3; border-radius: 12px; margin-bottom: 12px; }
+.runtime-setting-card h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.runtime-field, .runtime-setting-card > label:first-child { font-size: 13px; font-weight: 600; }
+.runtime-field { display: grid; min-width: 0; gap: 6px; }
+.runtime-field input, .runtime-field select, .runtime-field textarea { width: 100%; min-width: 0; font-weight: 400; }
+.runtime-field textarea { resize: vertical; }
+.runtime-model-selection { display: flex; align-items: stretch; flex-wrap: wrap; gap: 8px; }
+.runtime-model-selection select { flex: 1; min-width: 0; }
+.runtime-hint { color: #526c88; font-size: 12px; font-weight: 400; margin: 0; line-height: 1.55; }
+.runtime-import-card { background: #f8fbff; }
+.runtime-file-row, .runtime-form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.runtime-form-actions { justify-content: flex-end; }
+.runtime-file-row .quiet-button { background: transparent; border-color: transparent; }
+.runtime-file-detail { display: grid; gap: 4px; font-size: 13px; padding: 10px 12px; background: #eaf2fe; border-radius: 7px; overflow-wrap: anywhere; }
+.runtime-file-detail span { color: #476582; font-size: 12px; }
+.runtime-api-details { font-size: 13px; color: #40607e; overflow-wrap: anywhere; }
+.runtime-api-details summary { cursor: pointer; }
+.runtime-api-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 12px; }
+.runtime-api-details dd { margin: 0; }
+.runtime-api-details a { color: #145aa0; }
+.runtime-preferences fieldset { display: block; min-width: 0; margin: 0; padding: 0; border: 0; }
+.runtime-grid-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.runtime-grid-wide { grid-column: 1 / -1; }
+.runtime-check { display: flex; align-items: center; gap: 8px; color: #314f6d; font-size: 13px; }
+.runtime-check input { width: 16px; height: 16px; margin: 0; flex: none; }
+.runtime-operation { display: grid; gap: 8px; margin: 12px 0; padding: 12px; border-radius: 8px; background: #eaf2fe; font-size: 13px; color: #1c4f93; }
+.runtime-operation progress { width: 100%; accent-color: #2465c7; }
+.runtime-operation button { justify-self: start; }
+.runtime-error, .runtime-success { margin: 10px 0; padding: 10px 12px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
+.runtime-error { background: #fff0ef; color: #9d2925; }
+.runtime-success { background: #ecf8f1; color: #215a3b; }
 .message-list { flex: 1; min-height: 0; overflow: auto; padding: 28px max(24px, calc((100% - 880px) / 2)); }
 .empty-chat { text-align: center; margin: 8vh auto; color: #66809e; max-width: 540px; }
 .empty-chat h1 { color: #23568c; font-size: 25px; font-weight: 600; }
@@ -59,13 +99,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .compact-composer textarea { flex: 1; resize: vertical; min-height: 72px; max-height: 180px; }
 .compact-composer button { min-height: 40px; }
 .compact-status { min-height: 30px; color: #607e9e; background: #f6faff; padding: 5px 24px 10px; font-size: 12px; overflow-wrap: anywhere; }
-.context-panel { padding: 16px 20px; background: #eef5ff; border-bottom: 1px solid #c9d9e9; max-height: 38vh; overflow: auto; }
-.context-panel label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #476584; }
-.context-panel .inline-check { flex-direction: row; align-self: center; }
-.context-panel p { margin: 12px 0 0; font-size: 12px; color: #607e9e; line-height: 1.5; }
 .context-meter { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 4px 24px; color: #607e9e; background: #f6faff; font-size: 11px; }
 .context-meter progress { width: 100px; height: 8px; accent-color: #2465c7; }
-.context-panel .context-warning, .context-warning { color: #a55d10; }
+.context-warning { color: #a55d10; }
 .context-warning progress { accent-color: #a55d10; }
 .crash-screen { padding: 30px; white-space: pre-wrap; }
 @media (max-width: 800px) {
@@ -77,6 +113,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .chat-message.assistant { margin-right: 32px; }
   .compact-composer { padding: 10px; }
 }
+@media (max-width: 630px) {
+  .runtime-settings-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .runtime-settings-nav { flex-direction: row; padding: 7px 8px; border-right: 0; border-bottom: 1px solid #e1eaf5; overflow-x: auto; }
+  .runtime-settings-content { padding: 12px; }
+  .runtime-settings-header { padding: 11px 13px; }
+  .runtime-setting-card { padding: 12px; }
+}
 @media (max-width: 540px) {
   .compact-app { grid-template-columns: 1fr; grid-template-rows: 52px auto minmax(0, 1fr); }
   .compact-header { padding: 0 12px; }
@@ -86,7 +129,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .dialog-list nav { display: flex; gap: 4px; overflow-x: auto; }
   .dialog-list nav button { min-width: 105px; max-width: 150px; margin: 0; font-size: 12px; white-space: nowrap; }
   .dialog-list small, .dialog-list a { display: none; }
-  .compact-settings { padding: 12px; }
   .inline-check { font-size: 12px; }
   .runtime-label { display: none; }
 }

@@ -1172,23 +1172,41 @@ def _completion_events(*, model_id, messages, temperature, max_tokens, stream,
         worker = _get_runtime(model, settings, request_log_path, runtime_override, prewarm=False)
         admitted.attach(worker)
         entry = RUNTIMES[model_id]
-        entry.update(state='generating' if entry.get('model_loaded') else 'loading', last_used_at=now_iso(), last_used_ts=time.time())
+        loaded = entry.get('model_loaded')
+        entry.update(state='generating' if loaded else 'loading', last_used_at=now_iso(), last_used_ts=time.time())
+        started = time.monotonic()
+        stage = 'context' if loaded else 'loading'
         events = None
         try:
-            append_request_log(request_log_path, "generation_start", {"message_count": len(messages), "worker_pid": worker.process.pid})
+            append_request_log(request_log_path, "generation_start", {
+                "message_count": len(messages), "worker_pid": worker.process.pid,
+                "stage": stage, "n_ctx": cfg.get("n_ctx"),
+                "requested_n_gpu_layers": cfg.get("n_gpu_layers"),
+                "max_tokens": max_tokens,
+            })
             events = _worker_events(worker, _worker_payload(model, cfg, messages=messages, temperature=temperature,
                 max_tokens=max_tokens, stream=stream, tools=tools or [], tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
                 truncate_history=truncate_history and cfg.get('context_overflow', 'trim') == 'trim'))
             for event in events:
                 admitted.check()
-                if event.get('type') in {'runtime', 'ready', 'done', 'result'}:
+                kind = event.get('type')
+                if kind in {'runtime', 'ready', 'done', 'result'}:
                     entry.update(model_loaded=True, state='generating')
-                if event.get("type") == "error":
+                if kind == 'worker_status':
+                    stage = event.get('stage') or stage
+                elif kind == 'delta':
+                    stage = 'generation'
+                if kind == "error":
                     raise HTTPException(event.get("status_code", 500), event.get("message") or "Inference failed.")
-                if event.get("type") in {"done", "result"}:
-                    append_request_log(request_log_path, "generation_complete", {"type": event["type"], "worker_pid": worker.process.pid})
+                if kind in {"done", "result"}:
+                    append_request_log(request_log_path, "generation_complete", {"type": kind, "worker_pid": worker.process.pid})
                 yield event
-        except HTTPException:
+        except HTTPException as exc:
+            append_request_log(request_log_path, "generation_failed", {
+                "stage": stage, "status_code": exc.status_code, "error": exc.detail,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "worker_pid": worker.process.pid, **getattr(worker, "offload_counts", {}),
+            })
             admitted.check()
             raise
         finally:

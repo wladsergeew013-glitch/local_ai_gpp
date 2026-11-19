@@ -184,6 +184,8 @@ export type RuntimeStatus = {
   fallback_reason?: string;
   requested_n_gpu_layers?: number;
   effective_n_gpu_layers?: number;
+  gpu_offloaded_layers?: number;
+  model_layers?: number;
   gpu_runtime_ready?: boolean;
   worker_python?: string;
   package_path?: string;

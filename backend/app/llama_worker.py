@@ -128,7 +128,7 @@ def serve(payloads) -> int:
                     if runtime is not None:
                         runtime.close()
                         runtime = None
-                    write_event({'type': 'worker_status', 'message': 'Загружаю модель.'})
+                    write_event({'type': 'worker_status', 'stage': 'loading', 'message': 'Загружаю веса модели.'})
                     details = llama_backend_details()
                     fallback = ''
                     if kwargs.get('n_gpu_layers') and not details['supports_gpu_offload']:
@@ -150,7 +150,7 @@ def serve(payloads) -> int:
                 summary.update(apply_model_adapter(runtime, cfg))
                 write_event({'type': 'runtime', 'mode': summary['mode'], 'runtime': summary})
                 if payload.get('operation') == 'load':
-                    write_event({'type': 'worker_status', 'message': 'Веса загружены. Прогреваю вычисления.'})
+                    write_event({'type': 'worker_status', 'stage': 'warmup', 'message': 'Веса загружены. Прогреваю вычисления.'})
                     warm_started = time.perf_counter()
                     try:
                         # Exercise both prompt evaluation and the next-token
@@ -168,6 +168,7 @@ def serve(payloads) -> int:
                 tools = [] if tool_choice == 'none' else payload.get('tools') or []
                 if tools and summary.get('tool_calling') not in {'qwen3-json', 'qwen35-xml'}:
                     raise ValueError('TOOLS_UNSUPPORTED: this model template has no validated tool-call adapter.')
+                write_event({'type': 'worker_status', 'stage': 'context', 'message': 'Подготавливаю контекст запроса.'})
                 messages, dropped = fit_messages(runtime, payload['messages'], max_tokens, int(cfg.get('n_ctx', 4096)), bool(payload.get('truncate_history')), tools)
                 if summary.get('tool_calling') == 'qwen35-xml':
                     # The official 3.5 template iterates argument mappings; the HTTP API carries JSON strings.
@@ -186,6 +187,7 @@ def serve(payloads) -> int:
                 if tools:
                     # Keep the GGUF's native Qwen tool envelope; validate forced choices after decoding.
                     chat_kwargs.update(tools=tools, tool_choice='auto')
+                write_event({'type': 'worker_status', 'stage': 'prefill', 'message': 'Контекст подготовлен. Жду первые токены.'})
                 generated = time.perf_counter()
                 result = runtime.create_chat_completion(**_filter_supported_kwargs(runtime.create_chat_completion, chat_kwargs))
                 if not payload.get('stream') or tools:

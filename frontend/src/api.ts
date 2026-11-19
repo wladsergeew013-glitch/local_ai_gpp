@@ -39,8 +39,25 @@ export async function fetchBootstrap(): Promise<BootstrapPayload> {
   return readJson<BootstrapPayload>(await fetch(apiUrl('/api/bootstrap'), { signal: AbortSignal.timeout(10000) }));
 }
 
-export async function uploadModel(formData: FormData, signal?: AbortSignal): Promise<ModelRecord> {
-  return readJson<ModelRecord>(await fetch(apiUrl('/api/models/upload'), { method: 'POST', body: formData, signal }));
+export function uploadModel(formData: FormData, signal: AbortSignal, onProgress: (percent: number) => void): Promise<ModelRecord> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const abort = () => request.abort();
+    request.open('POST', apiUrl('/api/models/upload'));
+    request.upload.onprogress = event => {
+      if (event.lengthComputable) onProgress(Math.floor(event.loaded / event.total * 100));
+    };
+    request.upload.onload = () => onProgress(100);
+    request.onload = () => {
+      readJson<ModelRecord>(new Response(request.responseText || null, { status: request.status })).then(resolve, reject);
+    };
+    request.onerror = () => reject(new Error('Не удалось передать файл в Runtime. Проверьте подключение и повторите.'));
+    request.onabort = () => reject(signal.reason);
+    request.onloadend = () => signal.removeEventListener('abort', abort);
+    signal.addEventListener('abort', abort, { once: true });
+    request.send(formData);
+  });
 }
 
 export async function registerModelPath(formData: FormData, signal?: AbortSignal): Promise<ModelRecord> {
