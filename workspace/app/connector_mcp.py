@@ -9,7 +9,7 @@ from workspace.app.version import VERSION
 
 
 def handle(service, task_id, token, payload):
-    expected = service.tokens.get(task_id, "")
+    expected = service.connector_tokens.get(task_id, "")
     if not expected or not secrets.compare_digest(token.encode(), expected.encode()):
         raise HTTPException(403, "Task capability required")
     task = service.store.one("tasks", task_id)

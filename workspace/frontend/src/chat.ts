@@ -63,6 +63,9 @@ export const emptyBoot: Bootstrap = {
   tasks: [],
   connectors: [],
 };
+export const agentTrustNotice =
+  "Агент запускает команды с правами вашей учётной записи. «Только чтение» ограничивает запись в файлы, а доступ к вашим данным и локальным сервисам определяется правами ОС.";
+
 export const active = new Set([
   "starting",
   "running",

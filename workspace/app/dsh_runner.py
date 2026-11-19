@@ -1,4 +1,4 @@
-"""One task's official SDK client, behind a parent-owned process boundary.
+"""One task's official SDK client running with the local user's privileges.
 
 No DSH process starts until the owner has assigned containment and sent stdin.
 The JSON control protocol is private to Workspace, never an HTTP model API.
@@ -77,7 +77,8 @@ def main():
         config["capabilities"],
         config["owner_id"],
         config["owner_token"],
-        config.get("connector_endpoint"),
+        connector_endpoint=config.get("connector_endpoint"),
+        connector_token=config.get("connector_token"),
     )
     binary = Path(bundled_runtime_path())
     with binary.open("rb") as stream:
@@ -176,7 +177,7 @@ def main():
                 ).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
-                    "X-Workspace-Task-Token": config["owner_token"],
+                    "X-Workspace-Task-Token": config["connector_token"],
                 },
             )
             with build_opener(ProxyHandler({})).open(check, timeout=5) as response:

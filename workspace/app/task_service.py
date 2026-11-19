@@ -22,7 +22,8 @@ class TaskService:
         self.store = store
         self.lock = threading.RLock()
         self.processes = {}
-        self.tokens = {}
+        self.runtime_tokens = {}
+        self.connector_tokens = {}
         self.results = {}
         self.connector_waiters = {}
         self.connector_discoveries = {}
@@ -212,7 +213,11 @@ class TaskService:
                 )
             token = secrets.token_urlsafe(32)
             config = {
-                "provider": provider,
+                "provider": {
+                    "base_url": provider["base_url"],
+                    "model": provider["model"],
+                    "api_key": provider["api_key"],
+                },
                 "capabilities": caps,
                 "owner_id": task_id,
                 "owner_token": token,
@@ -224,6 +229,7 @@ class TaskService:
                 "resume": resume,
                 "restore_only": restore_only,
             }
+            connector_token = None
             if task["details"].get("connector_ids"):
                 if not workspace_url:
                     raise ValueError(
@@ -232,6 +238,8 @@ class TaskService:
                 config["connector_endpoint"] = (
                     workspace_url.rstrip("/") + "/api/tasks/" + task_id + "/mcp"
                 )
+                connector_token = secrets.token_urlsafe(32)
+                config["connector_token"] = connector_token
             command = (
                 [
                     str(
@@ -253,7 +261,6 @@ class TaskService:
             env["PYTHONUTF8"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             root = Path(__file__).resolve().parents[2]
-            self.tokens[task_id] = token
             self.results.pop(task_id, None)
             details = {
                 "restoring": restore_only,
@@ -264,6 +271,9 @@ class TaskService:
             if initial:
                 details["initial_prompt"] = prompt
             self.store.update_task(task_id, "starting", details)
+            self.runtime_tokens[task_id] = token
+            if connector_token:
+                self.connector_tokens[task_id] = connector_token
             try:
                 process = OwnedProcess(
                     command,
@@ -273,7 +283,8 @@ class TaskService:
                     lambda code, error: self._exit(task_id, code, error),
                 )
             except Exception as exc:
-                self.tokens.pop(task_id, None)
+                self.runtime_tokens.pop(task_id, None)
+                self.connector_tokens.pop(task_id, None)
                 self.store.update_task(
                     task_id,
                     "retryable" if not resume else "uncertain",
@@ -326,7 +337,7 @@ class TaskService:
 
         task_id = task["id"]
         token = secrets.token_urlsafe(32)
-        self.tokens[task_id] = token
+        self.runtime_tokens[task_id] = token
         remember = task["details"].get("memory", True) if memory is None else memory
         self.store.update_task(
             task_id, "running", {"partial": "", "error": "", "memory": remember}
@@ -336,7 +347,7 @@ class TaskService:
             with self.lock:
                 self.store.update_task(task_id, status, {"partial": "", "error": error})
                 self.processes.pop(task_id, None)
-                self.tokens.pop(task_id, None)
+                self.runtime_tokens.pop(task_id, None)
                 activity("error" if status == "failed" else "idle")
 
         run = ChatRun(
@@ -403,6 +414,9 @@ class TaskService:
 
         activity("idle")
         with self.lock:
+            self.runtime_tokens.pop(task_id, None)
+            self.connector_tokens.pop(task_id, None)
+            self.connector_discoveries.pop(task_id, None)
             current = self.store.one("tasks", task_id)
             result = self.results.pop(task_id, None)
             if current["status"] == "stopping":
@@ -458,8 +472,6 @@ class TaskService:
                 {"status": status, "exit_code": code, "automatic_retry": False},
             )
             self.processes.pop(task_id, None)
-            self.tokens.pop(task_id, None)
-            self.connector_discoveries.pop(task_id, None)
             self._cancel_connector_waiters(task_id)
             with self.store.transaction() as db:
                 db.execute(
@@ -531,7 +543,7 @@ class TaskService:
             if expected is not None and task["revision"] != expected:
                 raise ValueError("TASK_CONFLICT: refresh before stopping.")
             process = self.processes.get(task_id)
-            token = self.tokens.get(task_id)
+            token = self.runtime_tokens.get(task_id)
             if process is None:
                 return {"confirmed": True, "active": False}
             self.store.update_task(task_id, "stopping")

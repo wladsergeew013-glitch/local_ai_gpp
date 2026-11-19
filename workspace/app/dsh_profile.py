@@ -23,8 +23,17 @@ def agent_limits(capabilities):
 
 
 def profile(
-    path: Path, provider, capabilities, owner_id, owner_token, connector_endpoint=None
+    path: Path,
+    provider,
+    capabilities,
+    owner_id,
+    owner_token,
+    *,
+    connector_endpoint=None,
+    connector_token=None,
 ):
+    if bool(connector_endpoint) != bool(connector_token):
+        raise ValueError("Application tools require both an endpoint and a task token.")
     context, output = agent_limits(capabilities)
     rows = [
         {
@@ -100,7 +109,7 @@ def profile(
                             "transport": "streamable-http",
                             "serverName": "workspace_apps",
                             "url": connector_endpoint,
-                            "headers": {"X-Workspace-Task-Token": owner_token},
+                            "headers": {"X-Workspace-Task-Token": connector_token},
                             "toolCallTimeoutMs": 330000,
                             "startupTimeoutMs": 15000,
                             "closeTimeoutMs": 1000,

@@ -1050,6 +1050,12 @@ h1 {
   width: auto;
   margin: 0;
 }
+.agent-trust {
+  margin: 8px 0;
+  color: #526582;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .attached-apps {
   display: flex;
   gap: 12px;

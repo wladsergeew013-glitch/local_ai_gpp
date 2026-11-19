@@ -100,7 +100,7 @@ class ConnectorTests(unittest.TestCase):
     def test_mcp_write_waits_for_exact_user_grant_and_receipts_duplicate_request(self):
         with tempfile.TemporaryDirectory() as root:
             store, service, task = self.prepare(Path(root))
-            service.tokens[task["id"]] = "task-secret"
+            service.connector_tokens[task["id"]] = "task-secret"
             service.processes[task["id"]] = Mock()
             store.update_task(task["id"], "running")
             payload = {
@@ -145,7 +145,7 @@ class ConnectorTests(unittest.TestCase):
                 self.assertEqual(send.call_count, 1)
                 self.assertFalse(duplicate["result"]["isError"])
                 self.assertFalse(output[0]["result"]["isError"])
-            service.tokens.clear()
+            service.connector_tokens.clear()
             with self.assertRaises(HTTPException):
                 handle(
                     service,
@@ -160,7 +160,7 @@ class ConnectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             store, service, task = self.prepare(Path(root))
             task_id = task["id"]
-            service.tokens[task_id] = "first-attempt"
+            service.connector_tokens[task_id] = "first-attempt"
             query = {"id": 1, "method": "workspace/readiness"}
             self.assertFalse(
                 handle(service, task_id, "first-attempt", query)["result"]["ready"]
@@ -169,7 +169,7 @@ class ConnectorTests(unittest.TestCase):
             self.assertTrue(
                 handle(service, task_id, "first-attempt", query)["result"]["ready"]
             )
-            service.tokens[task_id] = "second-attempt"
+            service.connector_tokens[task_id] = "second-attempt"
             self.assertFalse(
                 handle(service, task_id, "second-attempt", query)["result"]["ready"]
             )

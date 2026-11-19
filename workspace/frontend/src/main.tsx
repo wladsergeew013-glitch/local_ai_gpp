@@ -11,6 +11,7 @@ import { operatorToken } from "./access";
 import {
   api,
   active,
+  agentTrustNotice,
   states,
   emptyBoot,
   submitMessage,
@@ -227,7 +228,7 @@ function App() {
               checked={files}
               onChange={(e) => setFiles(e.target.checked)}
             />
-            Работа с файлами
+            Файлы и команды
           </label>
         )}
         {!selected && files && (
@@ -237,7 +238,7 @@ function App() {
               checked={write}
               onChange={(e) => setWrite(e.target.checked)}
             />
-            Разрешить изменения
+            Разрешить запись в проект
           </label>
         )}
         <span className="compose-spacer" />
@@ -272,6 +273,9 @@ function App() {
           </button>
         )}
       </div>
+      {((!selected && files) || agent) && (
+        <p className="agent-trust">{agentTrustNotice}</p>
+      )}
       {!selected && files && !!boot.connectors.length && (
         <div className="attached-apps">
           <span>Приложения:</span>

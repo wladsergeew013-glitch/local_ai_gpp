@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from workspace.app import project_diff
 from workspace.app.control_access import UI_TOKEN_HEADER
+from workspace.app.dsh_profile import profile
 from workspace.app.main import create_app
 from workspace.app.owned_process import OwnedProcess
 
@@ -29,7 +30,7 @@ class WorkspaceReviewTests(unittest.TestCase):
     def post(self, path, payload):
         return self.client.post("/api" + path, json=payload, headers=self.operator)
 
-    def seed(self, mode):
+    def seed(self, mode, *, connector_ids=()):
         provider = self.post("/providers", {"model": "fixture"}).json()
         project = (
             self.post("/projects", {"name": "Fixture"}).json()
@@ -44,6 +45,7 @@ class WorkspaceReviewTests(unittest.TestCase):
                 "prompt": "First draft",
                 "project_id": project["id"] if project else None,
                 "action_id": f"fixture-{mode}-initial",
+                "connector_ids": list(connector_ids),
             },
         ).json()
 
@@ -55,7 +57,7 @@ class WorkspaceReviewTests(unittest.TestCase):
                 self.client.get(path, headers=self.operator).status_code, 200
             )
         task = self.seed("agent")
-        self.service.tokens[task["id"]] = "fixture-task-token"
+        self.service.connector_tokens[task["id"]] = "fixture-task-token"
         headers = {"X-Workspace-Task-Token": "fixture-task-token"}
         self.assertEqual(
             self.client.post(
@@ -75,6 +77,88 @@ class WorkspaceReviewTests(unittest.TestCase):
             ).status_code,
             403,
         )
+
+    def test_agent_launch_limits_connector_capability_to_attached_conversations(self):
+        connector = self.post(
+            "/connectors",
+            {
+                "name": "Test Notes",
+                "base_url": "http://127.0.0.1:8890",
+                "api_key": "fixture-connector-api-key",
+            },
+        )
+        self.assertEqual(connector.status_code, 200, connector.text)
+        connector_id = connector.json()["id"]
+        task = self.seed("agent", connector_ids=[connector_id])
+        unbound_response = self.post(
+            "/chats",
+            {
+                "mode": "agent",
+                "provider_id": task["provider_id"],
+                "project_id": task["project_id"],
+                "prompt": "Second conversation",
+                "action_id": "fixture-unbound-agent",
+            },
+        )
+        self.assertEqual(unbound_response.status_code, 200, unbound_response.text)
+        unbound = unbound_response.json()
+        caps = {
+            "context_window": 8192,
+            "max_output_tokens": 512,
+            "tools": {"supported": True},
+        }
+        for conversation, attached in ((unbound, False), (task, True)):
+            task_id = conversation["id"]
+            with (
+                self.subTest(attached=attached),
+                patch(
+                    "workspace.app.task_service.RuntimeClient.capabilities",
+                    return_value=caps,
+                ),
+                patch("workspace.app.task_service.OwnedProcess") as spawn,
+            ):
+                started = self.post(
+                    f"/chats/{task_id}/start", {"revision": conversation["revision"]}
+                )
+                self.assertEqual(started.status_code, 200, started.text)
+                config = spawn.return_value.send.call_args.args[0]
+                self.assertNotIn("fixture-connector-api-key", json.dumps(config))
+                query = {"id": 1, "method": "tools/list"}
+                url = "/api/chats/" + task_id + "/mcp"
+                header = "X-Workspace-Task-Token"
+                self.assertEqual(
+                    self.client.post(
+                        url, json=query, headers={header: config["owner_token"]}
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(attached, "connector_token" in config)
+                self.assertEqual(attached, "connector_endpoint" in config)
+                self.assertEqual(attached, task_id in self.service.connector_tokens)
+                if attached:
+                    token = config["connector_token"]
+                    self.assertNotEqual(token, config["owner_token"])
+                    allowed = self.client.post(url, json=query, headers={header: token})
+                    self.assertEqual(allowed.status_code, 200, allowed.text)
+                    self.assertEqual(len(allowed.json()["result"]["tools"]), 2)
+                    self.assertNotIn("fixture-connector-api-key", allowed.text)
+                    patch_path = Path(self.root) / "profile.json"
+                    profile(
+                        patch_path,
+                        config["provider"],
+                        caps,
+                        task_id,
+                        config["owner_token"],
+                        connector_endpoint=config["connector_endpoint"],
+                        connector_token=token,
+                    )
+                    profile_rows = json.loads(patch_path.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        profile_rows[-1]["insert"][0]["config"]["headers"],
+                        {header: token},
+                    )
+                self.service._exit(task_id, 0, None)
+                self.assertNotIn(task_id, self.service.connector_tokens)
 
     def test_busy_start_keeps_conversation_and_uses_edited_text_and_memory(self):
         task = self.seed("chat")

@@ -3,6 +3,7 @@ import "./mini.css";
 import {
   api,
   active,
+  agentTrustNotice,
   states,
   emptyBoot,
   submitMessage,
@@ -236,6 +237,9 @@ export function MiniApp() {
             </div>
           ) : null}
           <div className="mini-compose">
+            {current && current.details?.mode !== "chat" && (
+              <p className="agent-trust">{agentTrustNotice}</p>
+            )}
             <textarea
               aria-label="Сообщение мини-помощнику"
               rows={2}
