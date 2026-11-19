@@ -6,6 +6,7 @@ can be approved by this script; other permission requests are rejected.
 
 import argparse
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -14,6 +15,9 @@ import httpx
 
 
 def check(workspace_url, notes_url, runtime_url, model, project, output):
+    token = os.getenv("WORKSPACE_UI_TOKEN")
+    if not token:
+        raise SystemExit("Set WORKSPACE_UI_TOKEN to the test Workspace operator token.")
     project.mkdir(parents=True, exist_ok=False)
     (project / "README.md").write_text(
         "Disposable connector acceptance. Do not modify this project.\n",
@@ -40,7 +44,12 @@ def check(workspace_url, notes_url, runtime_url, model, project, output):
         capture_output=True,
     )
     title, body = "Local AI connector check", "ORBIT-7429"
-    with httpx.Client(base_url=workspace_url, timeout=90, trust_env=False) as client:
+    with httpx.Client(
+        base_url=workspace_url,
+        timeout=90,
+        trust_env=False,
+        headers={"X-Workspace-UI-Token": token},
+    ) as client:
 
         def post(path, payload):
             response = client.post(path, json=payload)

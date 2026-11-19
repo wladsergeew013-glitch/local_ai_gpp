@@ -174,7 +174,7 @@ PRAGMA user_version=2;
                 )
         with self.transaction() as db:
             db.execute(
-                "UPDATE approvals SET status='cancelled',decided_at=? WHERE status='pending'",
+                "UPDATE approvals SET status='cancelled',decided_at=? WHERE status IN ('pending','granted')",
                 (now(),),
             )
             db.execute(

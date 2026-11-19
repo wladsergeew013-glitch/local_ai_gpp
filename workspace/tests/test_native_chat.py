@@ -116,6 +116,40 @@ class NativeChatTests(unittest.TestCase):
         self.until(lambda: len(self.panel.messages) == 65)
         self.assertEqual(self.panel.history.index("@0,0"), top)
 
+    def test_busy_start_keeps_new_dialogue_and_edited_draft(self):
+        base_transport = self.panel.transport
+        starts, creates = [], []
+
+        def api(path, body=None):
+            if path == "/chats":
+                creates.append(body)
+                return {"id": "created", "revision": 1}
+            if path == "/chats/created/start":
+                starts.append(body)
+                if len(starts) == 1:
+                    raise RuntimeError("WORKSPACE_BUSY")
+                return {"id": "created", "revision": 2}
+            if path == "/chats/created":
+                return {
+                    "id": "created", "status": "queued" if len(starts) < 2 else "running",
+                    "revision": 1, "prompt": "First draft", "details": {"memory": True},
+                }
+            return base_transport(path, body)
+
+        self.panel.transport = api
+        self.panel.new_chat()
+        self.panel.input_var.set("  First draft  ")
+        self.panel.send()
+        self.until(lambda: self.panel.selected == "created" and not self.panel.sending)
+        self.assertEqual(self.panel.input_var.get(), "  First draft  ")
+        self.panel.input_var.set("Edited message")
+        self.panel.memory_var.set(False)
+        self.panel.send()
+        self.until(lambda: len(starts) == 2 and not self.panel.sending)
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(starts[-1], {"revision": 1, "prompt": "Edited message", "memory": False})
+        self.assertEqual(self.panel.input_var.get(), "")
+
 
 if __name__ == "__main__":
     unittest.main()

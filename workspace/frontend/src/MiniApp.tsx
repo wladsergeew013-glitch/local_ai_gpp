@@ -3,13 +3,19 @@ import "./mini.css";
 import {
   api,
   active,
+  agentTrustNotice,
   states,
   emptyBoot,
+  submitMessage,
+  transferDraft,
+  pendingPrompt,
+  clearSentDraft,
   useConversation,
   type Bootstrap,
   type Conversation,
 } from "./chat";
 import { ChatHistory } from "./ChatHistory";
+import { operatorToken } from "./access";
 
 export function MiniApp() {
   const [boot, setBoot] = useState<Bootstrap>(emptyBoot);
@@ -35,7 +41,9 @@ export function MiniApp() {
   });
   const { current, events, error: pollError } = useConversation(selected);
   const draftKey = selected || "new:" + project,
-    draft = drafts[draftKey] || "",
+    draft =
+      drafts[draftKey] ??
+      pendingPrompt(current?.id === selected ? current : null),
     working = !!current && active.has(current.status);
   useEffect(() => {
     let valid = true;
@@ -74,9 +82,13 @@ export function MiniApp() {
         panel: settings ? "provider" : undefined,
       });
     } catch {
+      const token = await operatorToken;
       window.open(
-        "/" + (selected ? "?task=" + encodeURIComponent(selected) : ""),
+        "/" +
+          (selected ? "?task=" + encodeURIComponent(selected) : "") +
+          (token ? "#access=" + encodeURIComponent(token) : ""),
         "_blank",
+        "noopener",
       );
     }
   }
@@ -87,10 +99,11 @@ export function MiniApp() {
     setSending(true);
     setError("");
     try {
+      let row: Conversation;
       if (!selected) {
         const p = provider || boot.providers[0]?.id;
         if (!p) throw new Error("Подключите модель в настройках Workspace.");
-        const row = await api<Conversation>("/chats", {
+        row = await api<Conversation>("/chats", {
           project_id: project || null,
           provider_id: p,
           prompt: raw.trim(),
@@ -98,19 +111,14 @@ export function MiniApp() {
           memory,
           action_id: crypto.randomUUID(),
         });
+        setDrafts((old) => transferDraft(old, key, row.id, raw));
         setSelected(row.id);
         setMenu(false);
-        await api("/chats/" + row.id + "/start", { revision: row.revision });
       } else {
-        const row = await api<Conversation>("/chats/" + selected);
-        await api(
-          "/chats/" +
-            selected +
-            (row.status === "queued" ? "/start" : "/continue"),
-          { revision: row.revision, prompt: raw.trim(), memory },
-        );
+        row = await api<Conversation>("/chats/" + selected);
       }
-      setDrafts((old) => (old[key] === raw ? { ...old, [key]: "" } : old));
+      await submitMessage(row, raw, memory);
+      setDrafts((old) => clearSentDraft(old, row.id, raw));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -210,6 +218,12 @@ export function MiniApp() {
               {error || pollError}
             </div>
           )}
+          {current?.status === "retryable" && (
+            <div className="mini-notice" role="status">
+              {current.details?.error ||
+                "Запуск не дошёл до сессии. Повторите отправку."}
+            </div>
+          )}
           {current && ["interrupted", "uncertain"].includes(current.status) && (
             <div className="mini-notice">
               Проверьте историю перед продолжением.{" "}
@@ -223,6 +237,9 @@ export function MiniApp() {
             </div>
           ) : null}
           <div className="mini-compose">
+            {current && current.details?.mode !== "chat" && (
+              <p className="agent-trust">{agentTrustNotice}</p>
+            )}
             <textarea
               aria-label="Сообщение мини-помощнику"
               rows={2}

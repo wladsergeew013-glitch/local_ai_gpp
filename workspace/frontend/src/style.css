@@ -776,6 +776,17 @@ h1 {
   background: #e5f8ed;
   color: #20603e;
 }
+.agent-panel .diff {
+  white-space: normal;
+}
+.diff-files {
+  overflow-wrap: anywhere;
+  padding-inline-start: 24px;
+}
+.diff-lines {
+  white-space: pre;
+  overflow-x: auto;
+}
 .diff .remove {
   background: #ffebef;
   color: #96364e;
@@ -1039,6 +1050,12 @@ h1 {
   width: auto;
   margin: 0;
 }
+.agent-trust {
+  margin: 8px 0;
+  color: #526582;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .attached-apps {
   display: flex;
   gap: 12px;
@@ -1143,7 +1160,8 @@ h1 {
 .runtime-status.ready {
   color: #217c60;
 }
-.runtime-status.offline {
+.runtime-status.offline,
+.runtime-status.missing {
   color: #a76e26;
 }
 .runtime-status small {

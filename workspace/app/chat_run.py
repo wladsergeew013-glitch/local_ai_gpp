@@ -62,7 +62,8 @@ class ChatRun:
                 "SELECT payload FROM events WHERE task_id=? AND kind='chat_message' ORDER BY seq",
                 (chat_id,),
             )
-            messages = completed_messages(history) if self.memory else []
+            # Leave room for the new message under the Runtime's wire limit.
+            messages = completed_messages(history)[-8190:] if self.memory else []
             messages.append({"role": "user", "content": self.prompt})
             self.store.event(
                 chat_id,
@@ -92,7 +93,8 @@ class ChatRun:
                 "max_tokens": min(2048, int(caps["max_output_tokens"])),
                 "stream": True,
                 "memory": self.memory,
-                "runtime": {"enable_thinking": False, "context_overflow": "trim"},
+                "chat_template_kwargs": {"enable_thinking": False},
+                "truncate_history": self.memory,
             }
             last_flush = 0
             with httpx.Client(

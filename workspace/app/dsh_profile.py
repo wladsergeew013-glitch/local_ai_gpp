@@ -8,9 +8,7 @@ DSH_SOURCE = "39163dd30f703a79079e2d2446545cff3c453738"
 SESSION_FORMAT = 4
 
 
-def profile(
-    path: Path, provider, capabilities, owner_id, owner_token, connector_endpoint=None
-):
+def agent_limits(capabilities):
     if not capabilities.get("tools", {}).get("supported"):
         raise ValueError(
             "MODEL_TOOLS_UNAVAILABLE: load a model with a supported tool template."
@@ -21,6 +19,22 @@ def profile(
         raise ValueError(
             "MODEL_CONTEXT_TOO_SMALL: agent tasks require at least 8192 configured context tokens."
         )
+    return context, output
+
+
+def profile(
+    path: Path,
+    provider,
+    capabilities,
+    owner_id,
+    owner_token,
+    *,
+    connector_endpoint=None,
+    connector_token=None,
+):
+    if bool(connector_endpoint) != bool(connector_token):
+        raise ValueError("Application tools require both an endpoint and a task token.")
+    context, output = agent_limits(capabilities)
     rows = [
         {
             "id": "llm-pi-ai",
@@ -95,7 +109,7 @@ def profile(
                             "transport": "streamable-http",
                             "serverName": "workspace_apps",
                             "url": connector_endpoint,
-                            "headers": {"X-Workspace-Task-Token": owner_token},
+                            "headers": {"X-Workspace-Task-Token": connector_token},
                             "toolCallTimeoutMs": 330000,
                             "startupTimeoutMs": 15000,
                             "closeTimeoutMs": 1000,

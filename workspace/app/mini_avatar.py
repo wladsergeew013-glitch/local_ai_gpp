@@ -91,10 +91,19 @@ def position_window(root, x, y):
 
 class MiniAvatar:
     def __init__(
-        self, root, on_bubble, on_main, on_exit, *, start_hidden=False, api_base=None
+        self,
+        root,
+        on_bubble,
+        on_main,
+        on_exit,
+        *,
+        start_hidden=False,
+        api_base=None,
+        ui_token=None,
     ):
         self.data = root
         self.api_base = api_base
+        self.ui_token = ui_token
         self.chat = None
         self.on_bubble = on_bubble
         self.on_main = on_main
@@ -257,6 +266,7 @@ class MiniAvatar:
                     self._save,
                     prefs=saved.get("chat"),
                     hidden=self.start_hidden,
+                    ui_token=self.ui_token,
                 )
             drag = {"origin": None, "moved": False}
 

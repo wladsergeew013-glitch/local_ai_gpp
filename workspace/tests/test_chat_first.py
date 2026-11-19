@@ -13,6 +13,7 @@ from workspace.app.task_service import TaskService
 from workspace.app.chat_run import completed_messages
 from workspace.app.projects import create_project
 from workspace.app.project_diff import capture, compare
+from workspace.app.control_access import UI_TOKEN_HEADER
 
 
 class ChatFirstTests(unittest.TestCase):
@@ -154,6 +155,7 @@ class ChatFirstTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, TestClient(
             create_app(root), base_url="http://127.0.0.1"
         ) as client:
+            client.headers[UI_TOKEN_HEADER] = client.app.state.ui_token
             provider = client.post("/api/providers", json={"model": "m"}).json()
             chat = client.post(
                 "/api/chats",

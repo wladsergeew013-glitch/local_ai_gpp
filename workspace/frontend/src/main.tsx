@@ -7,11 +7,17 @@ import { ProjectDialog } from "./ProjectDialog";
 import { ChatHistory } from "./ChatHistory";
 import { AgentPanel } from "./AgentPanel";
 import { RuntimeStatus } from "./RuntimeStatus";
+import { operatorToken } from "./access";
 import {
   api,
   active,
+  agentTrustNotice,
   states,
   emptyBoot,
+  submitMessage,
+  transferDraft,
+  pendingPrompt,
+  clearSentDraft,
   useConversation,
   type Bootstrap,
   type Conversation,
@@ -44,9 +50,11 @@ function App() {
       return {};
     }
   });
-  const draftKey = selected || "new:" + project,
-    draft = drafts[draftKey] || "";
   const { current, events, error: pollError } = useConversation(selected);
+  const draftKey = selected || "new:" + project,
+    draft =
+      drafts[draftKey] ??
+      pendingPrompt(current?.id === selected ? current : null);
   const working = !!current && active.has(current.status);
   const agent = !!current && current.details?.mode !== "chat";
   const reload = () => api<Bootstrap>("/bootstrap").then(setBoot);
@@ -117,10 +125,11 @@ function App() {
       key = draftKey;
     if (!raw.trim() || busy || working) return;
     await act(async () => {
+      let row: Conversation;
       if (!selected) {
         const p = provider || boot.providers[0]?.id;
         if (!p) throw new Error("Подключите модель в настройках.");
-        const row = await api<Conversation>("/chats", {
+        row = await api<Conversation>("/chats", {
           project_id: project || null,
           provider_id: p,
           prompt: raw.trim(),
@@ -130,18 +139,13 @@ function App() {
           connector_ids: files ? connectorIds : [],
           action_id: crypto.randomUUID(),
         });
+        setDrafts((old) => transferDraft(old, key, row.id, raw));
         setSelected(row.id);
-        await api("/chats/" + row.id + "/start", { revision: row.revision });
       } else {
-        const row = await api<Conversation>("/chats/" + selected);
-        await api(
-          "/chats/" +
-            selected +
-            (row.status === "queued" ? "/start" : "/continue"),
-          { revision: row.revision, prompt: raw.trim(), memory },
-        );
+        row = await api<Conversation>("/chats/" + selected);
       }
-      setDrafts((old) => (old[key] === raw ? { ...old, [key]: "" } : old));
+      await submitMessage(row, raw, memory);
+      setDrafts((old) => clearSentDraft(old, row.id, raw));
     });
   }
   const modelName = (id: string) =>
@@ -224,7 +228,7 @@ function App() {
               checked={files}
               onChange={(e) => setFiles(e.target.checked)}
             />
-            Работа с файлами
+            Файлы и команды
           </label>
         )}
         {!selected && files && (
@@ -234,7 +238,7 @@ function App() {
               checked={write}
               onChange={(e) => setWrite(e.target.checked)}
             />
-            Разрешить изменения
+            Разрешить запись в проект
           </label>
         )}
         <span className="compose-spacer" />
@@ -269,6 +273,9 @@ function App() {
           </button>
         )}
       </div>
+      {((!selected && files) || agent) && (
+        <p className="agent-trust">{agentTrustNotice}</p>
+      )}
       {!selected && files && !!boot.connectors.length && (
         <div className="attached-apps">
           <span>Приложения:</span>
@@ -450,6 +457,12 @@ function App() {
                   </button>
                 )}
             </header>
+            {current?.status === "retryable" && (
+              <p className="alert" role="status">
+                {current.details?.error ||
+                  "Запуск не дошёл до сессии. Повторите отправку."}
+              </p>
+            )}
             <ChatHistory events={events} current={current} />
             {current && agent && tools && (
               <AgentPanel current={current} events={events} act={act} />
@@ -479,6 +492,21 @@ function App() {
     </div>
   );
 }
-createRoot(document.getElementById("root")!).render(
-  location.pathname === "/mini" ? <MiniApp /> : <App />,
+const root = createRoot(document.getElementById("root")!);
+root.render(<p className="landing">Подключение к Workspace…</p>);
+operatorToken.then((token) =>
+  root.render(
+    token ? (
+      location.pathname === "/mini" ? (
+        <MiniApp />
+      ) : (
+        <App />
+      )
+    ) : (
+      <main className="landing">
+        <h1>Local AI Workspace</h1>
+        <p>Откройте Workspace из приложения или по ссылке из терминала.</p>
+      </main>
+    ),
+  ),
 );

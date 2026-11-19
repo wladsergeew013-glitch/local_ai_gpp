@@ -1,4 +1,4 @@
-"""One task's official SDK client, behind a parent-owned process boundary.
+"""One task's official SDK client running with the local user's privileges.
 
 No DSH process starts until the owner has assigned containment and sent stdin.
 The JSON control protocol is private to Workspace, never an HTTP model API.
@@ -77,7 +77,8 @@ def main():
         config["capabilities"],
         config["owner_id"],
         config["owner_token"],
-        config.get("connector_endpoint"),
+        connector_endpoint=config.get("connector_endpoint"),
+        connector_token=config.get("connector_token"),
     )
     binary = Path(bundled_runtime_path())
     with binary.open("rb") as stream:
@@ -159,6 +160,7 @@ def main():
 
     threading.Thread(target=controls, daemon=True).start()
     threading.Thread(target=approvals, daemon=True).start()
+    session_opened = False
     try:
         harness.start()
         if config.get("connector_endpoint"):
@@ -175,7 +177,7 @@ def main():
                 ).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
-                    "X-Workspace-Task-Token": config["owner_token"],
+                    "X-Workspace-Task-Token": config["connector_token"],
                 },
             )
             with build_opener(ProxyHandler({})).open(check, timeout=5) as response:
@@ -189,10 +191,12 @@ def main():
             if config.get("resume")
             else harness.start_session(config["session_id"])
         )
+        session_opened = True
         emit("started", session_id=config["session_id"])
         if config.get("restore_only"):
             emit("restored", session_id=config["session_id"], replayed=False)
             return 0
+        emit("input_dispatching", session_id=config["session_id"])
         result = session.run(
             config["prompt"],
             on_notification=lambda n: emit(
@@ -208,8 +212,12 @@ def main():
         return 0
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
-        # Timeout/transport loss is uncertain: commands may already have committed.
-        emit("uncertain", error=type(exc).__name__, message=str(exc), replayed=False)
+        kind = (
+            "startup_failed"
+            if not session_opened and not config.get("resume")
+            else "uncertain"
+        )
+        emit(kind, error=type(exc).__name__, message=str(exc), replayed=False)
         return 1
     finally:
         stopped.set()

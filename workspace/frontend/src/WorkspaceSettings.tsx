@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { SettingsDialog } from "./SettingsDialog";
-import { api, type Bootstrap } from "./chat";
+import { api, type Bootstrap, type RuntimeProbe } from "./chat";
 
 export function WorkspaceSettings({
   boot,
@@ -147,7 +147,7 @@ export function WorkspaceSettings({
                 disabled={busy}
                 onClick={() =>
                   act(async () => {
-                    const result = await api(
+                    const result = await api<RuntimeProbe>(
                       existing
                         ? "/providers/" + existing + "/probe"
                         : "/providers/probe",
@@ -157,7 +157,9 @@ export function WorkspaceSettings({
                     if (!model && result.models.length)
                       setModel(result.models[0].id);
                     setNotice(
-                      "Связь установлена. Выберите модель и сохраните подключение.",
+                      result.model_available === false
+                        ? "Runtime доступен. Сохранённая модель отсутствует. Выберите модель из списка."
+                        : "Связь установлена. Выберите модель и сохраните подключение.",
                     );
                   })
                 }
@@ -190,8 +192,10 @@ export function WorkspaceSettings({
             <details className="optional-connections">
               <summary>Доступ к приложениям · необязательно</summary>
               <p className="muted">
-                Агент может читать подключённое приложение. Создание записей
-                требует отдельного подтверждения.
+                Workspace даёт диалогу инструменты выбранных приложений и
+                запрашивает подтверждение на каждую запись через подключение.
+                Команды файлового агента выполняются с правами вашей учётной
+                записи и могут обращаться к локальным сервисам напрямую.
               </p>
               {boot.connectors.map((c) => (
                 <p className="provider-row" key={c.id}>

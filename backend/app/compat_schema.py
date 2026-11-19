@@ -89,6 +89,7 @@ class OpenAIChatRequest(BaseModel):
     max_tokens: int = Field(default=256, ge=1, le=32768)
     stream: bool = False
     memory: bool = True
+    truncate_history: bool = False
     stream_options: dict = Field(default_factory=dict)
     chat_template_kwargs: dict[str, bool] = Field(default_factory=dict)
 
@@ -113,7 +114,8 @@ class OpenAIChatRequest(BaseModel):
         if not self.tools and self.tool_choice not in ("none", "auto"):
             raise ValueError("A required tool_choice needs tools.")
         if not self.memory and (
-            self.tools or any(m.role == "tool" or m.tool_calls for m in self.messages)
+            (self.tools and self.tool_choice != "none")
+            or any(m.role == "tool" or m.tool_calls for m in self.messages)
         ):
             raise ValueError(
                 "Tool turns require memory=true to preserve call/result linkage."
