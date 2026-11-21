@@ -15,6 +15,8 @@ from workspace.app.owned_process import OwnedProcess
 from workspace.app import history, project_diff
 from workspace.app.control_access import UI_TOKEN_ENV
 from workspace.app.dsh_profile import agent_limits
+from workspace.app.plugin_execution import PluginGateway
+from workspace.app.agent_plugins import AgentPluginContext
 
 
 class TaskService:
@@ -27,6 +29,8 @@ class TaskService:
         self.results = {}
         self.connector_waiters = {}
         self.connector_discoveries = {}
+        self.plugin_gateway = PluginGateway(store)
+        self.agent_plugins = {}
 
     def create(
         self,
@@ -169,8 +173,9 @@ class TaskService:
                         {"partial": "", "error": "", "replayed": False},
                     )
                 return self._start_chat(task, prompt, memory, skills, attachments)
-            if skills or attachments:
-                raise ValueError("Навыки доступны в обычном диалоге.")
+            from workspace.app.chat_documents import resolve
+
+            agent_documents = resolve(self.store, task_id, attachments)
             session = history.reconcile(self.store, task)
             resume = session["session_exists"]
             if initial and resume and not restore_only:
@@ -234,7 +239,10 @@ class TaskService:
                 "restore_only": restore_only,
             }
             connector_token = None
-            if task["details"].get("connector_ids"):
+            installed = self.store.plugins.credentials_snapshot({
+                key: item for key, item in self.store.plugins.definitions().items() if item and item["enabled"]
+            })
+            if task["details"].get("connector_ids") or installed:
                 if not workspace_url:
                     raise ValueError(
                         "Workspace HTTP endpoint is required for application tools."
@@ -278,6 +286,7 @@ class TaskService:
             self.runtime_tokens[task_id] = token
             if connector_token:
                 self.connector_tokens[task_id] = connector_token
+                self.agent_plugins[task_id] = AgentPluginContext(installed, {d["id"] for d in agent_documents})
             try:
                 process = OwnedProcess(
                     command,
@@ -289,6 +298,7 @@ class TaskService:
             except Exception as exc:
                 self.runtime_tokens.pop(task_id, None)
                 self.connector_tokens.pop(task_id, None)
+                self.agent_plugins.pop(task_id, None)
                 self.store.update_task(
                     task_id,
                     "retryable" if not resume else "uncertain",
@@ -338,17 +348,21 @@ class TaskService:
     def _start_chat(self, task, prompt, memory, skills=None, attachments=()):
         from workspace.app.chat_run import ChatRun
         from workspace.app.desktop_host import activity
-        from workspace.app.skills import SkillUse, prepare_skills
+        from workspace.app.skills import SkillUse, all_definitions, prepare_skills
         from workspace.app.chat_documents import active_documents, resolve
 
         task_id = task["id"]
         remember = task["details"].get("memory", True) if memory is None else memory
+        definitions = all_definitions(self.store)
         if skills is None:
             ids = task["details"].get("skill_ids")
             if ids is None:
                 old = task["details"].get("skill_id")
-                ids = [old] if old else [r["id"] for r in self.store.rows("SELECT id FROM markdown_skills ORDER BY rowid")]
+                ids = [old] if old else [key for key, item in definitions.items() if item and "product" not in item]
             sections = task["details"].get("skill_disabled_sections", {})
+            ids = [key for key in ids if definitions.get(key) is not None and definitions[key].get("enabled", True)]
+            ids = list(dict.fromkeys(ids + [key for key, item in definitions.items()
+                                          if item and "product" in item and item["enabled"]]))
             skills = [SkillUse(id=key, disabled_sections=sections.get(key, [])) for key in ids]
         automatic = not any(s.attachment or s.attachments for s in skills)
         if not automatic and attachments:
@@ -356,7 +370,7 @@ class TaskService:
         new_documents = resolve(self.store, task_id, attachments)
         documents = active_documents(self.store, task_id, new_documents, prompt, remember) if automatic else []
         contexts, selection = prepare_skills(self.store, task, skills, automatic=automatic,
-                                             reuse=not automatic or (remember and not documents))
+                                             reuse=not automatic or (remember and not documents), definitions=definitions)
         token = secrets.token_urlsafe(32)
         self.runtime_tokens[task_id] = token
         self.store.update_task(
@@ -380,6 +394,7 @@ class TaskService:
             finished,
             skill_contexts=contexts,
             automatic=automatic, documents=documents, new_documents=new_documents,
+            plugin_gateway=self.plugin_gateway,
         )
         self.processes[task_id] = run
         activity("running")
@@ -438,6 +453,9 @@ class TaskService:
         with self.lock:
             self.runtime_tokens.pop(task_id, None)
             self.connector_tokens.pop(task_id, None)
+            plugin_context = self.agent_plugins.pop(task_id, None)
+            if plugin_context:
+                plugin_context.stopped.set()
             self.connector_discoveries.pop(task_id, None)
             current = self.store.one("tasks", task_id)
             result = self.results.pop(task_id, None)
@@ -570,6 +588,8 @@ class TaskService:
                 return {"confirmed": True, "active": False}
             self.store.update_task(task_id, "stopping")
             self._cancel_connector_waiters(task_id)
+            if context := self.agent_plugins.get(task_id):
+                context.stopped.set()
         result = process.stop()
         cancellation = {"cancelled": 0}
         if token:

@@ -87,6 +87,29 @@ export function SkillLibrary({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  async function packageAction(action: () => Promise<string | undefined>) {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await action();
+      if (result) setMessage(result);
+      await reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  function packagePath(skill: MarkdownSkill, action: string) {
+    return "/skills/packages/" + encodeURIComponent(skill.product || "") + "/" + action;
+  }
+  function setEnabled(item: MarkdownSkill, group: boolean, enabled: boolean) {
+    return packageAction(async () => {
+      await api(packagePath(item, "enabled"), { skill: group ? "" : item.name, enabled });
+      return undefined;
+    });
+  }
   async function preview(files: File[]) {
     if (!files.length) return;
     setBusy(true);
@@ -131,10 +154,20 @@ export function SkillLibrary({
         <div>
           <h2>Навыки</h2>
           <p>
-            Добавьте один или несколько файлов Markdown и отметьте навыки для
-            диалога.
+            Для подключения приложения выберите его manifest.json.
           </p>
         </div>
+        <button type="button" className="primary setting-action" disabled={busy}
+          onClick={() => void packageAction(async () => {
+            const result = await api<{ cancelled?: boolean; product?: string; installed?: number; retained?: number }>(
+              "/skills/packages/import", {},
+            );
+            return result.cancelled ? undefined :
+              "Пакет «" + result.product + "» сохранён. Навыков — " + (result.installed ?? result.retained) + ".";
+          })}>
+          <Icon name="plug" size={16} />
+          Импортировать пакет навыков
+        </button>
         <button
           className="setting-action"
           disabled={busy}
@@ -246,13 +279,62 @@ export function SkillLibrary({
         Библиотека <span>{entries.length}</span>
       </h3>
       {skills.length ? (
-        <SkillGroups className="skill-library" entries={entries} selected={selectedIds} toggle={choose} render={item => (
+        <SkillGroups className="skill-library" entries={entries} selected={selectedIds} toggle={choose}
+          renderPackage={item => (
+            <div className="library-row">
+              <div className="item-copy">
+                <small>Версия пакета {item.package_version || "не указана"}</small>
+                <small>{item.endpoint}</small>
+                <small>{item.status?.message || ({
+                  available: "MCP доступен", connecting: "Проверяется соединение",
+                  unavailable: "MCP недоступен", protocol_error: "Ошибка протокола MCP",
+                } as Record<string, string>)[item.status?.connection || ""] || "Соединение ещё не проверено"}</small>
+                {item.status?.paused && <p role="status">Исход предыдущего вызова неизвестен.</p>}
+                <button type="button" className="setting-action" disabled={busy} onClick={() => void packageAction(async () => {
+                  await api(packagePath(item, "probe"), {});
+                  return undefined;
+                })}>Проверить подключение</button>
+                {item.status?.paused && <button type="button" className="setting-action" disabled={busy}
+                  onClick={() => {
+                    if (window.confirm("Предыдущая операция завершилась или приложение перезапущено?")) {
+                      void packageAction(async () => {
+                        await api(packagePath(item, "resume"), {});
+                        return "Очередь приложения возобновлена.";
+                      });
+                    }
+                  }}>Возобновить очередь</button>}
+                <details>
+                  <summary>Ключ для приложения с авторизацией</summary>
+                  <form onSubmit={(event) => {
+                    event.preventDefault();
+                    const form = event.currentTarget;
+                    const key = String(new FormData(form).get("key") || "");
+                    void packageAction(async () => {
+                      await api(packagePath(item, "credential"), {api_key: key});
+                      form.reset();
+                      return key ? "Ключ сохранён для текущего адреса." : "Ключ для текущего адреса удалён.";
+                    });
+                  }}>
+                    <label className="field">Ключ MCP
+                      <input type="password" maxLength={512} name="key" autoComplete="off" />
+                    </label>
+                    <button className="setting-action" disabled={busy}>Сохранить ключ</button>
+                  </form>
+                </details>
+              </div>
+              <label className="library-choice">
+                <input type="checkbox" checked={item.group?.enabled !== false} disabled={busy}
+                  onChange={(e) => void setEnabled(item, true, e.target.checked)} />
+                Группа включена
+              </label>
+            </div>
+          )} render={item => (
             <div className="library-row">
               <span className="item-icon">
                 <Icon name="skills" size={20} />
               </span>
               <div className="item-copy">
-                <strong>{item.name}</strong>
+                <strong>{item.title || item.name}</strong>
                 {item.description && <p>{item.description}</p>}
                 <small>
                   {item.accepts_multiple ? "Локальное приложение · Принимает несколько файлов" : item.accepts_attachment
@@ -261,6 +343,8 @@ export function SkillLibrary({
                       ? "Локальное приложение"
                       : "Инструкция для модели"}
                 </small>
+                {item.status?.compatibility?.message && <p role="status">{item.status.compatibility.message}</p>}
+                {item.enabled === false && <small>Навык или его группа выключены в профиле.</small>}
                 {choose && selectedIds.includes(item.id) && (
                   <SkillSections
                     skill={item}
@@ -269,7 +353,14 @@ export function SkillLibrary({
                   />
                 )}
               </div>
-              {choose && (
+              {item.product ? (
+                <label className="library-choice">
+                  <input type="checkbox" checked={item.skill_enabled !== false} disabled={busy}
+                    aria-label={"Включить «" + (item.title || item.name) + "»"}
+                    onChange={(e) => void setEnabled(item, false, e.target.checked)} />
+                  Включён
+                </label>
+              ) : choose && (
                 <label className="library-choice">
                   <input
                     type="checkbox"
@@ -286,7 +377,7 @@ export function SkillLibrary({
         <div className="library-empty">
           <Icon name="skills" size={28} />
           <strong>Пока нет навыков</strong>
-          <p>Добавьте файл Markdown (.md) с инструкцией для модели.</p>
+          <p>Импортируйте пакет приложения или добавьте отдельный Markdown.</p>
         </div>
       )}
       {choose && skills.length > 0 && (

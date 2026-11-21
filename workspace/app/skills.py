@@ -61,6 +61,7 @@ class SkillUse(BaseModel):
     attachment: SkillAttachment | None = None
     attachments: list[SkillAttachment] | None = Field(default=None, min_length=1, max_length=128)
     disabled_sections: list[str] = Field(default_factory=list)
+    force: bool = False
 
     @model_validator(mode="after")
     def check_files(self):
@@ -215,6 +216,17 @@ def register(store, payload):
 
 
 def public_skill(item):
+    if "product" in item:
+        tools = item["tools"]
+        return {k: item[k] for k in (
+            "id", "name", "title", "description", "sections", "group", "key", "product",
+            "package_version", "enabled", "skill_enabled", "revision",
+        )} | {
+            "formats": item["accepts"], "has_mcp": bool(tools),
+            "endpoint": item["mcp"]["url"],
+            "accepts_attachment": any("file" in tool or "files" in tool for tool in tools),
+            "accepts_multiple": any("files" in tool for tool in tools),
+        }
     return {"id": item["id"], "name": item["name"], "description": item["description"],
             "sections": item.get("sections", []), "has_mcp": item["connection"] is not None,
             "formats": item.get("accepts", []), "group": item.get("group"),
@@ -222,19 +234,38 @@ def public_skill(item):
             "accepts_multiple": bool(item["connection"] and item["connection"].get("files"))}
 
 
-def list_skills(store):
-    return [public_skill(json.loads(row["definition"]))
-            for row in store.rows("SELECT definition FROM markdown_skills ORDER BY rowid")]
+def all_definitions(store):
+    return {row["id"]: json.loads(row["definition"])
+            for row in store.rows("SELECT id,definition FROM markdown_skills ORDER BY rowid")} | store.plugins.definitions()
 
 
-def selected_skill(store, selection):
+def list_skills(store, gateway=None):
+    skills = []
+    for item in all_definitions(store).values():
+        if item is not None:
+            public = public_skill(item)
+            if gateway and "product" in item:
+                public["status"] = gateway.public_status(item)
+            skills.append(public)
+    return skills
+
+
+def selected_skill(store, selection, *, definitions=None):
     if not selection:
         return None
-    rows = store.rows("SELECT definition FROM markdown_skills WHERE id=?", (selection.id,))
-    if not rows:
+    items = all_definitions(store) if definitions is None else definitions
+    if selection.id not in items:
         raise ValueError("Этот навык больше не зарегистрирован.")
-    item = json.loads(rows[0]["definition"])
+    item = items[selection.id]
+    if item is None:
+        raise ValueError("Навык удалён из установленной версии пакета.")
     attached = selection.attachments or ([selection.attachment] if selection.attachment else [])
+    if "product" in item:
+        if not item["enabled"]:
+            raise ValueError(f"Включите навык «{item['title']}» или его группу в настройках.")
+        if attached:
+            raise ValueError("Для навыка пакета передайте идентификаторы вложений сообщения.")
+        return item, None
     connection = item.get("connection") or {}
     if connection.get("files"):
         return item, attached or None
@@ -252,6 +283,7 @@ class ChatSkill:
     instructions: str
     attachment: SkillAttachment | list[SkillAttachment] | None
     cached: dict | None
+    forced: bool = False
 
 
 def _report_ref(seq, result):
@@ -292,7 +324,12 @@ def _previous_reports(store, task):
     return refs
 
 
-def prepare_skills(store, task, uses, *, automatic=False, reuse=True):
+def prepare_skills(store, task, uses, *, automatic=False, reuse=True, definitions=None):
+    definitions = all_definitions(store) if definitions is None else definitions
+    package_skills = store.plugins.credentials_snapshot({
+        key: item for key, item in definitions.items() if item is not None and "product" in item
+    })
+    definitions = definitions | package_skills
     previous = _previous_reports(store, task) if reuse else {}
     contexts, retained, disabled_sections = [], {}, {}
     seen = set()
@@ -300,9 +337,9 @@ def prepare_skills(store, task, uses, *, automatic=False, reuse=True):
         if use.id in seen:
             raise ValueError("Один навык выбран несколько раз.")
         seen.add(use.id)
-        item, attachment = selected_skill(store, use)
+        item, attachment = selected_skill(store, use, definitions=definitions)
         cached = None
-        ref = previous.get(use.id)
+        ref = previous.get(use.id) if "product" not in item else None
         if ref and attachment is None:
             rows = store.rows(
                 "SELECT payload FROM events WHERE task_id=? AND seq=? AND kind='skill_tool'",
@@ -313,7 +350,7 @@ def prepare_skills(store, task, uses, *, automatic=False, reuse=True):
                 if payload.get("skill_id") == use.id and payload.get("result") is not None:
                     retained[use.id] = ref
                     cached = payload["result"]
-        if not automatic and public_skill(item)["accepts_attachment"] and attachment is None and cached is None:
+        if "product" not in item and not automatic and public_skill(item)["accepts_attachment"] and attachment is None and cached is None:
             raise ValueError(f"Прикрепите файл для навыка «{item['name']}».")
         try:
             _, instructions = instruction_sections(item["instructions"], use.disabled_sections)
@@ -321,7 +358,7 @@ def prepare_skills(store, task, uses, *, automatic=False, reuse=True):
             raise ValueError(f"Навык «{item['name']}» — {exc}") from exc
         if use.disabled_sections:
             disabled_sections[use.id] = list(dict.fromkeys(use.disabled_sections))
-        contexts.append(ChatSkill(item, instructions, attachment, cached))
+        contexts.append(ChatSkill(item, instructions, attachment, cached, use.force))
     ids = [context.definition["id"] for context in contexts]
     single = contexts[0] if len(contexts) == 1 else None
     return contexts, {

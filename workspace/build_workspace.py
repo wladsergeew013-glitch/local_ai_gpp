@@ -91,6 +91,8 @@ def main():
         "--add-data",
         str(WORKSPACE / "VERSION") + ";workspace_version",
         "--add-data",
+        str(WORKSPACE / "schema") + ";workspace/schema",
+        "--add-data",
         str(ROOT / "frontend/public/assistant") + ";workspace_assistant",
         "--add-data",
         str(WORKSPACE / "assets/assistant-3d") + ";workspace_assistant_3d",
@@ -110,6 +112,8 @@ def main():
         "pystray",
         "--collect-all",
         "PIL",
+        "--collect-data",
+        "jsonschema_specifications",
         "--hidden-import",
         "tkinter",
         "--hidden-import",
@@ -165,6 +169,7 @@ def main():
     subprocess.run(agent, cwd=ROOT, check=True)
     shutil.move(str(output / "LocalAIWorkspaceAgent"), str(candidate / "agent"))
     shutil.copy2(WORKSPACE / "local_ai_control.py", candidate / "local_ai_control.py")
+    shutil.copy2(WORKSPACE / "start_portable.ps1", candidate / "start_portable.ps1")
     files = manifest(candidate)
     if not any(
         name.endswith("deepseek-harness-sdk-runtime-win-x64.exe") for name in files

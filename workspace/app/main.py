@@ -17,7 +17,7 @@ from workspace.app.store import Store, data_root, identifier, now, SCHEMA_VERSIO
 from workspace.app.task_service import TaskService
 from workspace.app.skills import SkillInput, SkillUse, list_skills, register, register_many
 from workspace.app.skill_storage import restore_skill_copies, save_skill_copies
-from workspace.app.runtime_client import RuntimeClient, local_url
+from workspace.app.runtime_client import RuntimeClient, local_url, provider_url
 from workspace.app.history import reconcile
 from workspace.app.instance import Instance
 from workspace.app.control_access import (
@@ -35,6 +35,15 @@ class CompanionPreference(BaseModel):
     style: Literal["studio", "pixel"]
 
 
+class PackagePreference(BaseModel):
+    skill: str = Field(default="", max_length=80)
+    enabled: bool
+
+
+class PackageCredential(BaseModel):
+    api_key: str = Field(max_length=512)
+
+
 def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=None):
     root = Path(root or data_root())
     ui_token = operator_token(ui_token)
@@ -47,6 +56,8 @@ def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=
             application.state.store = store
             application.state.tasks = service
             store.recover()
+            with store.transaction() as db:
+                db.execute("UPDATE plugin_calls SET status='uncertain',finished_at=? WHERE status='sent'", (now(),))
             descriptor = None
             try:
                 with store.transaction() as db:
@@ -198,7 +209,7 @@ def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=
             "providers": db.rows(
                 "SELECT id,name,base_url,model,(api_key!='') AS api_key_configured FROM providers"
             ),
-            "skills": list_skills(db),
+            "skills": list_skills(db, tasks(request).plugin_gateway),
             "tasks": rows,
             "connectors": db.rows(
                 "SELECT id,name,base_url,allow_write,(api_key!='') AS api_key_configured FROM connectors"
@@ -213,6 +224,50 @@ def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=
     def import_skills(payload: list[SkillInput], request: Request):
         return register_many(store(request), payload)
 
+    @app.post("/api/skills/packages/import")
+    def import_package(request: Request):
+        from workspace.app import desktop_host
+        from workspace.app.plugin_manifest import read_package
+
+        chosen = desktop_host.invoke("choose_skill_manifest").get("path")
+        if not chosen:
+            return {"cancelled": True}
+        return store(request).plugins.install(read_package(chosen))
+
+    @app.post("/api/skills/packages/{product}/enabled")
+    def package_preference(product: str, payload: PackagePreference, request: Request):
+        store(request).plugins.set_enabled(product, payload.skill, payload.enabled)
+        return {"enabled": payload.enabled}
+
+    @app.post("/api/skills/packages/{product}/credential")
+    def package_credential(product: str, payload: PackageCredential, request: Request):
+        store(request).plugins.set_credential(product, payload.api_key)
+        return {"configured": bool(payload.api_key)}
+
+    @app.post("/api/skills/packages/{product}/probe")
+    def package_probe(product: str, request: Request):
+        from workspace.app.plugin_mcp import McpError
+
+        catalog = store(request).plugins
+        package = catalog.package(product)
+        gateway = tasks(request).plugin_gateway
+        definitions = catalog.credentials_snapshot(catalog.definitions(snapshots=[package]))
+        statuses = {}
+        for skill in definitions.values():
+            try:
+                gateway.describe(skill)
+            except McpError:
+                pass  # Per-skill protocol and connection status is returned below.
+            statuses[skill["name"]] = gateway.public_status(skill)
+            if statuses[skill["name"]]["connection"] in {"unavailable", "protocol_error"}:
+                break
+        return {"product": product, "skills": statuses}
+
+    @app.post("/api/skills/packages/{product}/resume")
+    def resume_package_queue(product: str, request: Request):
+        tasks(request).plugin_gateway.recover(product)
+        return {"paused": False}
+
     @app.post("/api/projects")
     def project(payload: ProjectInput, request: Request):
         from workspace.app.projects import create_project
@@ -223,8 +278,8 @@ def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=
 
     @app.post("/api/providers")
     def provider(payload: ProviderInput, request: Request):
-        base = local_url(payload.base_url)
-        if not urlsplit(base).path.rstrip("/").endswith("/v1"):
+        base = provider_url(payload.base_url)
+        if base.startswith("http://") and not urlsplit(base).path.rstrip("/").endswith("/v1"):
             raise ValueError("Runtime provider URL must end with /v1.")
         db = store(request)
         value = identifier()
@@ -252,8 +307,8 @@ def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=
     @app.post("/api/providers/{provider_id}")
     def update_provider(provider_id: str, payload: ProviderInput, request: Request):
         old = store(request).one("providers", provider_id)
-        base = local_url(payload.base_url)
-        if not urlsplit(base).path.rstrip("/").endswith("/v1"):
+        base = provider_url(payload.base_url)
+        if base.startswith("http://") and not urlsplit(base).path.rstrip("/").endswith("/v1"):
             raise ValueError("Адрес Runtime должен заканчиваться на /v1.")
         with store(request).transaction() as db:
             db.execute(
@@ -262,7 +317,7 @@ def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=
                     payload.name,
                     base,
                     payload.model,
-                    payload.api_key or old["api_key"],
+                    payload.api_key or (old["api_key"] if base == old["base_url"] else ""),
                     provider_id,
                 ),
             )
@@ -278,9 +333,8 @@ def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=
         provider_id: str, payload: ProviderInput, request: Request
     ):
         old = store(request).one("providers", provider_id)
-        client = RuntimeClient(
-            {**payload.model_dump(), "api_key": payload.api_key or old["api_key"]}
-        )
+        same_endpoint = provider_url(payload.base_url) == old["base_url"]
+        client = RuntimeClient({**payload.model_dump(), "api_key": payload.api_key or (old["api_key"] if same_endpoint else "")})
         return client.probe()
 
     @app.post("/api/chats")

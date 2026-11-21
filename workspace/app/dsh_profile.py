@@ -52,7 +52,7 @@ def profile(
                                 "reasoning": False,
                             }
                         ],
-                        "headers": {
+                        "headers": {} if provider["base_url"].startswith("https://") else {
                             "X-Local-AI-Owner-ID": owner_id,
                             "X-Local-AI-Owner-Token": owner_token,
                         },

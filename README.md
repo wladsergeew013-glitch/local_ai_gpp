@@ -16,7 +16,7 @@ Local AI Runtime запускает GGUF-модели на вашем компь
 
 В репозитории два независимых приложения. **Runtime 1.5** загружает модель, предоставляет API и сохраняет диагностические диалоги. **Workspace 0.2 beta** хранит беседы и необязательные проекты. Для обычного диалога достаточно подключить Runtime: папка, Git и агент не нужны. Режим работы с файлами включается явно и использует DeepSeek Harness. Крестик большого окна Workspace оставляет мини-помощника; полный выход из трея завершает Workspace и его работу. [Запуск, границы и восстановление →](docs/WORKSPACE.md)
 
-[Скачать Workspace 0.2.8 beta](https://github.com/wladsergeew013-glitch/local_ai_gpp/releases/tag/workspace-v0.2.8) · [Исходник 3D-помощника для Blender](workspace/art/mini-assistant.blend)
+[Скачать Workspace 0.2.9 beta](https://github.com/wladsergeew013-glitch/local_ai_gpp/releases/tag/workspace-v0.2.9) · [Исходник 3D-помощника для Blender](workspace/art/mini-assistant.blend)
 
 | Приложение | Windows | Локальный адрес | Данные |
 |---|---|---|---|

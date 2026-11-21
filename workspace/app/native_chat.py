@@ -1,13 +1,14 @@
 """The original blue speech panel, owned by the avatar's Tk thread.
 
-This view talks only to Workspace HTTP. It never loads models, reads Runtime
-files, grabs input globally or opens a modal window.
+This view talks only to Workspace HTTP and uses native dialogs for file selection.
 """
 
 from __future__ import annotations
 import contextlib
 import datetime
+import os
 import queue
+import tempfile
 import threading
 import time
 import uuid
@@ -102,6 +103,36 @@ class NativeChatBubble:
                         raise RuntimeError(detail)
             response.raise_for_status()
             return response.json()
+
+    def download_artifact(self, chat_id, artifact):
+        selected = filedialog.asksaveasfilename(
+            parent=self.root, initialfile=artifact["name"], title="Сохранить файл из диалога"
+        )
+        if not selected:
+            return
+        destination = Path(selected)
+
+        def download():
+            temporary = None
+            try:
+                url = self.base_url + f"/api/chats/{chat_id}/artifacts/{artifact['id']}"
+                with httpx.Client(trust_env=False, timeout=30) as client, client.stream(
+                    "GET", url, headers={UI_TOKEN_HEADER: self.ui_token}
+                ) as response:
+                    response.raise_for_status()
+                    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".workspace-file-",
+                                                     delete=False) as file:
+                        temporary = Path(file.name)
+                        for chunk in response.iter_bytes():
+                            file.write(chunk)
+                os.replace(temporary, destination)
+            except (OSError, httpx.HTTPError) as exc:
+                self.outputs.put(("error", f"Файл не сохранён. {exc}"))
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+
+        threading.Thread(target=download, daemon=True).start()
 
     def _build(self):
         self.window = tk.Frame(self.root, bg=BORDER)
@@ -613,6 +644,9 @@ class NativeChatBubble:
         selection = self.history.tag_ranges("sel")
         self.history.configure(state="normal")
         self.history.delete("1.0", "end")
+        for tag in self.history.tag_names():
+            if tag.startswith("artifact-"):
+                self.history.tag_delete(tag)
         if not self.messages and not partial:
             self.history.insert(
                 "end",
@@ -632,6 +666,14 @@ class NativeChatBubble:
             self.history.insert("end", label + "\n", role)
             self.history.insert("end", stamp + "\n", "time-" + role)
             self.history.insert("end", m["text"] + "\n", "body-" + role)
+            for artifact in m.get("artifacts", []):
+                tag = "artifact-" + artifact["id"]
+                self.history.tag_configure(tag, foreground=HEADER, underline=True)
+                self.history.insert("end", "Сохранить " + artifact["name"] + "\n", tag)
+                self.history.tag_bind(
+                    tag, "<Button-1>",
+                    lambda _event, file=artifact, chat=self.selected: self.download_artifact(chat, file),
+                )
             if m.get("error"):
                 self.history.insert("end", m["error"] + "\n", "error")
             self.history.insert("end", "\n")
@@ -686,6 +728,13 @@ class NativeChatBubble:
                     details = current.get("details", {})
                     single = details.get("skill_id")
                     skill_ids = details.get("skill_ids", [single] if single else [])
+                    catalogue = self.boot.get("skills")
+                    if catalogue is not None:
+                        available = {item["id"]: item for item in catalogue if item.get("enabled", True)}
+                        skill_ids = list(dict.fromkeys(
+                            [key for key in skill_ids if key in available]
+                            + [key for key, item in available.items() if item.get("product")]
+                        ))
                     payload = {"revision": current["revision"], "prompt": raw.strip(), "memory": memory}
                     if paths:
                         payload["attachments"] = self.upload_documents(chat_id, paths)

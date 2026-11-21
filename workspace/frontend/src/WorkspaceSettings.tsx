@@ -183,7 +183,9 @@ export function WorkspaceSettings({
       ? "Ошибка проверки"
       : !probe
         ? "Связь ещё не проверена"
-        : modelLoaded
+        : probe.remote && modelFound
+          ? "Модель доступна"
+          : modelLoaded
           ? "Модель загружена"
           : modelFound
             ? "Загрузится при запросе"
@@ -285,7 +287,7 @@ export function WorkspaceSettings({
                     <Icon name="runtime" size={21} />
                   </span>
                   <div className="item-copy">
-                    <strong>Local AI Runtime</strong>
+                    <strong>{base.startsWith("https://") ? "Удалённый провайдер" : "Local AI Runtime"}</strong>
                     <span
                       role="status"
                       className={
@@ -330,7 +332,7 @@ export function WorkspaceSettings({
                 )}
                 <div className="settings-fields">
                   <label className="field">
-                    Адрес Runtime API
+                    Адрес API модели
                     <input
                       value={base}
                       disabled={busy}
@@ -380,11 +382,11 @@ export function WorkspaceSettings({
                 </div>
                 <details className="preference-details">
                   <summary>
-                    Ключ доступа к Runtime
+                    Ключ доступа к провайдеру
                     {saved?.api_key_configured ? " · задан" : ""}
                   </summary>
                   <label className="field">
-                    Ключ API Runtime
+                    Ключ API
                     <input
                       type="password"
                       autoComplete="off"

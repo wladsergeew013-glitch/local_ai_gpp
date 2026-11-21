@@ -21,6 +21,8 @@ type Props = {
   sections: Record<string, string[]>;
   toggleSection: (id: string, key: string) => void;
   library: () => void;
+  apply?: (id: string) => void;
+  forced?: string;
 };
 
 export function SkillControls({
@@ -31,6 +33,8 @@ export function SkillControls({
   library,
   sections,
   toggleSection,
+  apply,
+  forced,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -50,10 +54,12 @@ export function SkillControls({
     summary = single.group.name;
     if (selected.length < single.items.length) summary += " · " + selected.length + "/" + single.items.length;
   } else if (single) {
-    summary = single.items[0].name;
+    summary = single.items[0].title || single.items[0].name;
   } else if (picked.length) {
     summary += " · " + picked.length;
   }
+  const forcedSkill = skills.find(item => item.id === forced);
+  if (forcedSkill) summary = forcedSkill.title || forcedSkill.name;
 
   function close() {
     setOpen(false);
@@ -174,15 +180,25 @@ export function SkillControls({
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={s.enabled === false}
                         onChange={() => toggle([s.id])}
-                        aria-label={s.name}
+                        aria-label={s.title || s.name}
                       />
                       <span>
-                        <strong>{s.name}</strong>
+                        <strong>{s.title || s.name}</strong>
                         {s.description && <small>{s.description}</small>}
                         {!!s.formats?.length && <small>{s.formats.join(" · ")}</small>}
                       </span>
                     </label>
+                    {s.product && apply && (
+                      <button type="button" className="setting-action" onClick={() => {
+                        close();
+                        if (s.enabled === false) library();
+                        else apply(s.id);
+                      }}>
+                        {s.enabled === false ? "Открыть настройки навыка" : "Применить к следующей реплике"}
+                      </button>
+                    )}
                     {checked && (
                       <SkillSections
                         skill={s}

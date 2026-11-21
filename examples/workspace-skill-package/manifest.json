@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 2,
+  "packageVersion": "1.0.0",
+  "product": "Workspace-Document-Example",
+  "skillGroup": {"id": "document-example", "name": "Пример обработки документов"},
+  "mcp": {
+    "transport": "streamable-http",
+    "url": "http://127.0.0.1:8795/mcp",
+    "expectedServerName": "Workspace Document Example"
+  },
+  "skills": [
+    {
+      "name": "prepare-and-check",
+      "title": "Подготовить и проверить документ",
+      "description": "Создать производный файл и передать его проверке.",
+      "path": "prepare-and-check.md",
+      "accepts": [".txt"],
+      "tools": [
+        {"name": "prepare", "file": {"filename": "filename", "base64": "contentBase64"}},
+        {"name": "inspect", "file": {"filename": "filename", "base64": "contentBase64"}}
+      ]
+    }
+  ]
+}
