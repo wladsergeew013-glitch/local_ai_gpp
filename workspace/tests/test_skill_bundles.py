@@ -40,9 +40,10 @@ class SkillBundleTests(unittest.TestCase):
         original.rename(moved)
         store = Store(moved)
         try:
-            self.assertEqual(Path(store.one("projects", managed["id"])["path"]), moved / "projects" / managed["id"])
-            self.assertEqual(Path(store.one("projects", "__direct_chats__")["path"]), moved / "chat-files")
-            self.assertEqual(Path(store.one("projects", linked["id"])["path"]), external)
+            resolved_profile = moved.resolve()
+            self.assertEqual(Path(store.one("projects", managed["id"])["path"]), resolved_profile / "projects" / managed["id"])
+            self.assertEqual(Path(store.one("projects", "__direct_chats__")["path"]), resolved_profile / "chat-files")
+            self.assertEqual(Path(store.one("projects", linked["id"])["path"]), external.resolve())
         finally:
             store.close()
 

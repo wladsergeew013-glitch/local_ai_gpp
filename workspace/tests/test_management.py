@@ -99,6 +99,6 @@ class ManagementTests(unittest.TestCase):
         backup = self.post("/api/control/backup", {}, headers=self.control)
         self.assertEqual(backup.status_code, 200, backup.text)
         snapshot = Path(backup.json()["path"])
-        self.assertTrue(snapshot.resolve().is_relative_to(self.root / "snapshots"))
+        self.assertTrue(snapshot.resolve().is_relative_to((self.root / "snapshots").resolve()))
         self.assertTrue((snapshot / "workspace.sqlite3").is_file())
         self.assertFalse((snapshot / CONTROL_FILE).exists())
