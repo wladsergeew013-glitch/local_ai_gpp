@@ -1,0 +1,24 @@
+.sidebar-settings-line { display: flex; align-items: center; gap: 6px; }
+.sidebar-settings-line button { flex: 1; }
+.sidebar-version { padding-right: 8px; color: #a8bfdc; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.workspace-desktop .sidebar { padding-top: 0; }
+.workspace-desktop .sidebar .brand {
+  height: 60px; padding-block: 0; margin-bottom: 9px;
+  border-bottom: 1px solid #ffffff17;
+}
+.workspace-desktop .topbar, .workspace-desktop .topbar.chat-topbar {
+  position: relative; height: 60px; min-height: 60px; padding: 0 132px 0 26px;
+  align-items: center; gap: 16px; background: #fff;
+}
+.workspace-desktop .topbar::after {
+  content: ""; position: absolute; right: 119px; height: 20px; width: 1px; background: #dce4ee;
+}
+.workspace-desktop .topbar .eyebrow { display: none; }
+.workspace-desktop .topbar h1 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
+.workspace-desktop .topbar .workspace-heading-line { margin: 0; }
+.workspace-desktop .topbar .runtime-status { padding: 5px 10px; }
+.workspace-desktop .brand, .workspace-desktop .topbar, .workspace-desktop .landing h1 {
+  -webkit-app-region: drag; app-region: drag; user-select: none;
+}
+.workspace-desktop .topbar button { -webkit-app-region: no-drag; app-region: no-drag; }

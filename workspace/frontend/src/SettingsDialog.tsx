@@ -5,10 +5,14 @@ export function SettingsDialog({
   children,
   onClose,
   error,
+  layout,
+  label = "Настройки Workspace",
 }: {
   children: ReactNode;
   onClose: () => void;
   error?: string;
+  layout?: string;
+  label?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -23,8 +27,8 @@ export function SettingsDialog({
   return createPortal(
     <dialog
       ref={ref}
-      className="settings-dialog"
-      aria-label="Настройки Workspace"
+      className={["settings-dialog", layout].filter(Boolean).join(" ")}
+      aria-label={label}
       onCancel={(event) => {
         event.preventDefault();
         onClose();

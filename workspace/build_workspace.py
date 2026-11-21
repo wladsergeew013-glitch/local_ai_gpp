@@ -10,6 +10,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import stat
 import subprocess
 import sys
 import uuid
@@ -35,6 +36,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-frontend", action="store_true")
     parser.add_argument("--stage-only", action="store_true")
+    parser.add_argument("--portable-layout", action="store_true", help="Install Workspace into dist/worker beside dist/runtime")
     args = parser.parse_args()
     if sys.platform != "win32":
         raise SystemExit(
@@ -90,6 +92,8 @@ def main():
         str(WORKSPACE / "VERSION") + ";workspace_version",
         "--add-data",
         str(ROOT / "frontend/public/assistant") + ";workspace_assistant",
+        "--add-data",
+        str(WORKSPACE / "assets/assistant-3d") + ";workspace_assistant_3d",
         "--add-data",
         str(ROOT / "models_storage/branding/icons") + ";workspace_icons",
         "--collect-submodules",
@@ -160,6 +164,7 @@ def main():
     ]
     subprocess.run(agent, cwd=ROOT, check=True)
     shutil.move(str(output / "LocalAIWorkspaceAgent"), str(candidate / "agent"))
+    shutil.copy2(WORKSPACE / "local_ai_control.py", candidate / "local_ai_control.py")
     files = manifest(candidate)
     if not any(
         name.endswith("deepseek-harness-sdk-runtime-win-x64.exe") for name in files
@@ -196,7 +201,13 @@ def main():
             )
         )
         return 0
-    destination = WORKSPACE / "dist"
+    dist = ROOT / "dist"
+    portable_layout = args.portable_layout or (dist / "runtime").exists() or (dist / "worker").exists()
+    destination = dist / "worker" if portable_layout else WORKSPACE / "dist"
+    for component in (destination.parent, destination):
+        if component.is_symlink() or (component.exists() and getattr(component.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise ValueError(f"Refusing aliased distribution: {component}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
     previous = WORKSPACE / ("build/previous-" + uuid.uuid4().hex)
     if destination.exists():
         destination.rename(previous)

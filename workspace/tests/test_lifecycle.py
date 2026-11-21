@@ -17,6 +17,7 @@ from workspace.app.history import canonical_events, reconcile
 from workspace.app.owned_process import OwnedProcess
 from workspace.app.main import create_app
 from workspace.app import project_diff
+from workspace.app.control_access import UI_TOKEN_HEADER
 
 
 def seed(store):
@@ -146,6 +147,7 @@ class LifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, TestClient(
             create_app(root), base_url="http://127.0.0.1"
         ) as client:
+            client.headers[UI_TOKEN_HEADER] = client.app.state.ui_token
             response = client.post(
                 "/api/providers",
                 json={

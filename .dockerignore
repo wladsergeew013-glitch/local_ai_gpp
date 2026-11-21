@@ -8,6 +8,9 @@
 .env.*
 !.env.example
 assistant_state
+workspace-profile
+**/Skills
+Skills
 worker_runtime
 **/__pycache__
 **/.pytest_cache

@@ -2357,8 +2357,18 @@ def _run_desktop() -> None:
         url,
         width=1500,
         height=920,
-        min_size=(1100, 720),
+        min_size=(760, 580),
     )
+
+    def choose_gguf() -> str | None:
+        if (main_window.get_current_url() or "").rstrip("/") != url:
+            return None
+        selected = main_window.create_file_dialog(
+            webview.FileDialog.OPEN, file_types=("GGUF (*.gguf)",)
+        )
+        return selected[0] if selected else None
+
+    main_window.expose(choose_gguf)
 
     def on_closing() -> bool:
         if quitting:

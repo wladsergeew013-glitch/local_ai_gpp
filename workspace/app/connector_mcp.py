@@ -4,16 +4,20 @@ import hashlib
 import json
 import secrets
 from fastapi import HTTPException
-from workspace.app.connectors import read_items, write_item
+from workspace.app.connectors import ConnectorWrite, read_items, receipt, write_item
 from workspace.app.version import VERSION
 
 
 def handle(service, task_id, token, payload):
-    expected = service.tokens.get(task_id, "")
-    if not expected or not token or not secrets.compare_digest(token, expected):
+    expected = service.connector_tokens.get(task_id, "")
+    if not expected or not secrets.compare_digest(token.encode(), expected.encode()):
         raise HTTPException(403, "Task capability required")
     task = service.store.one("tasks", task_id)
     allowed = task["details"].get("connector_ids") or []
+    if not allowed or task["details"].get("mode", "agent") != "agent":
+        raise HTTPException(
+            403, "No applications are attached to this file-agent conversation"
+        )
     request_id = payload.get("id")
     method = payload.get("method", "")
     if request_id is None:
@@ -39,15 +43,8 @@ def handle(service, task_id, token, payload):
     if method == "ping":
         return response({})
     if method == "workspace/readiness":
-        return response(
-            {
-                "ready": getattr(service, "connector_discoveries", {}).get(task_id)
-                == token
-            }
-        )
+        return response({"ready": service.connector_discoveries.get(task_id) == token})
     if method == "tools/list":
-        if not hasattr(service, "connector_discoveries"):
-            service.connector_discoveries = {}
         service.connector_discoveries[task_id] = token
         service.store.event(task_id, "connector_tools_discovered", {"tool_count": 2})
         common = {
@@ -116,46 +113,36 @@ def handle(service, task_id, token, payload):
         elif params.get("name") == "create_item":
             if not connector["allow_write"]:
                 raise ValueError("Connector writes are disabled.")
-            from workspace.app.main import ConnectorWrite
-
             action_id = hashlib.sha256(
                 (token + ":" + str(request_id)).encode()
             ).hexdigest()
             write = ConnectorWrite.model_validate(
-                {**arguments, "action_id": action_id, "approved": True}
+                {k: v for k, v in arguments.items() if k != "connector_id"}
+                | {"action_id": action_id}
             )
-            receipt = service.store.rows(
-                "SELECT status,result FROM connector_actions WHERE action_id=?",
-                (action_id,),
-            )
-            if receipt:
-                result = {
-                    "status": receipt[0]["status"],
-                    "result": (
-                        json.loads(receipt[0]["result"])
-                        if receipt[0]["result"]
-                        else None
-                    ),
-                    "resent": False,
-                }
-            elif not service.approve_connector(
-                task_id,
-                {
+            result = receipt(service.store, connector_id, write)
+            if result is None:
+                proposal = {
                     "connector": connector["name"],
                     "connector_id": connector_id,
-                    "title": write.title,
-                    "body": write.body,
-                    "action_id": action_id,
-                },
-            ):
-                result = {"status": "rejected", "written": False}
-            else:
-                result = write_item(service.store, connector_id, write.model_dump())
-                service.store.event(
-                    task_id,
-                    "connector_write_result",
-                    {"connector_id": connector_id, "action_id": action_id, **result},
-                )
+                    **write.model_dump(),
+                }
+                approval_id = service.approve_connector(task_id, proposal)
+                if approval_id is None:
+                    result = {"status": "rejected", "written": False}
+                else:
+                    result = write_item(
+                        service.store, task_id, connector_id, write, approval_id
+                    )
+                    service.store.event(
+                        task_id,
+                        "connector_write_result",
+                        {
+                            "connector_id": connector_id,
+                            "action_id": action_id,
+                            **result,
+                        },
+                    )
         else:
             raise ValueError("Unknown connector tool.")
         return response(

@@ -781,6 +781,7 @@ def parse_args() -> argparse.Namespace:
     runtime.add_argument("--cpu", action="store_true", help="Explicitly build CPU runtime; NVIDIA enables CUDA automatically otherwise")
     runtime.add_argument("--cuda", nargs="?", const="auto", default=None, help="Require CUDA worker runtime, e.g. --cuda auto or --cuda cu124")
     parser.add_argument("--no-models", action="store_true", help="Do not copy registered model files into dist; keep metadata only")
+    parser.add_argument("--portable-layout", action="store_true", help="Install Runtime into dist/runtime beside dist/worker")
     parser.add_argument("--reuse-worker-runtime", type=Path,
                         help="Reuse a previously verified worker_runtime directory; it is copied and checked before use")
     return parser.parse_args()
@@ -794,11 +795,18 @@ def find_nvidia_smi() -> str:
     return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), "")
 
 
+def distribution_destination(args: argparse.Namespace) -> Path:
+    dist = ROOT / "dist"
+    if getattr(args, "portable_layout", False) or (dist / "runtime").exists() or (dist / "worker").exists():
+        return dist / "runtime"
+    return dist
+
+
 def choose_runtime_kind(args: argparse.Namespace) -> str:
     if args.cpu:
         return "cpu"
     if args.cuda is None and not find_nvidia_smi():
-        info_path = ROOT / "dist/runtime_info.json"
+        info_path = distribution_destination(args) / "runtime_info.json"
         previous = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else {}
         if str(previous.get("effective", "")).startswith("cu"):
             return str(previous["effective"])
@@ -852,15 +860,20 @@ def validate_distribution(candidate):
         raise ValueError('Invalid packaged settings')
 
 
-def promote_distribution(candidate):
+def promote_distribution(candidate, destination=None):
     checked_build_path(candidate)
     if candidate == OUT:
         raise ValueError('A distribution must be staged below the build output directory')
     validate_distribution(candidate)
-    destination = ROOT / 'dist'
+    dist = ROOT / 'dist'
+    destination = dist if destination is None else destination
+    if destination not in {dist, dist / 'runtime'}:
+        raise ValueError(f'Not a Runtime distribution directory: {destination}')
     # The previous executable and runtime remain intact until every build step passes.
-    if destination.is_symlink() or (destination.exists() and getattr(destination.lstat(), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
-        raise ValueError('Refusing aliased distribution')
+    for component in {dist, destination}:
+        if component.is_symlink() or (component.exists() and getattr(component.lstat(), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise ValueError(f'Refusing aliased distribution: {component}')
+    destination.parent.mkdir(parents=True, exist_ok=True)
     previous = OUT / ('previous-dist-' + uuid.uuid4().hex)
     moved = []
     had_previous = destination.exists()
@@ -921,14 +934,15 @@ def main() -> int:
     shutil.move(str(worker_stage / "worker_runtime"), str(worker_target))
     shutil.copy2(worker_stage / "runtime_info.json", DIST / "runtime_info.json")
     write_dist_portable_helpers(runtime_kind)
-    promote_distribution(DIST)
-    DIST = ROOT / 'dist'
+    destination = distribution_destination(args)
+    promote_distribution(DIST, destination)
+    DIST = destination
     log("")
     log("=" * 60)
     log("DESKTOP EXE BUILD COMPLETE")
     log("=" * 60)
-    log(f"File: {ROOT / 'dist' / 'LocalAIGPP.exe'}")
-    log(f"Worker: {ROOT / 'dist' / 'worker_runtime' / 'python.exe'}")
+    log(f"File: {DIST / 'LocalAIGPP.exe'}")
+    log(f"Worker: {DIST / 'worker_runtime' / 'python.exe'}")
     return 0
 
 

@@ -2,11 +2,34 @@
 
 from __future__ import annotations
 import json
+import sys
 import threading
 import time
+from urllib.parse import urlsplit
 import webview
 from workspace.app import desktop_host
 from workspace.app.mini_avatar import MiniAvatar, icon_path
+
+
+class WindowAccess:
+    def __init__(self, base, token):
+        self._base = base
+        self._token = token
+        self._window = None
+
+    def workspace_titlebar(self):
+        return bool(getattr(self._window, "_workspace_titlebar", False))
+
+    def workspace_token(self):
+        # The bridge only grants access to the packaged Workspace page.
+        current = urlsplit(self._window.get_current_url() or "")
+        if f"{current.scheme}://{current.netloc}" == self._base and current.path in {
+            "",
+            "/",
+            "/mini",
+        }:
+            return self._token
+        return None
 
 
 class WorkspaceShell:
@@ -19,6 +42,8 @@ class WorkspaceShell:
         self.tray = None
         self.quit_lock = threading.Lock()
         self.base = f"http://127.0.0.1:{port}"
+        token = application.state.ui_token
+        access = WindowAccess(self.base, token)
         self.main = webview.create_window(
             "Local AI Workspace",
             self.base,
@@ -26,13 +51,20 @@ class WorkspaceShell:
             height=900,
             min_size=(900, 640),
             background_color="#f4f6fa",
+            js_api=access,
         )
+        access._window = self.main
+        if sys.platform == "win32":
+            from workspace.app.windows_titlebar import install_titlebar
+            self.main.events.before_show += install_titlebar
         self.avatar = MiniAvatar(
             root,
             self.toggle_mini,
             self.show_main,
             self.request_exit,
             api_base=self.base,
+            ui_token=token,
+            appearance=application.state.store.companion_appearance,
         )
         self.main.events.closing += self._close_main
         desktop_host.register(
@@ -43,6 +75,7 @@ class WorkspaceShell:
             hide_mini=self.hide_mini,
             exit=self.request_exit,
             activity=self.activity,
+            refresh_appearance=self.avatar.refresh_appearance,
         )
         self._start_tray()
 
@@ -92,19 +125,11 @@ class WorkspaceShell:
         return {"ok": True}
 
     def activity(self, state):
-        self.avatar.set_state(
-            "awaiting_permission"
-            if state == "awaiting_permission"
-            else (
-                "error"
-                if state == "error"
-                else (
-                    "thinking"
-                    if state in {"starting", "running", "stopping"}
-                    else "ready"
-                )
-            )
-        )
+        if state in {"starting", "running", "stopping"}:
+            state = "thinking"
+        elif state not in {"error", "speaking", "documents", "awaiting_permission"}:
+            state = "ready"
+        self.avatar.set_state(state)
 
     def request_exit(self, payload=None):
         if not self.quit_lock.acquire(blocking=False):
@@ -158,6 +183,7 @@ class WorkspaceShell:
 
             threading.Thread(target=later, daemon=True).start()
         try:
+            webview.settings["ALLOW_DOWNLOADS"] = True
             webview.start(
                 debug=False, icon=str(icon_path()) if icon_path().is_file() else None
             )

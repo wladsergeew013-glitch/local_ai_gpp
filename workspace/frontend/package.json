@@ -1,6 +1,6 @@
 {
   "name": "local-ai-workspace",
-  "version": "0.2.0",
+  "version": "0.2.8",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

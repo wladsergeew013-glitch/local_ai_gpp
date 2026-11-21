@@ -2,16 +2,28 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { MiniApp } from "./MiniApp";
-import { WorkspaceSettings } from "./WorkspaceSettings";
+import { Icon } from "./Icon";
+import { MessageFiles } from "./MessageFiles";
+import { SkillControls } from "./SkillControls";
+import { WorkspaceSettings, type SettingsPage } from "./WorkspaceSettings";
+import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { ProjectDialog } from "./ProjectDialog";
 import { ChatHistory } from "./ChatHistory";
 import { AgentPanel } from "./AgentPanel";
-import { RuntimeStatus } from "./RuntimeStatus";
+import { RuntimeStatus, type RuntimeObservation } from "./RuntimeStatus";
+import { operatorToken } from "./access";
 import {
   api,
   active,
-  states,
+  agentTrustNotice,
   emptyBoot,
+  submitMessage,
+  chatSkillIds,
+  disabledSkillSections,
+  type SkillUse,
+  transferDraft,
+  pendingPrompt,
+  clearSentDraft,
   useConversation,
   type Bootstrap,
   type Conversation,
@@ -27,7 +39,7 @@ function App() {
       sessionStorage.getItem("workspace-task") ||
       "",
   );
-  const [settings, setSettings] = useState(false),
+  const [settings, setSettings] = useState<SettingsPage | null>(null),
     [addProject, setAddProject] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -37,6 +49,18 @@ function App() {
     [memory, setMemory] = useState(true),
     [tools, setTools] = useState(false),
     [connectorIds, setConnectorIds] = useState<string[]>([]);
+  const [runtimeObservation, setRuntimeObservation] =
+    useState<RuntimeObservation>();
+  const [fileDrafts, setFileDrafts] = useState<Record<string, File[]>>({});
+  const [skillDrafts, setSkillDrafts] = useState<
+    Record<
+      string,
+      {
+        ids: string[];
+        sections: Record<string, string[]>;
+      }
+    >
+  >({});
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     try {
       return JSON.parse(sessionStorage.getItem("workspace-drafts") || "{}");
@@ -44,11 +68,60 @@ function App() {
       return {};
     }
   });
-  const draftKey = selected || "new:" + project,
-    draft = drafts[draftKey] || "";
   const { current, events, error: pollError } = useConversation(selected);
-  const working = !!current && active.has(current.status);
-  const agent = !!current && current.details?.mode !== "chat";
+  const draftKey = selected || "new:" + project,
+    draft =
+      drafts[draftKey] ??
+      pendingPrompt(current?.id === selected ? current : null);
+  const liveChat = current?.id === selected ? current : null;
+  const selectedChat =
+    liveChat || boot.tasks.find((chat) => chat.id === selected);
+  const working = !!selectedChat && active.has(selectedChat.status);
+  const agent = selected
+    ? (selectedChat?.mode || selectedChat?.details?.mode) === "agent"
+    : files;
+  const editedSelection = skillDrafts[draftKey];
+  const savedIds = selectedChat ? chatSkillIds(selectedChat) : (boot.skills || []).map(s => s.id);
+  const selectedIds = editedSelection?.ids ?? savedIds;
+  const attachments = fileDrafts[draftKey] ?? [];
+  const sections =
+    editedSelection?.sections ?? disabledSkillSections(selectedChat);
+  function toggleSkill(target: string[]) {
+    setError("");
+    setSkillDrafts((old) => {
+      const ids = old[draftKey]?.ids ?? savedIds;
+      const enabled = target.every(id => ids.includes(id));
+      const sections = {
+        ...(old[draftKey]?.sections ?? disabledSkillSections(selectedChat)),
+      };
+      if (enabled) {
+        for (const id of target) delete sections[id];
+      }
+      return {
+        ...old,
+        [draftKey]: {
+          ids: enabled ? ids.filter(id => !target.includes(id)) : [...new Set([...ids, ...target])],
+          sections,
+        },
+      };
+    });
+  }
+  function toggleSection(id: string, key: string) {
+    setSkillDrafts((old) => {
+      const draft = old[draftKey] ?? {
+        ids: savedIds,
+        sections: disabledSkillSections(selectedChat),
+      };
+      const hidden = draft.sections[id] || [];
+      const next = hidden.includes(key)
+        ? hidden.filter((s) => s !== key)
+        : [...hidden, key];
+      return {
+        ...old,
+        [draftKey]: { ...draft, sections: { ...draft.sections, [id]: next } },
+      };
+    });
+  }
   const reload = () => api<Bootstrap>("/bootstrap").then(setBoot);
   useEffect(() => {
     let valid = true;
@@ -89,7 +162,8 @@ function App() {
       if (d.task_id) setSelected(d.task_id);
       if (d.project_id) setProject(d.project_id);
       if (d.panel === "project") setAddProject(true);
-      else if (d.panel) setSettings(true);
+      else if (d.panel === "assistant") setSettings("assistant");
+      else if (d.panel) setSettings("runtime");
     };
     window.addEventListener("local-ai-select-task", receive);
     return () => window.removeEventListener("local-ai-select-task", receive);
@@ -106,8 +180,10 @@ function App() {
       setBusy(false);
     }
   }
-  function newChat() {
+  function newChat(projectId = "") {
+    setProject(projectId);
     setSelected("");
+
     setFiles(false);
     setTools(false);
     setError("");
@@ -117,10 +193,11 @@ function App() {
       key = draftKey;
     if (!raw.trim() || busy || working) return;
     await act(async () => {
+      let row: Conversation;
       if (!selected) {
         const p = provider || boot.providers[0]?.id;
         if (!p) throw new Error("Подключите модель в настройках.");
-        const row = await api<Conversation>("/chats", {
+        row = await api<Conversation>("/chats", {
           project_id: project || null,
           provider_id: p,
           prompt: raw.trim(),
@@ -130,28 +207,44 @@ function App() {
           connector_ids: files ? connectorIds : [],
           action_id: crypto.randomUUID(),
         });
+        setDrafts((old) => transferDraft(old, key, row.id, raw));
+        setFileDrafts(old => {
+          if (!old[key]) return old;
+          const next = {...old, [row.id]: old[key]};
+          delete next[key];
+          return next;
+        });
+        setSkillDrafts((old) => {
+          if (!old[key]) return old;
+          const next = { ...old, [row.id]: old[key] };
+          delete next[key];
+          return next;
+        });
         setSelected(row.id);
-        await api("/chats/" + row.id + "/start", { revision: row.revision });
       } else {
-        const row = await api<Conversation>("/chats/" + selected);
-        await api(
-          "/chats/" +
-            selected +
-            (row.status === "queued" ? "/start" : "/continue"),
-          { revision: row.revision, prompt: raw.trim(), memory },
-        );
+        row = await api<Conversation>("/chats/" + selected);
       }
-      setDrafts((old) => (old[key] === raw ? { ...old, [key]: "" } : old));
+      const uses: SkillUse[] = agent ? [] : selectedIds.map(id => ({id, disabled_sections: sections[id]}));
+      await submitMessage(row, raw, memory, uses, agent ? [] : attachments);
+      setFileDrafts(old => {
+        if (old[row.id] !== attachments) return old;
+        const next = {...old};
+        delete next[row.id];
+        return next;
+      });
+      setDrafts((old) => clearSentDraft(old, row.id, raw));
     });
   }
-  const modelName = (id: string) =>
-    boot.providers.find((p) => p.id === id)?.model.split(":")[0] || "Модель";
+  const projectName = boot.projects.find(
+    (entry) => entry.id === (selectedChat ? selectedChat.project_id : project),
+  )?.name;
+  const chatTitle = selectedChat?.title || "Открываю диалог…";
   const compose = (
     <div className="chat-composer">
       <textarea
         aria-label={selected ? "Сообщение" : "Новое сообщение"}
         placeholder="Напишите сообщение…"
-        rows={selected ? 2 : 4}
+        rows={selected ? 2 : 3}
         value={draft}
         onChange={(e) =>
           setDrafts((old) => ({ ...old, [draftKey]: e.target.value }))
@@ -167,77 +260,98 @@ function App() {
           }
         }}
       />
-      <div className="compose-options">
-        {!selected && (
+      {!selected && (
+        <div className="compose-context">
+          <label className="inline-option">
+            Проект
+            <select
+              aria-label="Проект диалога"
+              value={project}
+              onChange={(e) => {
+                setProject(e.target.value);
+                setFiles(false);
+              }}
+            >
+              <option value="">Без проекта</option>
+              {boot.projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-option">
+            Модель
+            <select
+              aria-label="Модель диалога"
+              value={provider || boot.providers[0]?.id || ""}
+              onChange={(e) => setProvider(e.target.value)}
+            >
+              {!boot.providers.length && (
+                <option value="">Не подключена</option>
+              )}
+              {boot.providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.model.split(":")[0]}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!selected && project && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={files}
+                onChange={(e) => setFiles(e.target.checked)}
+              />
+              Файлы и команды
+            </label>
+          )}
+          {!selected && files && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={write}
+                onChange={(e) => setWrite(e.target.checked)}
+              />
+              Разрешить запись в проект
+            </label>
+          )}
+        </div>
+      )}
+      <div className="composer-toolbar">
+        {!agent && (
           <>
-            <label className="inline-option">
-              Проект
-              <select
-                aria-label="Проект диалога"
-                value={project}
-                onChange={(e) => {
-                  setProject(e.target.value);
-                  setFiles(false);
-                }}
-              >
-                <option value="">Без проекта</option>
-                {boot.projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="inline-option">
-              Модель
-              <select
-                aria-label="Модель диалога"
-                value={provider || boot.providers[0]?.id || ""}
-                onChange={(e) => setProvider(e.target.value)}
-              >
-                {!boot.providers.length && (
-                  <option value="">Не подключена</option>
-                )}
-                {boot.providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.model.split(":")[0]}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <MessageFiles files={attachments} disabled={busy || working} error={setError}
+              change={batch => setFileDrafts(old => ({...old, [draftKey]: batch}))} />
+            <SkillControls
+              key={draftKey}
+              skills={boot.skills || []}
+              selectedIds={selectedIds}
+              sections={sections}
+              toggleSection={toggleSection}
+              disabled={busy || working}
+              toggle={toggleSkill}
+              library={() => setSettings("skills")}
+            />
+            <button
+              type="button"
+              className="tool-button memory-toggle"
+              aria-pressed={memory}
+              aria-label="Память диалога"
+              title={
+                memory
+                  ? "Память включена · учитывать предыдущие сообщения"
+                  : "Память выключена · ответ только на это сообщение"
+              }
+              onClick={() => setMemory(!memory)}
+            >
+              <Icon name="memory" size={16} />
+              Память
+              <span className="switch-track" aria-hidden="true" />
+            </button>
           </>
         )}
-        {(!selected || !agent) && (
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={memory}
-              onChange={(e) => setMemory(e.target.checked)}
-            />
-            Память диалога
-          </label>
-        )}
-        {!selected && project && (
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={files}
-              onChange={(e) => setFiles(e.target.checked)}
-            />
-            Работа с файлами
-          </label>
-        )}
-        {!selected && files && (
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={write}
-              onChange={(e) => setWrite(e.target.checked)}
-            />
-            Разрешить изменения
-          </label>
-        )}
-        <span className="compose-spacer" />
         {working ? (
           <button
             className="stop"
@@ -251,7 +365,7 @@ function App() {
               })
             }
           >
-            ■ Остановить
+            Остановить
           </button>
         ) : (
           <button
@@ -263,12 +377,18 @@ function App() {
               (!!current &&
                 ["interrupted", "uncertain"].includes(current.status))
             }
+            aria-label="Отправить"
+            title="Отправить · Ctrl+Enter"
             onClick={send}
           >
-            Отправить ↗
+            <Icon name="send" size={16} />
+            <span>Отправить</span>
           </button>
         )}
       </div>
+      {((!selected && files) || agent) && (
+        <p className="agent-trust">{agentTrustNotice}</p>
+      )}
       {!selected && files && !!boot.connectors.length && (
         <div className="attached-apps">
           <span>Приложения:</span>
@@ -292,105 +412,75 @@ function App() {
       )}
     </div>
   );
-  const shown = boot.tasks.filter((t) => !project || t.project_id === project);
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="mark">W</span>
-          <div>
-            Local AI <strong>Workspace</strong>
-            <small>Проекты и диалоги</small>
-          </div>
-        </div>
-        <div className="side-section">
-          <h2>
-            Проекты{" "}
-            <button
-              aria-label="Добавить проект"
-              title="Добавить проект"
-              onClick={() => setAddProject(true)}
-            >
-              ＋
-            </button>
-          </h2>
-          <button
-            className={"project " + (!project ? "selected" : "")}
-            onClick={() => setProject("")}
-          >
-            Все диалоги <span>{boot.tasks.length}</span>
-          </button>
-          {boot.projects.map((p) => (
-            <button
-              key={p.id}
-              className={"project " + (project === p.id ? "selected" : "")}
-              onClick={() => {
-                setProject(p.id);
-                newChat();
-              }}
-            >
-              <span>
-                {p.source === "github" ? "↗" : "□"} {p.name}
-              </span>
-            </button>
-          ))}
-        </div>
-        <div className="side-section task-list">
-          <h2>
-            Диалоги{" "}
-            <button
-              aria-label="Новый диалог"
-              title="Новый диалог"
-              onClick={newChat}
-            >
-              ＋
-            </button>
-          </h2>
-          {shown.map((t) => (
-            <button
-              key={t.id}
-              className={"task-link " + (selected === t.id ? "selected" : "")}
-              data-chat-id={t.id}
-              onClick={() => {
-                setSelected(t.id);
-                setProject(t.project_id || "");
-              }}
-            >
-              <span className={"dot " + t.status} />
-              <span>
-                {t.title}
-                {states[t.status] && <small>{states[t.status]}</small>}
-              </span>
-            </button>
-          ))}
-          {!shown.length && (
-            <p className="muted empty-side">Здесь появятся ваши диалоги.</p>
-          )}
-        </div>
-        <div className="side-footer">
-          <button onClick={() => act(() => api("/host/show-avatar", {}))}>
-            ◉ Мини-помощник
-          </button>
-          <button onClick={() => setSettings(true)}>⚙ Настройки</button>
-          <small>Workspace {boot.version}</small>
-        </div>
-      </aside>
+      <WorkspaceSidebar
+        boot={boot}
+        selected={selected}
+        newChat={newChat}
+        openChat={(chat) => {
+          setSelected(chat.id);
+          setProject(chat.project_id || "");
+          setError("");
+        }}
+        addProject={() => setAddProject(true)}
+        showAssistant={() => act(() => api("/host/show-avatar", {}))}
+        openSettings={() => setSettings("runtime")}
+      />
       <main>
-        <header className="topbar">
-          <div>
+        <header className={selected ? "topbar chat-topbar" : "topbar"}>
+          <div className="workspace-heading">
             <span className="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span>
-            <h1>
-              {boot.projects.find((p) => p.id === project)?.name || "Диалоги"}
-            </h1>
+            {selected ? (
+              <div className="workspace-heading-line">
+                <span className="workspace-project-name" title={projectName}>
+                  {projectName || "Без проекта"}
+                </span>
+                <span className="workspace-heading-divider" aria-hidden="true">
+                  /
+                </span>
+                <h1 title={chatTitle}>{chatTitle}</h1>
+              </div>
+            ) : (
+              <h1>{projectName || "Диалоги"}</h1>
+            )}
           </div>
-          <RuntimeStatus
-            provider={
-              boot.providers.find(
-                (p) => p.id === (current?.provider_id || provider),
-              ) || boot.providers[0]
-            }
-            open={() => setSettings(true)}
-          />
+          <div className="workspace-header-actions">
+            {liveChat && agent && (
+              <button
+                className="workspace-header-action"
+                aria-expanded={tools}
+                onClick={() => setTools(!tools)}
+              >
+                Действия и файлы
+              </button>
+            )}
+            {liveChat &&
+              ["interrupted", "uncertain"].includes(liveChat.status) && (
+                <button
+                  className="workspace-header-action"
+                  disabled={busy}
+                  onClick={() =>
+                    act(() =>
+                      api("/chats/" + liveChat.id + "/restore", {
+                        revision: liveChat.revision,
+                      }),
+                    )
+                  }
+                >
+                  Восстановить историю
+                </button>
+              )}
+            <RuntimeStatus
+              observation={runtimeObservation}
+              provider={
+                boot.providers.find(
+                  (p) => p.id === (selectedChat?.provider_id || provider),
+                ) || boot.providers[0]
+              }
+              open={() => setSettings("runtime")}
+            />
+          </div>
         </header>
         {(error || pollError) && (
           <div role="alert" className="alert">
@@ -402,55 +492,23 @@ function App() {
         )}
         {!selected ? (
           <section className="welcome-chat">
-            <span className="eyebrow">LOCAL AI</span>
             <h2>Новый диалог</h2>
-            <p className="muted">
-              Общайтесь с моделью и сохраняйте историю переписки.
-            </p>
             {compose}
             {!boot.providers.length && (
-              <button className="link" onClick={() => setSettings(true)}>
+              <button className="link" onClick={() => setSettings("runtime")}>
                 Подключить модель
               </button>
             )}
-            <div className="welcome-links">
-              <button onClick={() => setAddProject(true)}>
-                ＋ Создать проект
-              </button>
-            </div>
           </section>
         ) : (
           <section className="conversation task-view">
-            <header className="conversation-header">
-              <div>
-                <h2>{current?.title || "Открываю диалог…"}</h2>
-                <p className="muted">
-                  {current ? modelName(current.provider_id) : ""}
-                  {agent ? " · Работа с файлами" : ""}
-                </p>
-              </div>
-              {agent && (
-                <button aria-expanded={tools} onClick={() => setTools(!tools)}>
-                  Действия и файлы
-                </button>
-              )}
-              {current &&
-                ["interrupted", "uncertain"].includes(current.status) && (
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      act(() =>
-                        api("/chats/" + selected + "/restore", {
-                          revision: current.revision,
-                        }),
-                      )
-                    }
-                  >
-                    Восстановить историю
-                  </button>
-                )}
-            </header>
-            <ChatHistory events={events} current={current} />
+            {current?.status === "retryable" && (
+              <p className="alert" role="status">
+                {current.details?.error ||
+                  "Запуск не дошёл до сессии. Повторите отправку."}
+              </p>
+            )}
+            <ChatHistory events={liveChat ? events : []} current={liveChat} />
             {current && agent && tools && (
               <AgentPanel current={current} events={events} act={act} />
             )}
@@ -460,7 +518,14 @@ function App() {
         {settings && (
           <WorkspaceSettings
             boot={boot}
-            close={() => setSettings(false)}
+            close={() => setSettings(null)}
+            initialPage={settings}
+            onObservation={setRuntimeObservation}
+            providerId={selectedChat?.provider_id || provider}
+            selectedSkills={selectedIds}
+            sections={sections}
+            toggleSection={toggleSection}
+            chooseSkill={!agent && !working && !busy ? toggleSkill : undefined}
             reload={reload}
           />
         )}
@@ -468,8 +533,7 @@ function App() {
           <ProjectDialog
             close={() => setAddProject(false)}
             created={(p) => {
-              setProject(p.id);
-              newChat();
+              newChat(p.id);
               setAddProject(false);
               reload();
             }}
@@ -479,6 +543,21 @@ function App() {
     </div>
   );
 }
-createRoot(document.getElementById("root")!).render(
-  location.pathname === "/mini" ? <MiniApp /> : <App />,
+const root = createRoot(document.getElementById("root")!);
+root.render(<p className="landing">Подключение к Workspace…</p>);
+operatorToken.then((token) =>
+  root.render(
+    token ? (
+      location.pathname === "/mini" ? (
+        <MiniApp />
+      ) : (
+        <App />
+      )
+    ) : (
+      <main className="landing">
+        <h1>Local AI Workspace</h1>
+        <p>Откройте Workspace из приложения или по ссылке из терминала.</p>
+      </main>
+    ),
+  ),
 );

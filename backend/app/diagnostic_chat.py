@@ -662,6 +662,8 @@ def _shared_chat_generation_worker(payload: dict[str, Any], assistant_id: str, c
                             })
                             return
                         elif event_type == "error":
+                            if event.get("status_code") == 504:
+                                raise RuntimeError("Runtime остановил запрос по тайм-ауту. Проверьте размер контекста и режим CPU/CUDA в настройках.")
                             raise RuntimeError(str(event.get("message") or "Ошибка генерации"))
         raise RuntimeError("Поток завершился без финального события done. Ответ не завершён.")
     except urllib.error.HTTPError as exc:

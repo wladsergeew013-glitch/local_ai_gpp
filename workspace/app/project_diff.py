@@ -1,14 +1,22 @@
-"""Task-relative text diffs preserve edits that already existed at task start."""
+"""Bounded comparisons against the working tree at the start of a run."""
 
 import difflib
 import hashlib
 import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 
 MAX_FILE = 1024 * 1024
 MAX_TOTAL = 32 * 1024 * 1024
+MAX_DIFF = 4 * MAX_FILE
+
+
+def is_link(metadata):
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
 
 
 def git_files(project: Path):
@@ -34,6 +42,7 @@ def git_files(project: Path):
         inside = False
     if not inside:
         paths = []
+        omissions = []
         skipped = {
             ".git",
             ".venv",
@@ -43,17 +52,30 @@ def git_files(project: Path):
             "dist",
             "build",
         }
-        for directory, folders, files in os.walk(project, followlinks=False):
-            folders[:] = [
-                name
-                for name in folders
-                if name not in skipped
-                and not (Path(directory) / name).is_symlink()
-                and not (
-                    getattr((Path(directory) / name).lstat(), "st_file_attributes", 0)
-                    & 0x400
-                )
-            ]
+
+        def scan_error(exc):
+            name = (
+                Path(exc.filename).relative_to(project).as_posix()
+                if exc.filename
+                else "."
+            )
+            omissions.append({"path": name, "reason": "scan_error"})
+
+        for directory, folders, files in os.walk(
+            project, followlinks=False, onerror=scan_error
+        ):
+            for name in folders[:]:
+                entry = Path(directory) / name
+                if name in skipped:
+                    folders.remove(name)
+                    continue
+                try:
+                    if is_link(entry.lstat()):
+                        paths.append(entry.relative_to(project).as_posix())
+                        folders.remove(name)
+                except OSError as exc:
+                    scan_error(exc)
+                    folders.remove(name)
             paths.extend(
                 (Path(directory) / name).relative_to(project).as_posix()
                 for name in files
@@ -62,7 +84,7 @@ def git_files(project: Path):
                 raise ValueError(
                     "Папка слишком велика для сравнения. Подключите более узкую папку или Git-репозиторий."
                 )
-        return paths, ""
+        return paths, "", omissions
     paths = (
         git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
         .decode("utf-8", "replace")
@@ -72,96 +94,218 @@ def git_files(project: Path):
         head = git("rev-parse", "HEAD").decode().strip()
     except ValueError:
         head = ""
-    return [p for p in dict.fromkeys(paths) if p], head
+    return [p for p in dict.fromkeys(paths) if p], head, []
+
+
+def inspect_entry(project, name, remaining):
+    relative = Path(name)
+    if relative.anchor or not relative.parts or ".." in relative.parts:
+        return {"kind": "unknown", "reason": "invalid_path"}, None
+    path = project
+    try:
+        for index, part in enumerate(relative.parts):
+            path /= part
+            metadata = path.lstat()
+            if is_link(metadata):
+                if index != len(relative.parts) - 1:
+                    return {"kind": "unknown", "reason": "linked_parent"}, None
+                return {
+                    "kind": "link",
+                    "sha256": hashlib.sha256(
+                        os.fsencode(os.readlink(path))
+                    ).hexdigest(),
+                }, None
+    except (FileNotFoundError, NotADirectoryError):
+        return {"kind": "missing"}, None
+    except OSError:
+        return {"kind": "unknown", "reason": "read_error"}, None
+    if not stat.S_ISREG(metadata.st_mode):
+        kind = "directory" if stat.S_ISDIR(metadata.st_mode) else "special"
+        return {"kind": kind, "reason": kind}, None
+    record = {"kind": "file", "size": metadata.st_size}
+    limit = min(MAX_FILE, remaining)
+    if metadata.st_size > limit:
+        return {
+            **record,
+            "reason": "large" if metadata.st_size > MAX_FILE else "size_limit",
+        }, None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not os.path.samestat(metadata, opened) or not stat.S_ISREG(
+                opened.st_mode
+            ):
+                return {**record, "reason": "read_error"}, None
+            content = stream.read(limit + 1)
+            current = os.fstat(stream.fileno())
+            if (
+                len(content) != metadata.st_size
+                or current.st_mtime_ns != metadata.st_mtime_ns
+            ):
+                return {**record, "reason": "changed_during_read"}, None
+    except OSError:
+        return {**record, "reason": "read_error"}, None
+    record["sha256"] = hashlib.sha256(content).hexdigest()
+    if b"\0" in content:
+        record["text_omitted"] = "binary"
+    else:
+        try:
+            content.decode("utf-8")
+        except UnicodeError:
+            record["text_omitted"] = "non_utf8"
+    return record, content
 
 
 def capture(project: Path, destination: Path):
-    files, head = git_files(project)
-    destination.mkdir(parents=True, exist_ok=False)
-    manifest = {"head": head, "files": {}, "skipped": []}
-    total = 0
-    for name in files:
-        source = project / name
-        try:
-            resolved = source.resolve()
-            if (
-                not resolved.is_relative_to(project.resolve())
-                or source.is_symlink()
-                or source.stat().st_size > MAX_FILE
-            ):
-                raise ValueError()
-            content = source.read_bytes()
-            if b"\0" in content or total + len(content) > MAX_TOTAL:
-                raise ValueError()
-            content.decode("utf-8")
-        except (OSError, ValueError, UnicodeError):
-            manifest["skipped"].append(name)
+    files, head, omissions = git_files(project)
+    destination.mkdir(parents=True, exist_ok=True)
+    manifest = {"head": head, "files": {}, "omissions": omissions}
+    remaining = MAX_TOTAL
+    for name in sorted(files):
+        record, content = inspect_entry(project, name, remaining)
+        if record["kind"] == "missing":
             continue
-        key = hashlib.sha256(name.encode()).hexdigest()
-        (destination / key).write_bytes(content)
-        manifest["files"][name] = {
-            "key": key,
-            "sha256": hashlib.sha256(content).hexdigest(),
-        }
-        total += len(content)
-    (destination / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
-    )
+        if content is not None:
+            remaining -= len(content)
+            if not record.get("text_omitted"):
+                key = hashlib.sha256(os.fsencode(name)).hexdigest()
+                (destination / key).write_bytes(content)
+                record["key"] = key
+        manifest["files"][name] = record
+    stage = destination / "manifest.tmp"
+    stage.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    stage.replace(destination / "manifest.json")
     return {
         "head": head,
-        "captured_files": len(manifest["files"]),
-        "skipped_files": len(manifest["skipped"]),
+        "captured_files": sum("key" in row for row in manifest["files"].values()),
+        "skipped_files": len(omissions)
+        + sum(
+            "reason" in row or "text_omitted" in row
+            for row in manifest["files"].values()
+        ),
     }
 
 
 def compare(project: Path, baseline: Path):
     manifest = json.loads((baseline / "manifest.json").read_text(encoding="utf-8"))
-    files, head = git_files(project)
+    files, head, scan_omissions = git_files(project)
+    previous = {
+        name: {"kind": "file", **record} for name, record in manifest["files"].items()
+    }
+    for name in manifest.get("skipped", []):  # Baselines from Workspace 0.2.0.
+        previous[name] = {"kind": "unknown", "reason": "legacy_baseline"}
+    omissions = [
+        {**row, "stage": stage}
+        for stage, rows in (
+            ("before", manifest.get("omissions", [])),
+            ("after", scan_omissions),
+        )
+        for row in rows
+    ]
     changes = []
     parts = []
-    size = 0
-    for name in sorted(set(files) | set(manifest["files"])):
-        if name in manifest["skipped"]:
-            continue
-        record = manifest["files"].get(name)
-        before = (baseline / record["key"]).read_bytes() if record else b""
-        target = project / name
-        if (
-            not target.resolve().is_relative_to(project.resolve())
-            or target.is_symlink()
-        ):
-            continue
-        try:
-            after = target.read_bytes() if target.exists() else b""
-        except OSError:
-            continue
-        if before == after:
-            continue
-        if len(after) > MAX_FILE or b"\0" in after:
-            changes.append({"path": name, "binary_or_large": True})
-            continue
-        try:
-            diff = "".join(
-                difflib.unified_diff(
-                    before.decode("utf-8").splitlines(True),
-                    after.decode("utf-8").splitlines(True),
-                    fromfile="before/" + name,
-                    tofile="after/" + name,
+    size, remaining = 0, MAX_TOTAL
+    truncated = False
+    for name in sorted(set(files) | set(previous)):
+        before = previous.get(name, {"kind": "missing"})
+        after, content = inspect_entry(project, name, remaining)
+        if content is not None:
+            remaining -= len(content)
+        for stage, entry in (("before", before), ("after", after)):
+            if entry.get("reason"):
+                omissions.append(
+                    {"path": name, "stage": stage, "reason": entry["reason"]}
                 )
-            )
-        except UnicodeError:
+        first, last = before["kind"], after["kind"]
+        if "unknown" in {first, last}:
             continue
-        changes.append(
-            {"path": name, "added": not bool(record), "deleted": not target.exists()}
+        state = None
+        if first != last:
+            state = (
+                "added"
+                if first == "missing"
+                else "deleted" if last == "missing" else "type_changed"
+            )
+        elif before.get("sha256") and after.get("sha256"):
+            if before["sha256"] != after["sha256"]:
+                state = "modified"
+        elif (
+            first == "file"
+            and before.get("size") is not None
+            and after.get("size") is not None
+        ):
+            if before["size"] != after["size"]:
+                state = "modified"
+        if state is None:
+            continue
+        change = {
+            "path": name,
+            "status": state,
+            "before_type": first,
+            "after_type": last,
+            "added": state == "added",
+            "deleted": state == "deleted",
+        }
+        changes.append(change)
+        if ({first, last} - {"file", "missing"}) or any(
+            entry.get("reason") or entry.get("text_omitted")
+            for entry in (before, after)
+        ):
+            change["text_omitted"] = (
+                after.get("text_omitted")
+                or before.get("text_omitted")
+                or after.get("reason")
+                or before.get("reason")
+                or "type"
+            )
+            change["binary_or_large"] = change["text_omitted"] in {
+                "binary",
+                "large",
+                "non_utf8",
+            }
+            continue
+        try:
+            key = before.get("key", "")
+            if first == "file" and not (
+                len(key) == 64 and all(c in "0123456789abcdef" for c in key)
+            ):
+                raise ValueError("Invalid snapshot entry")
+            snapshot = baseline / key
+            if first == "file" and (
+                is_link(snapshot.lstat()) or snapshot.stat().st_size > MAX_FILE
+            ):
+                raise ValueError("Invalid snapshot file")
+            old = snapshot.read_bytes().decode("utf-8") if first == "file" else ""
+            new = content.decode("utf-8") if last == "file" else ""
+        except (OSError, ValueError, UnicodeError):
+            omissions.append({"path": name, "stage": "before", "reason": "read_error"})
+            continue
+        diff = "".join(
+            difflib.unified_diff(
+                old.splitlines(True),
+                new.splitlines(True),
+                fromfile="before/" + name,
+                tofile="after/" + name,
+            )
         )
-        if size + len(diff) <= 4 * MAX_FILE:
+        length = len(diff.encode("utf-8"))
+        if size + length <= MAX_DIFF:
             parts.append(diff)
-            size += len(diff)
+            size += length
+        else:
+            truncated = True
+            change["text_omitted"] = "diff_limit"
     return {
         "files": changes,
         "diff": "".join(parts),
         "baseline_head": manifest["head"],
         "current_head": head,
-        "skipped_files": manifest["skipped"],
+        "skipped_files": sorted({row["path"] for row in omissions}),
+        "omissions": omissions,
+        "baseline_available": True,
+        "complete": not omissions and not truncated,
+        "truncated": truncated,
         "comparison": "task-start working tree; pre-existing edits are preserved",
     }

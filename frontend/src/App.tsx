@@ -1,12 +1,15 @@
 import { changedRuntime, clearSubmittedDraft } from './settingsPatch';
-import { FormEvent, useEffect, useRef, useState } from 'react';
-import { API_BASE, fetchBootstrap, fetchRuntimeStatus, prewarmModel, registerModelPath, saveRuntimePatch, streamChat, unloadModel, uploadModel } from './api';
-import type { ChatMessage, EngineSettings, ModelRecord, RuntimeStatus } from './types';
+import { useEffect, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
+import { API_BASE, fetchBootstrap, fetchRuntimeStatus, prewarmModel, registerModelPath, saveRuntimePatch, unloadModel, uploadModel } from './api';
+import type { ChatMessage, EngineSettings, ModelRecord, RuntimeSettings, RuntimeStatus } from './types';
 import { APP_VERSION } from './version';
 import { contextSettingsError, estimateContext } from './contextBudget';
 import { messageError, requestHistory } from './chatCompletion';
 import { acceptsRemote, fresh, initialState, normalizeState, stateStatus, STORE } from './chatState';
 import type { ChatState } from './chatState';
+import RuntimeSettingsDialog, { modelOperationText, modelStateText } from './RuntimeSettingsDialog';
+import type { Feedback, ModelOperation, ModelSource, SettingsSection } from './RuntimeSettingsDialog';
 
 const MARKER = 'V67_4_DESKTOP_SYNC_MULTI_CONVERSATION';
 const url = (path: string) => `${API_BASE}${path}`;
@@ -20,6 +23,17 @@ function messageDate(message: ChatMessage): Date | null {
 const messageTime = new Intl.DateTimeFormat('ru-RU', {
   day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
 });
+
+function GenerationTimer({ message, loading }: { message: ChatMessage; loading: boolean }) {
+  const started = messageDate(message)?.getTime();
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <span>{loading ? 'Загрузка весов' : message.phase === 'typing' ? 'Генерация ответа' : 'Подготовка ответа'}
+    {started !== undefined && ` · ${Math.max(0, Math.floor((now - started) / 1000))} с`}</span>;
+}
 
 async function jsonRequest(path: string, body?: unknown, method = 'POST') {
   const response = await fetch(url(path), { method: body === undefined && method === 'GET' ? 'GET' : method,
@@ -37,26 +51,21 @@ export default function App() {
   const [runtime, setRuntime] = useState<RuntimeStatus[]>([]);
   const [modelId, setModelId] = useState('');
   const [input, setInput] = useState('');
-  const [status, setStatus] = useState('Подключаюсь к Local AI…');
-  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('');
+  const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [syncReady, setSyncReady] = useState(false);
   const [networkErrors, setNetworkErrors] = useState<Record<string, string>>({});
-  const [showSettings, setShowSettings] = useState(false);
-  const [showContext, setShowContext] = useState(false);
-  const [trimHistory, setTrimHistory] = useState(true);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [settingsFeedback, setSettingsFeedback] = useState<Feedback | null>(null);
+  const [modelOperation, setModelOperation] = useState<ModelOperation | null>(null);
+  const [modelFeedback, setModelFeedback] = useState<Feedback | null>(null);
   const [memory, setMemory] = useState(true);
-  const [temperature, setTemperature] = useState(0.2);
-  const [enableThinking, setEnableThinking] = useState(false);
-  const [maxTokens, setMaxTokens] = useState(512);
-  const [gpuLayers, setGpuLayers] = useState(-1);
-  const [nCtx, setNCtx] = useState(4096);
-  const [warmPolicy, setWarmPolicy] = useState('unload_after_idle');
+  const [preferredGpuLayers, setPreferredGpuLayers] = useState<number | null>(null);
   const [systemPrompt, setSystemPrompt] = useState('Ты полезный помощник. Отвечай кратко и по делу.');
-  const [modelName, setModelName] = useState('');
-  const [modelPath, setModelPath] = useState('');
-  const [modelFile, setModelFile] = useState<File | null>(null);
   const [uploadLimit, setUploadLimit] = useState(16 * 1024 ** 3);
-  const controller = useRef<AbortController | null>(null);
+  const uploadController = useRef<AbortController | null>(null);
   const chatRef = useRef(chat);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
@@ -67,8 +76,21 @@ export default function App() {
   chatRef.current = chat;
   const active = chat.conversations.find(c => c.id === chat.activeConversationId) || chat.conversations[0];
   const model = models.find(m => m.id === modelId);
-  const loaded = runtime.find(r => r.model_id === modelId);
-  const generating = busy || chat.conversations.some(c => c.messages.some(m => m.pending));
+  const currentRuntime = runtime.find(r => r.model_id === modelId);
+  const loaded = currentRuntime?.state === 'hot';
+  const pendingReply = chat.conversations.find(c => c.messages.some(m => m.pending))?.messages.find(m => m.role === 'assistant' && m.pending);
+  const generating = sending || !!pendingReply;
+  const engineBusy = runtime.some(r => r.state === 'loading' || r.state === 'generating');
+  const modelControlsBusy = generating || !!modelOperation || engineBusy;
+  const availableModels = models.filter(m => m.type === 'LLM' && m.file_exists !== false);
+  const preferences = settings?.runtime;
+  const nCtx = preferences?.n_ctx ?? 4096;
+  const maxTokens = preferences?.max_tokens ?? 512;
+  const temperature = preferences?.temperature ?? 0.2;
+  const trimHistory = preferences?.context_overflow !== 'error';
+  const gpuLayers = preferredGpuLayers ?? preferences?.n_gpu_layers ?? 0;
+  const enableThinking = preferences?.enable_thinking ?? false;
+  const warmPolicy = preferences?.warm_policy ?? 'unload_after_idle';
   const runtimeOptions = { n_gpu_layers: gpuLayers, n_ctx: nCtx, context_overflow: trimHistory ? 'trim' as const : 'error' as const, warm_policy: warmPolicy, enable_thinking: enableThinking };
   const history = requestHistory(active.messages);
   const estimatedContext = estimateContext([...systemPrompt.trim() ? [{ content: systemPrompt }] : [], ...memory ? history : [], { content: input.trim() }], maxTokens);
@@ -79,18 +101,14 @@ export default function App() {
     const data = await fetchBootstrap();
     setModels(data.models); setSettings(data.settings);
     setUploadLimit(data.limits?.model_upload_max_bytes ?? 16 * 1024 ** 3);
-    setModelId(previous => data.models.some(m => m.id === previous && m.file_exists) ? previous : data.models.find(m => m.type === 'LLM' && m.file_exists)?.id || '');
-    setTemperature(data.settings.runtime.temperature); setMaxTokens(data.settings.runtime.max_tokens);
-    setTrimHistory(data.settings.runtime.context_overflow !== 'error');
-    setEnableThinking(data.settings.runtime.enable_thinking ?? false);
-    setGpuLayers(data.settings.runtime.n_gpu_layers); setNCtx(data.settings.runtime.n_ctx); setWarmPolicy(data.settings.runtime.warm_policy);
+    setModelId(previous => data.models.some(m => m.type === 'LLM' && m.id === previous && m.file_exists !== false) ? previous : data.models.find(m => m.type === 'LLM' && m.file_exists !== false)?.id || '');
     bootReady.current = true;
   }
 
   function applyRemote(value: unknown, authoritative = false) {
     const state = normalizeState(value);
     if (!acceptsRemote(remoteState.current, state, authoritative)) return false;
-    remoteState.current = state; chatRef.current = state; setChat(state); setStatus(stateStatus(state));
+    remoteState.current = state; chatRef.current = state; setChat(state);
     return true;
   }
 
@@ -128,7 +146,7 @@ export default function App() {
       if (!stopped) timers.runtime = window.setTimeout(() => void pollRuntime(), 2500);
     }
     void pollSync(); void pollRuntime();
-    return () => { stopped = true; Object.values(timers).forEach(window.clearTimeout); controller.current?.abort(); };
+    return () => { stopped = true; Object.values(timers).forEach(window.clearTimeout); uploadController.current?.abort(); };
   }, []);
   useEffect(() => {
     const list = scrollRef.current;
@@ -141,6 +159,7 @@ export default function App() {
   }, [active.id, active.messages]);
 
   async function selectConversation(id: string, next = chat) {
+    setStatus('');
     const state = { ...next, activeConversationId: id, updatedAt: Date.now() };
     setChat(state);
     try { applyRemote(await jsonRequest('/api/desktop/chat-sync', { ...state, source: 'main-ui' })); }
@@ -148,6 +167,7 @@ export default function App() {
   }
   async function clearConversation() {
     if (generating) return;
+    setStatus('');
     try { applyRemote(await jsonRequest('/api/desktop/chat-clear', { conversationId: active.id })); }
     catch (e) { setStatus(errorText(e)); }
   }
@@ -156,112 +176,141 @@ export default function App() {
     event.preventDefault();
     const draft = input;
     const text = draft.trim();
-    if (!text || !modelId || generating || !syncReady) return;
-    if (budgetError) { setStatus(budgetError); setShowContext(true); return; }
+    if (!text || !model || modelControlsBusy || !syncReady) return;
+    if (budgetError) { setStatus(budgetError); setSettingsSection('generation'); return; }
     const target = active;
     const title = target.messages.length ? target.title : text.slice(0, 42);
     const assistantId = crypto.randomUUID();
     const payload = { model_id: modelId, message: text, system_prompt: systemPrompt, temperature,
       max_tokens: maxTokens, runtime: runtimeOptions, memory,
       history };
-    setBusy(true); setStatus('Модель отвечает…');
-    if (syncReady) {
-      try {
-        const result = await jsonRequest('/api/desktop/chat-send', { ...payload, conversationId: target.id,
-          conversationTitle: title, conversationCreatedAt: target.createdAt, assistant_id: assistantId, source: 'main-ui', baseVersion: remoteState.current?.version });
-        if (result.state) applyRemote(result.state);
-        setInput(current => clearSubmittedDraft(current,draft)); setStatus(stateStatus(chatRef.current));
-      } catch (e) { setStatus(errorText(e)); }
-      finally { setBusy(false); }
-      return;
-    }
+    setSending(true); setStatus(''); setModelFeedback(null);
+    try {
+      const result = await jsonRequest('/api/desktop/chat-send', { ...payload, conversationId: target.id,
+        conversationTitle: title, conversationCreatedAt: target.createdAt, assistant_id: assistantId, source: 'main-ui', baseVersion: remoteState.current?.version });
+      if (result.state) applyRemote(result.state);
+      setInput(current => clearSubmittedDraft(current, draft));
+    } catch (e) { setStatus(errorText(e)); }
+    finally { setSending(false); }
   }
 
   async function stop() {
-    controller.current?.abort();
-    {
-      try { await jsonRequest('/api/runtime/cancel'); setStatus('Генерация остановлена.'); }
-      catch (e) { setStatus(errorText(e)); }
-    }
-  }
-  async function modelAction(load: boolean) {
-    if (!modelId || generating) return;
-    const abort = new AbortController(); controller.current = abort;
-    setBusy(true);
-    setStatus(load ? 'Загружаю веса и прогреваю вычисления…' : 'Выгружаю модель…');
-    try { if (load) await prewarmModel(modelId, runtimeOptions, abort.signal); else await unloadModel(modelId);
-      setRuntime(await fetchRuntimeStatus()); setStatus(load ? 'Модель загружена' : 'Модель выгружена'); }
+    if (!pendingReply || stopping) return;
+    setStopping(true);
+    try { await jsonRequest('/api/runtime/cancel'); }
     catch (e) { setStatus(errorText(e)); }
-    finally { setBusy(false); }
+    finally { setStopping(false); }
   }
-  async function addModel(event: FormEvent) {
-    event.preventDefault(); const abort = new AbortController(); controller.current = abort; setBusy(true);
+
+  function selectModel(id: string) {
+    const savedLayers = models.find(record => record.id === id)?.runtime?.n_gpu_layers;
+    setModelId(id);
+    setPreferredGpuLayers(typeof savedLayers === 'number' ? savedLayers : null);
+    setModelFeedback(null);
+  }
+
+  function rememberModel(record: ModelRecord) {
+    setModels(current => current.some(m => m.id === record.id)
+      ? current.map(m => m.id === record.id ? record : m)
+      : [...current, record]);
+  }
+
+  async function modelAction(load: boolean) {
+    if (!model || modelControlsBusy) return;
+    setModelFeedback(null);
+    setModelOperation({ kind: load ? 'load' : 'unload' });
     try {
-      if (modelFile && modelFile.size > uploadLimit) throw new Error(`Файл модели превышает лимит ${uploadLimit / 1024 ** 3} ГиБ.`);
-      const form = new FormData(); form.append('model_name', modelName || modelFile?.name || modelPath.split(/[\\/]/).pop() || 'LLM');
+      if (load) rememberModel(await prewarmModel(model.id, runtimeOptions));
+      else await unloadModel(model.id);
+      setRuntime(await fetchRuntimeStatus());
+      setModelFeedback({ text: load ? 'Модель готова к диалогу.' : 'Модель выгружена.' });
+    } catch (e) { setModelFeedback({ text: errorText(e), error: true }); }
+    finally { setModelOperation(null); }
+  }
+
+  async function addModel(name: string, source: ModelSource) {
+    if (modelOperation) return false;
+    const upload = 'file' in source;
+    const abort = upload ? new AbortController() : null;
+    uploadController.current = abort;
+    setModelFeedback(null);
+    setModelOperation({ kind: upload ? 'upload' : 'register' });
+    try {
+      const form = new FormData();
+      form.append('model_name', name);
       form.append('model_type', 'LLM');
       let added: ModelRecord;
-      if (modelFile) { form.append('model_file', modelFile); added = await uploadModel(form, abort.signal); }
-      else { form.append('model_path', modelPath); added = await registerModelPath(form, abort.signal); }
-      await reload(); setModelId(added.id); setModelFile(null); setModelPath(''); setModelName(''); setStatus('Модель подключена');
-    } catch (e) { setStatus(errorText(e)); }
-    finally { setBusy(false); }
+      if (upload && abort) {
+        form.append('model_file', source.file);
+        added = await uploadModel(form, abort.signal, percent => setModelOperation({ kind: 'upload', percent }));
+      } else if ('path' in source) {
+        form.append('model_path', source.path);
+        added = await registerModelPath(form, AbortSignal.timeout(10000));
+      } else {
+        return false;
+      }
+      rememberModel(added);
+      selectModel(added.id);
+      setModelFeedback({ text: 'Модель подключена. Напишите сообщение или загрузите её в память.' });
+      return true;
+    } catch (e) {
+      setModelFeedback({
+        text: abort?.signal.aborted ? 'Передача файла отменена.' : errorText(e),
+        error: !abort?.signal.aborted,
+      });
+      return false;
+    } finally {
+      uploadController.current = null;
+      setModelOperation(null);
+    }
   }
-  async function applySettings() {
-    if (!settings) return;
-    if (budgetError) { setStatus(budgetError); setShowContext(true); return; }
+
+  async function applySettings(patch: Partial<RuntimeSettings>, prompt: string) {
+    if (!settings || saving) return false;
+    setSaving(true); setSettingsFeedback(null);
     try {
-      setSettings(await saveRuntimePatch(settings, changedRuntime(settings.runtime, { ...runtimeOptions,
-        warm_policy: warmPolicy as EngineSettings['runtime']['warm_policy'], temperature, max_tokens: maxTokens })));
-      setStatus('Настройки сохранены');
-    } catch (e) { setStatus(errorText(e)); }
+      setSettings(await saveRuntimePatch(settings, changedRuntime(settings.runtime, patch)));
+      if (patch.n_gpu_layers !== undefined) setPreferredGpuLayers(patch.n_gpu_layers);
+      setSystemPrompt(prompt);
+      setSettingsFeedback({ text: 'Настройки сохранены.' });
+      return true;
+    } catch (e) {
+      setSettingsFeedback({ text: errorText(e), error: true });
+      return false;
+    } finally { setSaving(false); }
   }
 
   return <div className="compact-app">
     <header className="compact-header"><strong>Local AI Runtime <small>{APP_VERSION}</small></strong>
-      <div><button aria-expanded={showSettings} onClick={() => setShowSettings(!showSettings)}>Настройки</button></div></header>
+      <div><button type="button" aria-haspopup="dialog" onClick={() => { setSettingsFeedback(null); setSettingsSection('models'); }}>Настройки</button></div></header>
     <aside className="dialog-list"><button className="primary" disabled={!syncReady} onClick={() => { const c = fresh(); void selectConversation(c.id, { ...chat, conversations: [c, ...chat.conversations] }); }}>+ Новый диалог</button>
       <nav aria-label="Диалоги">{chat.conversations.map(c => <button className={c.id === active.id ? 'selected' : ''} key={c.id} onClick={() => void selectConversation(c.id)}>{c.title}<small>{c.messages.length} сообщений</small></button>)}</nav>
       <a href={url('/docs')} target="_blank" rel="noreferrer">API · документация</a></aside>
     <main className="compact-chat">
-      <div className="model-toolbar"><select aria-label="Модель" value={modelId} disabled={generating} onChange={e => { setModelId(e.target.value); const m = models.find(m => m.id === e.target.value); if (m?.runtime?.n_gpu_layers !== undefined) setGpuLayers(Number(m.runtime.n_gpu_layers)); }}>
-        <option value="">Выберите модель</option>{models.filter(m => m.type === 'LLM' && m.file_exists !== false).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
-        <button disabled={!model || generating} onClick={() => void modelAction(!loaded)}>{loaded ? 'Выгрузить' : 'Загрузить'}</button>
-        <span className="runtime-label">{loaded?.runtime_mode || 'По запросу'}</span>
+      <div className="model-toolbar">
+        {availableModels.length ? <>
+          <select aria-label="Модель" value={modelId} disabled={modelControlsBusy} onChange={e => selectModel(e.target.value)}>
+            {!modelId && <option value="">Выберите модель</option>}
+            {availableModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </select>
+          <button type="button" disabled={!model || modelControlsBusy} onClick={() => void modelAction(!loaded)}>
+            {loaded ? 'Выгрузить' : 'Загрузить в память'}
+          </button>
+        </> : <button type="button" className="primary" aria-haspopup="dialog" onClick={() => setSettingsSection('models')}>Подключить GGUF</button>}
+        <span className="runtime-label">{model ? modelStateText(currentRuntime) : settings ? 'Модель не подключена' : 'Получаем список моделей…'}</span>
         <label className="inline-check"><input type="checkbox" checked={memory} onChange={e => setMemory(e.target.checked)} />Память диалога</label>
-        <button aria-expanded={showContext} onClick={() => setShowContext(!showContext)}>Контекст · {nCtx}</button>
-        <button disabled={generating || !active.messages.length} onClick={() => void clearConversation()}>Очистить</button></div>
-      {showContext && <section className="context-panel" aria-label="Контекст и длина ответа">
-        <div className="settings-fields">
-          <label>Контекст, токенов<select aria-label="Пресет контекста" value={[2048, 4096, 8192, 16384].includes(nCtx) ? nCtx : 'custom'} onChange={e => { if (e.target.value !== 'custom') { const value = Number(e.target.value); setNCtx(value); setMaxTokens(Math.min(maxTokens, value - 257)); } }}>
-            <option value={2048}>2048 · экономно</option><option value={4096}>4096 · стандарт</option><option value={8192}>8192 · длинный диалог</option><option value={16384}>16384 · больше памяти</option><option value="custom">Свой размер</option></select>
-            <input aria-label="Размер контекста" type="number" min="512" max="131072" step="512" value={nCtx} onChange={e => setNCtx(Number(e.target.value))} /></label>
-          <label>Максимум на ответ<input aria-label="Максимум токенов ответа" type="number" min="1" max={Math.min(32768, nCtx - 257)} step="128" value={maxTokens} onChange={e => setMaxTokens(Number(e.target.value))} /></label>
-          <label className="inline-check"><input type="checkbox" checked={trimHistory} onChange={e => setTrimHistory(e.target.checked)} />Автоматически сокращать старые реплики</label>
-          <button disabled={generating || !!budgetError} onClick={() => void applySettings()}>Сохранить</button>
-        </div>
-        <p>Контекст делят история, инструкция, вопрос и ответ. Полная история остаётся в диалогах; сокращается только то, что отправляем модели. Больший контекст занимает больше памяти. Изменение размера перезагрузит модель со следующим запросом.</p>
-        {budgetError && <p className="context-warning" role="alert">{budgetError}</p>}
-      </section>}
-      {showSettings && <section className="compact-settings" aria-label="Настройки модели">
-        <div className="settings-fields"><label>Температура<input type="number" min="0" max="2" step="0.1" value={temperature} onChange={e => setTemperature(Number(e.target.value))} /></label>
-          <label>Вычисления<select value={gpuLayers} onChange={e => setGpuLayers(Number(e.target.value))}><option value={-1}>GPU · CUDA</option><option value={16}>CPU + GPU</option><option value={0}>CPU</option>{![-1, 16, 0].includes(gpuLayers) && <option value={gpuLayers}>GPU · {gpuLayers} слоёв</option>}</select></label>
-          <label>Разогрев<select value={warmPolicy} onChange={e => setWarmPolicy(e.target.value)}><option value="unload_after_idle">Выгружать после простоя</option><option value="keep_hot">Держать в памяти</option><option value="manual">Выгружать вручную</option></select></label>
-          <label className="inline-check"><input type="checkbox" checked={enableThinking} onChange={e => setEnableThinking(e.target.checked)} />Рассуждения Qwen</label>
-          <button disabled={generating} onClick={() => void applySettings()}>Сохранить</button></div>
-        <details><summary>Модели и дополнительные параметры</summary>
-          <label>Инструкция модели<textarea rows={2} value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)} /></label>
-          <form className="model-import" onSubmit={addModel}><input aria-label="Имя модели" placeholder="Имя модели" value={modelName} onChange={e => setModelName(e.target.value)} />
-            <input aria-label="Путь к GGUF" placeholder="Полный путь к .gguf на этом компьютере" value={modelPath} onChange={e => { setModelPath(e.target.value); setModelFile(null); }} />
-            <label>Или загрузить GGUF<input type="file" accept=".gguf" onChange={e => setModelFile(e.target.files?.[0] || null)} /></label>
-            <button disabled={generating || (!modelPath.trim() && !modelFile)}>Подключить модель</button></form>
-          <p>API: <code>{window.location.origin}/v1</code> · ID модели: <code>{modelId || '—'}</code></p></details>
-      </section>}
+        <button type="button" aria-haspopup="dialog" onClick={() => { setSettingsFeedback(null); setSettingsSection('generation'); }}>Контекст · {nCtx.toLocaleString('ru-RU')}</button>
+        <button type="button" disabled={generating || !active.messages.length} onClick={() => void clearConversation()}>Очистить</button>
+      </div>
       <div className="message-list" ref={scrollRef} role="log" aria-label="Сообщения" onScroll={event => {
         const list = event.currentTarget;
         followLatest.current = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
       }}>
-        {!active.messages.length && <div className="empty-chat"><h1>Начните диалог</h1><p>Выберите GGUF-модель и напишите сообщение.</p><p>С включённой памятью модель получает предыдущие реплики этого диалога.</p></div>}
+        {!active.messages.length && <div className="empty-chat">
+          <h1>{model ? 'Начните диалог' : 'Подключите модель для диалога'}</h1>
+          <p>{model ? 'Напишите сообщение. При первом запросе Runtime загрузит модель в память.' : 'Выберите GGUF с компьютера или укажите путь к готовому файлу модели.'}</p>
+          {!model && <button type="button" aria-haspopup="dialog" onClick={() => setSettingsSection('models')}>Открыть модели</button>}
+        </div>}
         {active.messages.map((message, index) => {
           const date = messageDate(message);
           return <article className={`chat-message ${message.role}`} key={message.id || index}>
@@ -277,13 +326,31 @@ export default function App() {
       </div>
       <form className="compact-composer" onSubmit={send}><textarea aria-label="Сообщение" placeholder="Напишите сообщение…" rows={3} value={input} onChange={e => setInput(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }} />
-        {generating ? <button type="button" onClick={() => void stop()}>Остановить</button> : <button className="primary" disabled={!input.trim() || !modelId || !syncReady || !!budgetError}>Отправить</button>}</form>
+        {pendingReply ? <button type="button" disabled={stopping} onClick={() => void stop()}>{stopping ? 'Останавливаем…' : 'Остановить'}</button>
+          : <button className="primary" disabled={!input.trim() || !model || !syncReady || modelControlsBusy || !!budgetError}>{sending ? 'Отправляем…' : 'Отправить'}</button>}</form>
       <div className={`context-meter ${contextFull || budgetError ? 'context-warning' : ''}`}>
         <progress aria-label="Примерная занятость контекста" max={Math.max(1, nCtx)} value={Math.min(estimatedContext, nCtx)} />
         <span>≈ {estimatedContext.toLocaleString('ru-RU')} / {nCtx.toLocaleString('ru-RU')} ток. · под ответ {maxTokens}
           {contextFull && (memory && trimHistory ? ' · старые реплики сократятся' : ' · запрос может не поместиться')}. Оценка; точная проверка перед генерацией.</span>
       </div>
-      <footer className="compact-status" role="status">{Object.values(networkErrors).filter(Boolean).join(' · ') || status}</footer>
+      <footer className="compact-status" role="status">
+        {status || Object.values(networkErrors).filter(Boolean).join(' · ') ||
+          (pendingReply ? <GenerationTimer message={pendingReply} loading={currentRuntime?.state === 'loading'} />
+            : modelOperation ? modelOperationText(modelOperation)
+            : modelFeedback ? modelFeedback.text
+            : engineBusy ? 'Runtime выполняет другой запрос.'
+            : syncReady && settings ? stateStatus(chat) : 'Подключаемся к Runtime…')}
+      </footer>
     </main>
+    {settingsSection && <RuntimeSettingsDialog
+      section={settingsSection} onSection={setSettingsSection} onClose={() => setSettingsSection(null)}
+      settings={settings} systemPrompt={systemPrompt} gpuLayers={gpuLayers}
+      saving={saving} settingsFeedback={settingsFeedback} onSave={applySettings}
+      models={models.filter(m => m.type === 'LLM')} model={model} runtime={currentRuntime}
+      modelControlsBusy={modelControlsBusy} operation={modelOperation} modelFeedback={modelFeedback} uploadLimit={uploadLimit}
+      onSelectModel={selectModel} onLoadModel={() => void modelAction(!loaded)} onConnectModel={addModel}
+      onCancelUpload={() => uploadController.current?.abort()}
+      apiBase={new URL(url('/v1'), window.location.origin).href} apiDocs={url('/docs')}
+    />}
   </div>;
 }

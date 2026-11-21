@@ -50,7 +50,7 @@ def openai_chat_completions(
     if not settings.get("server", {}).get("openai_compat_enabled", True):
         raise HTTPException(status_code=404, detail="OpenAI-compatible API is disabled")
     find_model(payload.model)
-    template_runtime(payload)
+    runtime_override = template_runtime(payload)
     request_id, log_path = create_request_log(payload.model, "openai_chat")
     messages = [msg.model_dump(exclude_none=True) for msg in payload.messages]
     if not payload.memory:
@@ -70,7 +70,7 @@ def openai_chat_completions(
             temperature=payload.temperature,
             max_tokens=payload.max_tokens,
             request_log_path=log_path,
-            runtime_override=template_runtime(payload),
+            runtime_override=runtime_override, truncate_history=payload.truncate_history,
             tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, parallel_tool_calls=payload.parallel_tool_calls, lease=lease,
         )
     except HTTPException as exc:
@@ -80,7 +80,8 @@ def openai_chat_completions(
         lease.close()
     result_message = result['choices'][0]['message']
     raw = result_message.get('content') or ''
-    runtime = result.get('_local_ai_gpp', {}).get('runtime', {})
+    extra = result.get('_local_ai_gpp', {})
+    runtime = extra.get('runtime', {})
     parsed = split_reasoning(raw, uses_reasoning(runtime))
     if result_message.get('tool_calls'):
         parsed['answer_state'] = 'tool_calls'
@@ -100,7 +101,7 @@ def openai_chat_completions(
             }
         ],
         "usage": result.get("usage", {}),
-        "_local_ai_gpp": {**parsed, "runtime": runtime},
+        "_local_ai_gpp": {**parsed, "runtime": runtime, "history_dropped": extra.get("history_dropped", 0)},
     }
 
 
@@ -122,6 +123,7 @@ def openai_events(payload, messages, log_path, lease=None):
     stream = stream_chat_completion(model_id=payload.model, messages=messages,
                                    temperature=payload.temperature, max_tokens=payload.max_tokens,
                                    request_log_path=log_path, runtime_override=template_runtime(payload),
+                                   truncate_history=payload.truncate_history,
                                    tools=[tool.model_dump() for tool in payload.tools], tool_choice=payload.tool_choice, parallel_tool_calls=payload.parallel_tool_calls, lease=lease)
     full_text, sent_answer, runtime = '', 0, {}
     try:
@@ -145,7 +147,9 @@ def openai_events(payload, messages, log_path, lease=None):
                 parsed = split_reasoning(event.get('content') or full_text, uses_reasoning(runtime))
                 if event.get('tool_calls'):
                     parsed['answer_state'] = 'tool_calls'
-                yield chunk({}, event.get('finish_reason') or 'stop', metadata={**parsed, 'runtime': runtime})
+                yield chunk({}, event.get('finish_reason') or 'stop', metadata={
+                    **parsed, 'runtime': runtime, 'history_dropped': event.get('history_dropped', 0),
+                })
                 if payload.stream_options.get('include_usage'):
                     yield chunk({}, usage=event.get('usage') or {})
             elif kind == 'tool_delta':

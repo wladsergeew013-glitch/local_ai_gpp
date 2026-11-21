@@ -29,3 +29,9 @@ def activity(state):
     callback = _callbacks.get("activity")
     if callback:
         callback(state)
+
+
+def refresh_appearance():
+    callback = _callbacks.get("refresh_appearance")
+    if callback:
+        callback()

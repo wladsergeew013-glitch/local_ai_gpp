@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from workspace.app.main import create_app
 from workspace.app import desktop_host
 from workspace.app.mini_avatar import clamp_position, position_window
+from workspace.app.control_access import UI_TOKEN_HEADER
 
 
 class Hook:
@@ -20,7 +21,7 @@ class Hook:
 
 def window():
     result = Mock()
-    result.events = types.SimpleNamespace(closing=Hook())
+    result.events = types.SimpleNamespace(closing=Hook(), before_show=Hook())
     return result
 
 
@@ -132,6 +133,7 @@ class DesktopOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch.object(
             desktop_host, "_callbacks", {}
         ), TestClient(create_app(root), base_url="http://127.0.0.1") as client:
+            client.headers[UI_TOKEN_HEADER] = client.app.state.ui_token
             status = client.get("/api/host/status").json()
             self.assertFalse(status["desktop"])
             self.assertEqual(status["mini_helper_owner"], "workspace")
@@ -146,6 +148,61 @@ class DesktopOwnershipTests(unittest.TestCase):
         self.assertEqual(
             clamp_position(6000, 4000, 154, 210, (0, 0, 1920, 1040)), (1766, 830)
         )
+
+
+    def test_appearance_is_live_validated_and_persisted_for_the_profile(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(desktop_host, "_callbacks", {}):
+            refresh = Mock()
+            desktop_host.register(refresh_appearance=refresh)
+            for first in (True, False):
+                with TestClient(create_app(root), base_url="http://127.0.0.1") as client:
+                    client.headers[UI_TOKEN_HEADER] = client.app.state.ui_token
+                    style = client.get("/api/bootstrap").json()["mini_helper_appearance"]
+                    self.assertEqual(style, "studio" if first else "pixel")
+                    if first:
+                        route = "/api/preferences/mini-helper"
+                        self.assertEqual(client.post(route, json={"style": "bad"}).status_code, 422)
+                        refresh.assert_not_called()
+                        self.assertEqual(client.post(route, json={"style": "pixel"}).json(), {"style": "pixel"})
+                        refresh.assert_called_once()
+
+    def test_panel_and_pointer_stay_attached_with_either_face_at_screen_edges(self):
+        from workspace.app.companion_layout import FACE_ANCHORS, attached_layout
+        for bounds in ((-1920,-120,0,960), (0,0,800,600), (0,0,480,740)):
+            left,top,right,bottom = bounds
+            for x in (left, (left+right-154)//2, right-154):
+                for y in (top, bottom-210):
+                    for anchor in FACE_ANCHORS.values():
+                        g = attached_layout((x,y),(512,304),bounds,anchor)
+                        gx,gy = g.origin
+                        self.assertEqual((gx+g.avatar[0],gy+g.avatar[1]),(x,y))
+                        self.assertTrue(left <= gx and top <= gy)
+                        self.assertTrue(gx+g.size[0] <= right and gy+g.size[1] <= bottom)
+                        tx,ty = g.pointer[2:4]
+                        self.assertTrue(x <= gx+tx <= x+154 and y <= gy+ty <= y+210)
+
+    def test_pointer_meets_visible_pixels_in_every_animation_frame(self):
+        from PIL import Image, ImageSequence
+        from workspace.app.companion_layout import AVATAR_SIZE, FACE_ANCHORS
+        from workspace.app.mini_avatar import assets, rendered_assets
+
+        sources = {
+            "pixel": sorted((assets() / "frames").glob("*.png")),
+            "studio": [rendered_assets() / (state + ".webp") for state in ("ready", "thinking", "speaking", "documents")],
+        }
+        for style, paths in sources.items():
+            self.assertTrue(paths)
+            left, right, y = FACE_ANCHORS[style]
+            for path in paths:
+                with Image.open(path) as animation:
+                    for number, frame in enumerate(ImageSequence.Iterator(animation)):
+                        picture = frame.convert("RGBA")
+                        picture.thumbnail(AVATAR_SIZE, Image.Resampling.LANCZOS)
+                        dx = (AVATAR_SIZE[0] - picture.width) // 2
+                        dy = (AVATAR_SIZE[1] - picture.height) // 2
+                        with self.subTest(file=path.name, frame=number):
+                            for x in (left, right):
+                                self.assertGreater(picture.getpixel((x-dx, y-dy))[3], 180)
 
 
 if __name__ == "__main__":

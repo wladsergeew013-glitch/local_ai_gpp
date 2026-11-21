@@ -2,43 +2,83 @@
 
 from __future__ import annotations
 import json
+import logging
+import secrets
 import sys
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from workspace.app.store import Store, data_root, identifier, now, SCHEMA_VERSION
 from workspace.app.task_service import TaskService
+from workspace.app.skills import SkillInput, SkillUse, list_skills, register, register_many
+from workspace.app.skill_storage import restore_skill_copies, save_skill_copies
 from workspace.app.runtime_client import RuntimeClient, local_url
 from workspace.app.history import reconcile
 from workspace.app.instance import Instance
+from workspace.app.control_access import (
+    UI_TOKEN_HEADER,
+    operator_token,
+    requires_operator,
+)
+from workspace.app.management import CONTROL_ROUTES, router as management_router
+from workspace.local_ai_control import CONTROL_TOKEN_HEADER, publish_control
 
 from workspace.app.version import VERSION
 
 
-def create_app(root=None):
+class CompanionPreference(BaseModel):
+    style: Literal["studio", "pixel"]
+
+
+def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=None):
     root = Path(root or data_root())
+    ui_token = operator_token(ui_token)
 
     @asynccontextmanager
     async def lifespan(application):
         with Instance(root / ".instance.lock"):
-            store = Store(root)
+            store = Store(root, skills_directory=skills_directory)
             service = TaskService(store)
             application.state.store = store
             application.state.tasks = service
             store.recover()
+            descriptor = None
             try:
+                with store.transaction() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    restore_skill_copies(store, db)
+                    save_skill_copies(store, db)
+                if control_port is not None:
+                    token = secrets.token_urlsafe(32)
+                    try:
+                        descriptor = publish_control(store.root, control_port, token)
+                    except (OSError, ValueError):
+                        logging.getLogger(__name__).warning("Workspace local control could not start.", exc_info=True)
+                    else:
+                        application.state.control_token = token
                 yield
             finally:
                 import asyncio
 
-                await asyncio.to_thread(service.close)
-                store.close()
+                application.state.control_token = None
+                try:
+                    if descriptor is not None:
+                        descriptor.unlink(missing_ok=True)
+                finally:
+                    try:
+                        await asyncio.to_thread(service.close)
+                    finally:
+                        store.close()
 
     app = FastAPI(title="Local AI Workspace", version=VERSION, lifespan=lifespan)
+    app.state.ui_token = ui_token
+    app.state.control_token = None
+    app.include_router(management_router)
 
     @app.middleware("http")
     async def boundary(request, call_next):
@@ -54,6 +94,22 @@ def create_app(root=None):
                 or parsed.netloc != request.headers.get("host")
             ):
                 return JSONResponse({"detail": "Foreign browser origin denied"}, 403)
+        path = request.scope["path"]
+        if (request.method, path) in CONTROL_ROUTES:
+            token = app.state.control_token
+            supplied = request.headers.get(CONTROL_TOKEN_HEADER, "")
+            if token is None or not secrets.compare_digest(supplied.encode(), token.encode()):
+                return JSONResponse({"detail": "Workspace local control credential required."}, 401)
+        elif requires_operator(path, request.method):
+            supplied = request.headers.get(UI_TOKEN_HEADER, "")
+            if not secrets.compare_digest(supplied.encode(), ui_token.encode()):
+                return JSONResponse(
+                    {
+                        "detail": "WORKSPACE_ACCESS_REQUIRED: откройте Workspace из приложения или по ссылке из терминала."
+                    },
+                    401,
+                    headers={"Cache-Control": "no-store"},
+                )
         return await call_next(request)
 
     @app.exception_handler(ValueError)
@@ -112,24 +168,50 @@ def create_app(root=None):
             "sdk_version": "0.2.2rc2",
         }
 
+    @app.post("/api/preferences/mini-helper")
+    def companion_preference(payload: CompanionPreference, request: Request):
+        from workspace.app import desktop_host
+
+        store(request).set_companion_appearance(payload.style)
+        desktop_host.refresh_appearance()
+        return {"style": payload.style}
+
     @app.get("/api/bootstrap")
     def bootstrap(request: Request):
         db = store(request)
+        rows = db.rows(
+            "SELECT id,CASE WHEN project_id='__direct_chats__' THEN NULL ELSE project_id END AS project_id,"
+            "provider_id,title,status,revision,updated_at,COALESCE(json_extract(details,'$.mode'),'agent') AS mode,"
+            "json_extract(details,'$.skill_id') AS skill_id,json_extract(details,'$.skill_ids') AS skill_ids,"
+            "json_extract(details,'$.skill_disabled_sections') AS skill_disabled_sections FROM tasks ORDER BY created_at DESC"
+        )
+        for row in rows:
+            row["skill_disabled_sections"] = json.loads(row["skill_disabled_sections"] or "{}")
+            row["skill_ids"] = (json.loads(row["skill_ids"]) if row["skill_ids"] is not None
+                                else [row["skill_id"]] if row["skill_id"] else [])
         return {
             "version": VERSION,
+            "mini_helper_appearance": db.companion_appearance(),
             "projects": db.rows(
                 "SELECT p.*, COALESCE(s.source, 'folder') AS source, COALESCE(s.url, '') AS github_url FROM projects p LEFT JOIN project_sources s ON p.id=s.project_id WHERE p.id!='__direct_chats__' ORDER BY p.created_at DESC"
             ),
             "providers": db.rows(
                 "SELECT id,name,base_url,model,(api_key!='') AS api_key_configured FROM providers"
             ),
-            "tasks": db.rows(
-                "SELECT id,CASE WHEN project_id='__direct_chats__' THEN NULL ELSE project_id END AS project_id,provider_id,title,status,revision,updated_at,COALESCE(json_extract(details,'$.mode'),'agent') AS mode FROM tasks ORDER BY created_at DESC"
-            ),
+            "skills": list_skills(db),
+            "tasks": rows,
             "connectors": db.rows(
                 "SELECT id,name,base_url,allow_write,(api_key!='') AS api_key_configured FROM connectors"
             ),
         }
+
+    @app.post("/api/skills")
+    def register_skill(payload: SkillInput, request: Request):
+        return register(store(request), payload)
+
+    @app.post("/api/skills/import")
+    def import_skills(payload: list[SkillInput], request: Request):
+        return register_many(store(request), payload)
 
     @app.post("/api/projects")
     def project(payload: ProjectInput, request: Request):
@@ -162,12 +244,8 @@ def create_app(root=None):
     @app.post("/api/providers/probe")
     def probe(payload: ProviderInput):
         client = RuntimeClient(payload.model_dump())
-        models = client.request("GET", "models")
-        result = {
-            "models": models.get("data", []),
-            "ready": client.request("GET", "runtime/readiness"),
-        }
-        if payload.model:
+        result = client.probe()
+        if result["model_available"]:
             result["capabilities"] = client.capabilities()
         return result
 
@@ -203,10 +281,7 @@ def create_app(root=None):
         client = RuntimeClient(
             {**payload.model_dump(), "api_key": payload.api_key or old["api_key"]}
         )
-        return {
-            "models": client.request("GET", "models").get("data", []),
-            "ready": client.request("GET", "runtime/readiness"),
-        }
+        return client.probe()
 
     @app.post("/api/chats")
     @app.post("/api/tasks")
@@ -261,6 +336,16 @@ def create_app(root=None):
             "cursor": rows[-1]["seq"] if rows else after,
         }
 
+    @app.get("/api/chats/{task_id}/artifacts/{artifact_id}")
+    def chat_artifact(task_id: str, artifact_id: str, request: Request):
+        from workspace.app.skill_resources import download
+        return download(store(request), task_id, artifact_id)
+
+    @app.post("/api/chats/{task_id}/documents")
+    async def add_document(task_id: str, filename: str, request: Request):
+        from workspace.app.chat_documents import upload
+        return await upload(store(request), task_id, filename, request)
+
     @app.get("/api/chats/{task_id}/messages")
     def chat_messages(task_id: str, request: Request, version: int = -1):
         from workspace.app.conversation_messages import MESSAGE_FILTER, project_messages
@@ -284,9 +369,15 @@ def create_app(root=None):
 
     @app.post("/api/chats/{task_id}/start")
     @app.post("/api/tasks/{task_id}/start")
-    def start(task_id: str, payload: TaskAction, request: Request):
+    def start(task_id: str, payload: StartAction, request: Request):
         return tasks(request).start(
-            task_id, payload.revision, workspace_url=str(request.base_url)
+            task_id,
+            payload.revision,
+            new_prompt=payload.prompt,
+            memory=payload.memory,
+            skills=payload.selected_skills(),
+            attachments=payload.attachments,
+            workspace_url=str(request.base_url),
         )
 
     @app.post("/api/chats/{task_id}/stop")
@@ -317,6 +408,8 @@ def create_app(root=None):
             payload.revision,
             new_prompt=payload.prompt,
             memory=payload.memory,
+            skills=payload.selected_skills(),
+            attachments=payload.attachments,
             workspace_url=str(request.base_url),
         )
 
@@ -363,12 +456,6 @@ def create_app(root=None):
         from workspace.app.connectors import read_items
 
         return read_items(store(request).one("connectors", connector_id))
-
-    @app.post("/api/connectors/{connector_id}/items")
-    def connector_write(connector_id: str, payload: ConnectorWrite, request: Request):
-        from workspace.app.connectors import write_item
-
-        return write_item(store(request), connector_id, payload.model_dump())
 
     @app.post("/api/chats/{task_id}/mcp")
     @app.post("/api/tasks/{task_id}/mcp")
@@ -440,8 +527,23 @@ class TaskAction(BaseModel):
     revision: int = Field(ge=1)
 
 
-class Followup(TaskAction):
+class ChatSkillAction(TaskAction):
     memory: bool | None = None
+    skill: SkillUse | None = None
+    skills: list[SkillUse] | None = None
+    attachments: list[str] = Field(default_factory=list)
+
+    def selected_skills(self):
+        if self.skills is not None and self.skill is not None:
+            raise ValueError("Передайте список skills или одиночное поле skill.")
+        return [self.skill] if self.skill is not None else self.skills
+
+
+class StartAction(ChatSkillAction):
+    prompt: str | None = Field(default=None, min_length=1, max_length=100000)
+
+
+class Followup(ChatSkillAction):
     prompt: str = Field(min_length=1, max_length=100000)
 
 
@@ -450,13 +552,6 @@ class ConnectorInput(BaseModel):
     base_url: str
     api_key: str = ""
     allow_write: bool = False
-
-
-class ConnectorWrite(BaseModel):
-    title: str = Field(min_length=1, max_length=500)
-    body: str = Field(max_length=20000)
-    action_id: str = Field(min_length=16, max_length=128)
-    approved: bool = False
 
 
 app = create_app()

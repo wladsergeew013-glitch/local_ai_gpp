@@ -13,6 +13,8 @@ from workspace.app.store import ACTIVE, SCHEMA_VERSION, identifier, now
 from workspace.app.runtime_client import RuntimeClient
 from workspace.app.owned_process import OwnedProcess
 from workspace.app import history, project_diff
+from workspace.app.control_access import UI_TOKEN_ENV
+from workspace.app.dsh_profile import agent_limits
 
 
 class TaskService:
@@ -20,9 +22,11 @@ class TaskService:
         self.store = store
         self.lock = threading.RLock()
         self.processes = {}
-        self.tokens = {}
+        self.runtime_tokens = {}
+        self.connector_tokens = {}
         self.results = {}
         self.connector_waiters = {}
+        self.connector_discoveries = {}
 
     def create(
         self,
@@ -40,6 +44,8 @@ class TaskService:
             raise ValueError("Unsupported permission preset.")
         if mode not in {"chat", "agent"}:
             raise ValueError("Unknown conversation mode.")
+        if mode == "chat" and connector_ids:
+            raise ValueError("Application tools require file-agent mode.")
         if not project_id:
             if mode == "agent":
                 raise ValueError("Для доступа к файлам сначала подключите проект.")
@@ -127,6 +133,8 @@ class TaskService:
         new_prompt=None,
         workspace_url=None,
         memory=None,
+        skills=None,
+        attachments=(),
     ):
         with self.lock:
             if self.processes:
@@ -134,13 +142,25 @@ class TaskService:
             task = self.store.one("tasks", task_id)
             if task["revision"] != expected:
                 raise ValueError("TASK_CONFLICT: refresh before starting.")
-            resume = task["status"] != "queued"
-            if task["status"] in ACTIVE:
+            status = task["status"]
+            if status in ACTIVE:
                 raise ValueError("TASK_ALREADY_RUNNING")
-            if resume and not restore_only and not (new_prompt and new_prompt.strip()):
+            initial = status in {"queued", "retryable"}
+            if not restore_only and status in {"interrupted", "uncertain"}:
+                raise ValueError(
+                    "Restore and review canonical history before sending a new instruction."
+                )
+            if new_prompt is not None and not new_prompt.strip():
+                raise ValueError("Введите текст сообщения.")
+            if not initial and not restore_only and new_prompt is None:
                 raise ValueError(
                     "RECOVERY_REQUIRES_RECONCILIATION: restore history, then explicitly send a new instruction."
                 )
+            prompt = (
+                new_prompt
+                if new_prompt is not None
+                else task["details"].get("initial_prompt", task["prompt"])
+            )
             if task["details"].get("mode") == "chat":
                 if restore_only:
                     return self.store.update_task(
@@ -148,42 +168,72 @@ class TaskService:
                         "restored",
                         {"partial": "", "error": "", "replayed": False},
                     )
-                return self._start_chat(task, new_prompt or task["prompt"], memory)
-            if resume:
-                history.reconcile(self.store, task)
+                return self._start_chat(task, prompt, memory, skills, attachments)
+            if skills or attachments:
+                raise ValueError("Навыки доступны в обычном диалоге.")
+            session = history.reconcile(self.store, task)
+            resume = session["session_exists"]
+            if initial and resume and not restore_only:
+                self.store.update_task(task_id, "uncertain")
+                raise ValueError("Найдена сохранённая сессия. Сначала восстановите историю.")
+            if restore_only and not resume:
+                if self._legacy_startup_failure(task):
+                    return self.store.update_task(
+                        task_id,
+                        "retryable",
+                        {
+                            "initial_prompt": task["prompt"],
+                            "session_opened": False,
+                            "input_dispatched": False,
+                            "error": "Исправьте параметры модели и повторите отправку.",
+                        },
+                    )
+                raise ValueError(
+                    "Сохранённая сессия не найдена. Восстановить историю этого запуска нельзя."
+                )
+            if not initial and not resume:
+                raise ValueError("Продолжение требует сохранённой сессии.")
             provider = self.store.one("providers", task["provider_id"])
             client = RuntimeClient(provider)
             caps = client.capabilities(load=True)
+            agent_limits(caps)
             project = self.store.one("projects", task["project_id"])
+            project_path = Path(project["path"]).resolve()
+            workspace_data = self.store.root.resolve()
+            if workspace_data.is_relative_to(project_path) or any(
+                project_path.is_relative_to(workspace_data / directory)
+                for directory in ("tasks", "snapshots", "logs")
+            ):
+                raise ValueError(
+                    "Выберите папку проекта отдельно от служебных данных Workspace."
+                )
             task_dir = self.store.root / "tasks" / task_id
             task_dir.mkdir(parents=True, exist_ok=True)
             baseline = task_dir / "baseline"
-            if not baseline.exists():
+            if not (baseline / "manifest.json").is_file():
                 self.store.update_task(
                     task_id,
-                    details={
-                        "baseline": project_diff.capture(
-                            Path(project["path"]), baseline
-                        )
-                    },
+                    details={"baseline": project_diff.capture(project_path, baseline)},
                 )
             token = secrets.token_urlsafe(32)
-            self.tokens[task_id] = token
-            self.results.pop(task_id, None)
-            self.store.update_task(task_id, "starting", {"restoring": restore_only})
             config = {
-                "provider": provider,
+                "provider": {
+                    "base_url": provider["base_url"],
+                    "model": provider["model"],
+                    "api_key": provider["api_key"],
+                },
                 "capabilities": caps,
                 "owner_id": task_id,
                 "owner_token": token,
                 "session_id": task["session_id"],
                 "dsh_home": str(task_dir / "dsh"),
-                "project_path": project["path"],
-                "prompt": new_prompt or task["prompt"],
+                "project_path": str(project_path),
+                "prompt": prompt,
                 "permission": task["permission"],
                 "resume": resume,
                 "restore_only": restore_only,
             }
+            connector_token = None
             if task["details"].get("connector_ids"):
                 if not workspace_url:
                     raise ValueError(
@@ -192,6 +242,8 @@ class TaskService:
                 config["connector_endpoint"] = (
                     workspace_url.rstrip("/") + "/api/tasks/" + task_id + "/mcp"
                 )
+                connector_token = secrets.token_urlsafe(32)
+                config["connector_token"] = connector_token
             command = (
                 [
                     str(
@@ -204,6 +256,7 @@ class TaskService:
                 else [sys.executable, "-m", "workspace.app.dsh_runner"]
             )
             env = os.environ.copy()
+            env.pop(UI_TOKEN_ENV, None)
             if getattr(sys, "frozen", False):
                 for key in list(env):
                     if key.startswith("_PYI_") or key.startswith("PYINSTALLER_"):
@@ -212,6 +265,19 @@ class TaskService:
             env["PYTHONUTF8"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             root = Path(__file__).resolve().parents[2]
+            self.results.pop(task_id, None)
+            details = {
+                "restoring": restore_only,
+                "session_opened": resume,
+                "input_dispatched": False,
+                "error": "",
+            }
+            if initial:
+                details["initial_prompt"] = prompt
+            self.store.update_task(task_id, "starting", details)
+            self.runtime_tokens[task_id] = token
+            if connector_token:
+                self.connector_tokens[task_id] = connector_token
             try:
                 process = OwnedProcess(
                     command,
@@ -220,40 +286,88 @@ class TaskService:
                     lambda event: self._event(task_id, event),
                     lambda code, error: self._exit(task_id, code, error),
                 )
-                self.processes[task_id] = process
-                self.store.event(
+            except Exception as exc:
+                self.runtime_tokens.pop(task_id, None)
+                self.connector_tokens.pop(task_id, None)
+                self.store.update_task(
                     task_id,
-                    "input_admitted",
-                    {
-                        "prompt": config["prompt"] if not restore_only else None,
-                        "restore_only": restore_only,
-                        "replayed": False,
-                    },
+                    "retryable" if not resume else "uncertain",
+                    {"error": str(exc)},
                 )
+                raise
+            self.processes[task_id] = process
+            self.store.event(
+                task_id,
+                "input_admitted",
+                {
+                    "prompt": prompt if not restore_only else None,
+                    "restore_only": restore_only,
+                    "replayed": False,
+                },
+            )
+            try:
                 process.send(config)
             except Exception as exc:
-                self.processes.pop(task_id, None)
-                self.store.update_task(task_id, "failed", {"error": str(exc)})
+                self.results[task_id] = {"kind": "startup_failed", "message": str(exc)}
+                process.abort()
                 raise
         return self.store.one("tasks", task_id)
 
-    def _start_chat(self, task, prompt, memory):
+    def _legacy_startup_failure(self, task):
+        if task["status"] not in {"uncertain", "interrupted"}:
+            return False
+        rows = self.store.rows(
+            "SELECT kind,payload FROM events WHERE task_id=? AND kind IN ('started','dsh','diagnostic')",
+            (task["id"],),
+        )
+        # Older adapters reported profile validation failures only on stderr.
+        if any(row["kind"] != "diagnostic" for row in rows):
+            return False
+        return any(
+            json.loads(row["payload"])
+            .get("message", "")
+            .startswith(
+                (
+                    "ValueError: MODEL_CONTEXT_TOO_SMALL:",
+                    "ValueError: MODEL_TOOLS_UNAVAILABLE:",
+                )
+            )
+            for row in rows
+        )
+
+    def _start_chat(self, task, prompt, memory, skills=None, attachments=()):
         from workspace.app.chat_run import ChatRun
         from workspace.app.desktop_host import activity
+        from workspace.app.skills import SkillUse, prepare_skills
+        from workspace.app.chat_documents import active_documents, resolve
 
         task_id = task["id"]
-        token = secrets.token_urlsafe(32)
-        self.tokens[task_id] = token
         remember = task["details"].get("memory", True) if memory is None else memory
+        if skills is None:
+            ids = task["details"].get("skill_ids")
+            if ids is None:
+                old = task["details"].get("skill_id")
+                ids = [old] if old else [r["id"] for r in self.store.rows("SELECT id FROM markdown_skills ORDER BY rowid")]
+            sections = task["details"].get("skill_disabled_sections", {})
+            skills = [SkillUse(id=key, disabled_sections=sections.get(key, [])) for key in ids]
+        automatic = not any(s.attachment or s.attachments for s in skills)
+        if not automatic and attachments:
+            raise ValueError("Передайте файлы в сообщении или в явном вызове навыка.")
+        new_documents = resolve(self.store, task_id, attachments)
+        documents = active_documents(self.store, task_id, new_documents, prompt, remember) if automatic else []
+        contexts, selection = prepare_skills(self.store, task, skills, automatic=automatic,
+                                             reuse=not automatic or (remember and not documents))
+        token = secrets.token_urlsafe(32)
+        self.runtime_tokens[task_id] = token
         self.store.update_task(
-            task_id, "running", {"partial": "", "error": "", "memory": remember}
+            task_id, "running", {"partial": "", "error": "", "memory": remember, **selection}
         )
 
         def finished(status, error):
             with self.lock:
                 self.store.update_task(task_id, status, {"partial": "", "error": error})
                 self.processes.pop(task_id, None)
-                self.tokens.pop(task_id, None)
+                self.runtime_tokens.pop(task_id, None)
                 activity("error" if status == "failed" else "idle")
 
         run = ChatRun(
@@ -264,6 +378,8 @@ class TaskService:
             prompt,
             remember,
             finished,
+            skill_contexts=contexts,
+            automatic=automatic, documents=documents, new_documents=new_documents,
         )
         self.processes[task_id] = run
         activity("running")
@@ -301,11 +417,17 @@ class TaskService:
             self.store.update_task(task_id, "awaiting_permission")
             event = {**event, "approval_id": approval_id}
         elif kind == "started":
-            activity("running")
-            self.store.update_task(task_id, "running")
+            with self.lock:
+                current = self.store.one("tasks", task_id)
+                status = "running" if current["status"] == "starting" else None
+                self.store.update_task(task_id, status, {"session_opened": True})
+                if status:
+                    activity(status)
+        elif kind == "input_dispatching":
+            self.store.update_task(task_id, details={"input_dispatched": True})
         elif kind == "identity":
             self.store.update_task(task_id, details={"adapter": event})
-        elif kind in {"result", "uncertain", "restored"}:
+        elif kind in {"result", "uncertain", "restored", "startup_failed"}:
             self.results[task_id] = event
         self.store.event(task_id, kind, event, key)
 
@@ -314,6 +436,9 @@ class TaskService:
 
         activity("idle")
         with self.lock:
+            self.runtime_tokens.pop(task_id, None)
+            self.connector_tokens.pop(task_id, None)
+            self.connector_discoveries.pop(task_id, None)
             current = self.store.one("tasks", task_id)
             result = self.results.pop(task_id, None)
             if current["status"] == "stopping":
@@ -322,7 +447,7 @@ class TaskService:
                 code != 0
                 or error
                 or result is None
-                or result.get("kind") == "uncertain"
+                or result.get("kind") in {"uncertain", "startup_failed"}
             ):
                 status = "uncertain"
             elif result["kind"] == "restored":
@@ -342,12 +467,23 @@ class TaskService:
             }
             try:
                 details["history"] = history.reconcile(self.store, current)
-                if (
-                    status in {"completed", "restored"}
-                    and details["history"]["canonical_events"] == 0
+                session_exists = details["history"]["session_exists"]
+                if (status == "restored" and not session_exists) or (
+                    status == "completed" and not details["history"]["canonical_events"]
                 ):
                     details["history_error"] = "DSH canonical history is missing."
                     status = "uncertain"
+                if (
+                    status == "uncertain"
+                    and not error
+                    and result
+                    and result["kind"] == "startup_failed"
+                    and not session_exists
+                    and not current["details"].get("session_opened")
+                    and not current["details"].get("input_dispatched")
+                ):
+                    status = "retryable"
+                    details["error"] = result["message"]
             except Exception as exc:
                 details["history_error"] = str(exc)
                 status = "uncertain"
@@ -358,10 +494,10 @@ class TaskService:
                 {"status": status, "exit_code": code, "automatic_retry": False},
             )
             self.processes.pop(task_id, None)
-            self.tokens.pop(task_id, None)
+            self._cancel_connector_waiters(task_id)
             with self.store.transaction() as db:
                 db.execute(
-                    "UPDATE approvals SET status='cancelled',decided_at=? WHERE task_id=? AND status='pending'",
+                    "UPDATE approvals SET status='cancelled',decided_at=? WHERE task_id=? AND status IN ('pending','granted')",
                     (now(), task_id),
                 )
 
@@ -373,30 +509,39 @@ class TaskService:
                     "APPROVAL_FINISHED: one-operation decisions cannot be reused."
                 )
             process = self.processes.get(approval["task_id"])
-            if process is None:
+            current = self.store.one("tasks", approval["task_id"])
+            if process is None or current["status"] == "stopping":
                 raise ValueError("TASK_NOT_RUNNING")
             if approval["kind"] in {"approval", "connector"} and value.get(
                 "outcome"
             ) not in {"allowed-once", "rejected", "cancelled"}:
                 raise ValueError("Invalid approval decision")
-            db.execute(
-                "UPDATE approvals SET status=?,decided_at=? WHERE id=?",
-                ("answered", now(), approval_id),
-            )
-            self.store.event(
-                approval["task_id"],
-                "permission_decision",
-                {"approval_id": approval_id, "value": value},
-            )
+            waiter = None
+            status = "answered"
             if approval["kind"] == "connector":
                 waiter = self.connector_waiters.get(approval_id)
                 if waiter is None:
                     raise ValueError(
                         "APPROVAL_FINISHED: connector request is no longer waiting."
                     )
+                status = (
+                    "granted"
+                    if value["outcome"] == "allowed-once"
+                    else value["outcome"]
+                )
+            db.execute(
+                "UPDATE approvals SET status=?,decided_at=? WHERE id=?",
+                (status, now(), approval_id),
+            )
+            self.store.event(
+                approval["task_id"],
+                "permission_decision",
+                {"approval_id": approval_id, "value": value},
+            )
+            if waiter is not None:
+                self.store.update_task(approval["task_id"], "running")
                 waiter["value"] = value
                 waiter["event"].set()
-                self.store.update_task(approval["task_id"], "running")
                 return {"accepted": True}
             try:
                 process.send(
@@ -420,14 +565,11 @@ class TaskService:
             if expected is not None and task["revision"] != expected:
                 raise ValueError("TASK_CONFLICT: refresh before stopping.")
             process = self.processes.get(task_id)
-            token = self.tokens.get(task_id)
+            token = self.runtime_tokens.get(task_id)
             if process is None:
                 return {"confirmed": True, "active": False}
             self.store.update_task(task_id, "stopping")
-            for waiter in self.connector_waiters.values():
-                if waiter["task_id"] == task_id:
-                    waiter["value"] = {"outcome": "cancelled"}
-                    waiter["event"].set()
+            self._cancel_connector_waiters(task_id)
         result = process.stop()
         cancellation = {"cancelled": 0}
         if token:
@@ -442,12 +584,34 @@ class TaskService:
         )
         return result
 
+    def _cancel_connector_waiters(self, task_id):
+        for waiter in self.connector_waiters.values():
+            if waiter["task_id"] == task_id:
+                waiter["value"] = {"outcome": "cancelled"}
+                waiter["event"].set()
+
     def approve_connector(self, task_id, payload):
         approval_id = identifier()
-        waiter = {"task_id": task_id, "event": threading.Event(), "value": None}
+        waiter = {
+            "task_id": task_id,
+            "action_id": payload["action_id"],
+            "event": threading.Event(),
+            "value": None,
+        }
         with self.lock, self.store.transaction() as db:
-            if task_id not in self.processes:
+            current = self.store.one("tasks", task_id)
+            if task_id not in self.processes or current["status"] not in {
+                "running",
+                "awaiting_permission",
+            }:
                 raise ValueError("TASK_NOT_RUNNING")
+            if any(
+                w["action_id"] == payload["action_id"]
+                for w in self.connector_waiters.values()
+            ):
+                raise ValueError(
+                    "CONNECTOR_APPROVAL_PENDING: the operation is already awaiting a decision."
+                )
             self.connector_waiters[approval_id] = waiter
             db.execute(
                 "INSERT INTO approvals VALUES(?,?,?,?,?,?,?)",
@@ -468,9 +632,12 @@ class TaskService:
                 {"approval_id": approval_id, **payload},
             )
         try:
-            if not waiter["event"].wait(300):
-                return False
-            return (waiter["value"] or {}).get("outcome") == "allowed-once"
+            if (
+                waiter["event"].wait(300)
+                and (waiter["value"] or {}).get("outcome") == "allowed-once"
+            ):
+                return approval_id
+            return None
         finally:
             with self.lock, self.store.transaction() as db:
                 self.connector_waiters.pop(approval_id, None)
@@ -485,8 +652,13 @@ class TaskService:
         baseline = self.store.root / "tasks" / task_id / "baseline"
         return (
             project_diff.compare(Path(project["path"]), baseline)
-            if baseline.exists()
-            else {"files": [], "diff": ""}
+            if (baseline / "manifest.json").is_file()
+            else {
+                "files": [],
+                "diff": "",
+                "baseline_available": False,
+                "complete": False,
+            }
         )
 
     def close(self):
