@@ -22,6 +22,59 @@ from workspace.local_ai_control import portable_profile
 
 
 class SkillBundleTests(unittest.TestCase):
+    def test_copied_package_restores_imported_markdown_in_a_fresh_profile(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        package = root / "before-move"
+        bundle = root / "vendor"
+        bundle.mkdir()
+        markdown = ('\ufeff---\r\nname: Check records\r\n---\r\nReview the attached record.\r\n'
+                    '```workspace-mcp\r\n{"url":"http://localhost:8789/mcp","tool":"lookup"}\r\n```\r\n')
+        (bundle / "SKILL.md").write_bytes(markdown.encode("utf-8"))
+        (bundle / "key.txt").write_text("fixture-key", encoding="utf-8")
+        manifest = bundle / "settings.json"
+        manifest.write_text(json.dumps({"url": "http://localhost:8789/mcp", "tokenFile": "key.txt",
+                                        "skillGroup": {"id": "records", "name": "Records"},
+                                        "skills": [{"path": "SKILL.md"}]}), encoding="utf-8")
+        profile = root / "before-profile"
+        copies = package / "Skills"
+        self.assertEqual(import_manifest(profile, manifest, skills_directory=copies)["added"], 1)
+        app = create_app(profile, skills_directory=copies)
+        headers = {UI_TOKEN_HEADER: app.state.ui_token}
+        with TestClient(app, base_url="http://127.0.0.1", headers=headers) as api:
+            draft = "Summarize the previous message.\r\n"
+            uploaded = api.post("/api/skills/import", json=[{"filename": "summary.md", "markdown": draft}])
+            self.assertEqual(uploaded.status_code, 200, uploaded.text)
+            original = api.get("/api/bootstrap").json()["skills"]
+        self.assertCountEqual([file.read_bytes() for file in copies.glob("*.md")],
+                              [markdown.encode("utf-8"), draft.encode("utf-8")])
+
+        moved = package.rename(root / "after-move")
+        bundle.rename(root / "vendor-unavailable")
+        for _ in range(2):
+            app = create_app(root / "after-profile", skills_directory=moved / "Skills")
+            with TestClient(app, base_url="http://127.0.0.1", headers={UI_TOKEN_HEADER: app.state.ui_token}) as api:
+                self.assertEqual(api.get("/api/bootstrap").json()["skills"], original)
+                self.assertEqual(original[0]["group"]["name"], "Records")
+                self.assertNotIn("api_key", original[0])
+                restored = app.state.store.rows("SELECT definition FROM markdown_skills WHERE id=?", (original[0]["id"],))
+                self.assertEqual(json.loads(restored[0]["definition"])["api_key"], "fixture-key")
+
+    def test_preexisting_workspace_skills_get_markdown_copies_on_startup(self):
+        profile = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        store = Store(profile)
+        item = skills.skill_definition(skills.SkillInput(filename="notes.md", markdown="Summarize notes."))
+        del item["source_markdown"]
+        try:
+            with store.transaction() as db:
+                db.execute("INSERT INTO markdown_skills(id,definition) VALUES(?,?)", (item["id"], json.dumps(item)))
+        finally:
+            store.close()
+        app = create_app(profile)
+        with TestClient(app, base_url="http://127.0.0.1", headers={UI_TOKEN_HEADER: app.state.ui_token}) as api:
+            self.assertEqual(api.get("/api/bootstrap").json()["skills"][0]["id"], item["id"])
+            copy, = (profile / "Skills").glob("*.md")
+            self.assertIn("Summarize notes.", copy.read_text("utf-8"))
+
     def test_profile_move_relocates_managed_projects_and_keeps_external_folder(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         external = directory / "linked"

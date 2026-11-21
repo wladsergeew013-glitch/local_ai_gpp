@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from workspace.app.store import Store, data_root, identifier, now, SCHEMA_VERSION
 from workspace.app.task_service import TaskService
 from workspace.app.skills import SkillInput, SkillUse, list_skills, register, register_many
+from workspace.app.skill_storage import restore_skill_copies, save_skill_copies
 from workspace.app.runtime_client import RuntimeClient, local_url
 from workspace.app.history import reconcile
 from workspace.app.instance import Instance
@@ -34,20 +35,24 @@ class CompanionPreference(BaseModel):
     style: Literal["studio", "pixel"]
 
 
-def create_app(root=None, *, ui_token=None, control_port=None):
+def create_app(root=None, *, ui_token=None, control_port=None, skills_directory=None):
     root = Path(root or data_root())
     ui_token = operator_token(ui_token)
 
     @asynccontextmanager
     async def lifespan(application):
         with Instance(root / ".instance.lock"):
-            store = Store(root)
+            store = Store(root, skills_directory=skills_directory)
             service = TaskService(store)
             application.state.store = store
             application.state.tasks = service
             store.recover()
             descriptor = None
             try:
+                with store.transaction() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    restore_skill_copies(store, db)
+                    save_skill_copies(store, db)
                 if control_port is not None:
                     token = secrets.token_urlsafe(32)
                     try:

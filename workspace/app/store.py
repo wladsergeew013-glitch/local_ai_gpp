@@ -28,8 +28,10 @@ def data_root():
 
 
 class Store:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, skills_directory: Path | None = None):
         self.root = root.resolve()
+        self.skills_directory = (skills_directory.parent.resolve() / skills_directory.name
+                                 if skills_directory is not None else self.root / "Skills")
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.connection = sqlite3.connect(

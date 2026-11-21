@@ -43,12 +43,13 @@ async function readSource(file: File): Promise<ImportFile> {
       throw new Error("Выберите файл Markdown (.md).");
     if (!file.size || file.size > 128000)
       throw new Error("Нужно от 1 до 32 000 символов.");
-    const markdown = (await file.text())
-      .replace(/^\uFEFF/, "")
-      .replace(/\r\n/g, "\n");
+    const markdown = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+      await file.arrayBuffer(),
+    );
     if (!markdown.trim() || [...markdown].length > 32000)
       throw new Error("Нужно от 1 до 32 000 символов.");
-    const instructions = markdown.replace(/^---\n[\s\S]*?\n---(?:\n|$)/, "");
+    const instructions = markdown.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n")
+      .replace(/^---\n[\s\S]*?\n---(?:\n|$)/, "");
     const block = /^```workspace-mcp[ \t]*\n([\s\S]*?)\n```[ \t]*$/m.exec(
       instructions,
     );

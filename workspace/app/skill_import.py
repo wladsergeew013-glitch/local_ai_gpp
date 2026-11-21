@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from workspace.app.skills import SkillInput, local_mcp_url, skill_definition
+from workspace.app.skill_storage import restore_skill_copies, save_skill_copies
 from workspace.app.store import Store
 
 
@@ -24,7 +25,7 @@ def manifest_group(config, endpoint):
     return {"id": key, "name": name.strip(), "key": scope}
 
 
-def import_manifest(profile, manifest_path, bundle_root=None):
+def import_manifest(profile, manifest_path, bundle_root=None, *, skills_directory=None):
     manifest = Path(manifest_path).resolve(strict=True)
     root = Path(bundle_root).resolve(strict=True) if bundle_root else manifest.parent
     if not manifest.is_relative_to(root) or manifest.stat().st_size > 256_000:
@@ -48,7 +49,7 @@ def import_manifest(profile, manifest_path, bundle_root=None):
     items = []
     for entry in entries:
         file = local_file(entry["path"], 128000)
-        item = skill_definition(SkillInput(filename=file.name, markdown=file.read_text(encoding="utf-8-sig")))
+        item = skill_definition(SkillInput(filename=file.name, markdown=file.read_bytes().decode("utf-8")))
         conn = item.get("connection")
         if conn:
             if conn["url"] != endpoint:
@@ -62,11 +63,12 @@ def import_manifest(profile, manifest_path, bundle_root=None):
 
     if len({identity(item) for item in items}) != len(items):
         raise ValueError("В манифесте повторяются навыки.")
-    db_store = Store(Path(profile))
+    db_store = Store(Path(profile), skills_directory=skills_directory)
     try:
         counts = {"added": 0, "updated": 0, "retained": 0}
         with db_store.transaction() as db:
             db.execute("BEGIN IMMEDIATE")
+            restore_skill_copies(db_store, db)
             existing = {}
             for row in db.execute("SELECT definition FROM markdown_skills"):
                 original = json.loads(row[0])
@@ -95,6 +97,7 @@ def import_manifest(profile, manifest_path, bundle_root=None):
                     counts["added"] += 1
                 db.execute("INSERT INTO markdown_skills(id,definition) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET definition=excluded.definition",
                            (item["id"], json.dumps(item, ensure_ascii=False)))
+            save_skill_copies(db_store, db)
         return counts
     finally:
         db_store.close()

@@ -70,3 +70,4 @@ tools/native_assistant_payload_*/
 
 # Local chats, model connections and private MCP credentials
 /workspace-profile/
+Skills/

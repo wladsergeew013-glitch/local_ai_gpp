@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from workspace.app.skill_resources import MAX_OUTPUT_BYTES, read_resources, save_resources
+from workspace.app.skill_storage import save_skill_copies
 
 from workspace.app.store import identifier, now
 from workspace.app.version import VERSION
@@ -188,7 +189,7 @@ def skill_definition(payload):
         raise ValueError("Ключ MCP должен быть одной строкой без пробелов.")
     return {"id": secrets.token_hex(16), "name": name, "description": description[:400],
             "instructions": instructions, "sections": options, "connection": connection.model_dump() if connection else None,
-            "api_key": key, **appearance}
+            "api_key": key, "source_markdown": payload.markdown, **appearance}
 
 
 def register_many(store, payloads):
@@ -205,6 +206,7 @@ def register_many(store, payloads):
             "INSERT INTO markdown_skills(id,definition) VALUES(?,?)",
             [(item["id"], json.dumps(item, ensure_ascii=False)) for item in items],
         )
+        save_skill_copies(store, db)
     return [public_skill(item) for item in items]
 
 

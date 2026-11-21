@@ -33,6 +33,10 @@ def main():
     args = parser.parse_args()
     if args.ui_token_stdin and (not args.headless or sys.stdin is None):
         parser.error("--ui-token-stdin requires --headless and an input stream")
+    explicit_profile = args.data_dir or os.environ.get("LOCAL_AI_WORKSPACE_DATA_DIR")
+    skills_directory = None
+    if getattr(sys, "frozen", False) and (args.portable or not explicit_profile):
+        skills_directory = Path(sys.executable).resolve().parent / "Skills"
     if args.portable:
         from workspace.local_ai_control import portable_profile
         os.environ["LOCAL_AI_WORKSPACE_DATA_DIR"] = str(portable_profile())
@@ -55,7 +59,7 @@ def main():
         from workspace.app.skill_import import import_manifest
         from workspace.app.store import data_root
         try:
-            result = import_manifest(data_root(), args.import_skills, args.bundle_root)
+            result = import_manifest(data_root(), args.import_skills, args.bundle_root, skills_directory=skills_directory)
         except (KeyError, TypeError, ValueError, OSError) as exc:
             parser.exit(1, f"Skill import failed: {exc}\n")
         print(json.dumps(result), flush=True)
@@ -146,6 +150,7 @@ def main():
                     sys.stdin.readline(130).strip() if args.ui_token_stdin else None
                 ),
                 control_port=args.port,
+                skills_directory=skills_directory,
             )
         except ValueError as exc:
             parser.error(str(exc))
@@ -166,7 +171,7 @@ def main():
 
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(control_port=args.port),
+            create_app(control_port=args.port, skills_directory=skills_directory),
             host="127.0.0.1",
             port=args.port,
             log_level="warning",
