@@ -14,8 +14,8 @@ from workspace.app.skills import MAX_FILE, SkillAttachment, attachment_name
 
 async def upload(store, chat_id, filename, request):
     task = store.one("tasks", chat_id)
-    if task["details"].get("mode") != "chat":
-        raise ValueError("Вложения сообщения доступны в диалогах.")
+    if task["details"].get("mode") not in {"chat", "agent"}:
+        raise ValueError("Вложения доступны в диалогах и задачах агента.")
     name = attachment_name(filename)
     if not name or len(name) > 240:
         raise ValueError("Укажите имя файла длиной до 240 символов.")
@@ -66,6 +66,14 @@ def active_documents(store, chat_id, new, prompt, memory):
             if name not in seen_names and name in prompt.casefold():
                 active.append(doc)
                 seen_names.add(name)
+    for doc in store.rows(
+        "SELECT id,name,length(data) AS size FROM skill_artifacts f WHERE task_id=? AND NOT EXISTS"
+        "(SELECT 1 FROM chat_uploads u WHERE u.id=f.id) ORDER BY f.rowid DESC", (chat_id,),
+    ):
+        name = doc["name"].casefold()
+        if name not in seen_names and name in prompt.casefold():
+            active.append(doc)
+            seen_names.add(name)
     return active
 
 

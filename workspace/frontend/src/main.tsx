@@ -58,6 +58,7 @@ function App() {
       {
         ids: string[];
         sections: Record<string, string[]>;
+        forced?: string;
       }
     >
   >({});
@@ -81,8 +82,11 @@ function App() {
     ? (selectedChat?.mode || selectedChat?.details?.mode) === "agent"
     : files;
   const editedSelection = skillDrafts[draftKey];
-  const savedIds = selectedChat ? chatSkillIds(selectedChat) : (boot.skills || []).map(s => s.id);
-  const selectedIds = editedSelection?.ids ?? savedIds;
+  const activeSkills = (boot.skills || []).filter(skill => skill.enabled !== false);
+  const savedIds = selectedChat
+    ? [...new Set([...chatSkillIds(selectedChat), ...activeSkills.filter(skill => skill.product).map(skill => skill.id)])]
+    : activeSkills.map(skill => skill.id);
+  const selectedIds = (editedSelection?.ids ?? savedIds).filter(id => activeSkills.some(skill => skill.id === id));
   const attachments = fileDrafts[draftKey] ?? [];
   const sections =
     editedSelection?.sections ?? disabledSkillSections(selectedChat);
@@ -102,6 +106,7 @@ function App() {
         [draftKey]: {
           ids: enabled ? ids.filter(id => !target.includes(id)) : [...new Set([...ids, ...target])],
           sections,
+          forced: target.includes(old[draftKey]?.forced || "") ? undefined : old[draftKey]?.forced,
         },
       };
     });
@@ -224,8 +229,15 @@ function App() {
       } else {
         row = await api<Conversation>("/chats/" + selected);
       }
-      const uses: SkillUse[] = agent ? [] : selectedIds.map(id => ({id, disabled_sections: sections[id]}));
-      await submitMessage(row, raw, memory, uses, agent ? [] : attachments);
+      const uses: SkillUse[] = agent ? [] : selectedIds.map(id => ({
+        id, disabled_sections: sections[id], force: editedSelection?.forced === id,
+      }));
+      await submitMessage(row, raw, memory, uses, attachments);
+      if (editedSelection?.forced) {
+        setSkillDrafts(old => old[row.id] ? ({
+          ...old, [row.id]: { ...old[row.id], forced: undefined },
+        }) : old);
+      }
       setFileDrafts(old => {
         if (old[row.id] !== attachments) return old;
         const next = {...old};
@@ -320,10 +332,10 @@ function App() {
         </div>
       )}
       <div className="composer-toolbar">
+        <MessageFiles files={attachments} disabled={busy || working} error={setError}
+          change={batch => setFileDrafts(old => ({...old, [draftKey]: batch}))} />
         {!agent && (
           <>
-            <MessageFiles files={attachments} disabled={busy || working} error={setError}
-              change={batch => setFileDrafts(old => ({...old, [draftKey]: batch}))} />
             <SkillControls
               key={draftKey}
               skills={boot.skills || []}
@@ -332,6 +344,15 @@ function App() {
               toggleSection={toggleSection}
               disabled={busy || working}
               toggle={toggleSkill}
+              forced={editedSelection?.forced}
+              apply={id => setSkillDrafts(old => ({
+                ...old,
+                [draftKey]: {
+                  ids: [...new Set([...(old[draftKey]?.ids ?? savedIds), id])],
+                  sections,
+                  forced: old[draftKey]?.forced === id ? undefined : id,
+                },
+              }))}
               library={() => setSettings("skills")}
             />
             <button

@@ -2,7 +2,7 @@
 
 import json
 
-MESSAGE_FILTER = "(kind IN ('chat_message','task_created','input_admitted','result') OR (kind='dsh' AND json_extract(payload,'$.type') IN ('user/message','assistant/message')))"
+MESSAGE_FILTER = "(kind IN ('chat_message','task_created','input_admitted','result','skill_tool') OR (kind='dsh' AND json_extract(payload,'$.type') IN ('user/message','assistant/message')))"
 
 
 def text(value):
@@ -19,6 +19,13 @@ def text(value):
 
 def project_messages(rows):
     parsed = [{**r, "payload": json.loads(r["payload"])} for r in rows]
+    artifacts = {}
+    for row in parsed:
+        if row["kind"] == "skill_tool":
+            report = row["payload"]
+            files = (report.get("result") or {}).get("artifacts", [])
+            if files:
+                artifacts.setdefault(report.get("turn_id"), []).extend(files)
     plain = any(r["kind"] == "chat_message" for r in parsed)
     canonical_user = any(
         r["kind"] == "dsh" and r["payload"].get("type") == "user/message"
@@ -59,13 +66,17 @@ def project_messages(rows):
             continue
         if not plain and out and out[-1]["role"] == role and out[-1]["text"] == value:
             continue
-        out.append(
-            {
+        out.append({
                 "id": row["seq"],
                 "role": role,
                 "text": value,
                 "error": error,
                 "time": row["created_at"],
-            }
-        )
+        })
+        if role == "assistant" and p.get("turn_id") in artifacts:
+            out[-1]["artifacts"] = artifacts.pop(p["turn_id"])
+    if artifacts and not plain:
+        assistant = next((item for item in reversed(out) if item["role"] == "assistant"), None)
+        if assistant:
+            assistant["artifacts"] = [file for group in artifacts.values() for file in group]
     return out

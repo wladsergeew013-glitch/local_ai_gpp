@@ -76,6 +76,20 @@ PRAGMA user_version=2;
             )
             self.connection.execute("CREATE TABLE IF NOT EXISTS markdown_skills(id TEXT PRIMARY KEY, definition TEXT NOT NULL)")
             self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS plugin_preferences(product TEXT NOT NULL,skill TEXT NOT NULL,"
+                "enabled INTEGER NOT NULL,PRIMARY KEY(product,skill))"
+            )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS plugin_credentials(product TEXT NOT NULL,endpoint TEXT NOT NULL,"
+                "api_key TEXT NOT NULL,PRIMARY KEY(product,endpoint))"
+            )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS plugin_calls(id TEXT PRIMARY KEY,product TEXT NOT NULL,"
+                "task_id TEXT NOT NULL,agent_id TEXT NOT NULL,skill_key TEXT NOT NULL,revision TEXT NOT NULL,"
+                "tool TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,status TEXT NOT NULL)"
+            )
+            self.connection.execute("CREATE INDEX IF NOT EXISTS plugin_calls_pending ON plugin_calls(product,status)")
+            self.connection.execute(
                 "CREATE TABLE IF NOT EXISTS chat_uploads(id TEXT PRIMARY KEY REFERENCES skill_artifacts(id) ON DELETE CASCADE,"
                 "task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,name TEXT NOT NULL,sha256 TEXT NOT NULL,"
                 "UNIQUE(task_id,name,sha256))"
@@ -85,6 +99,9 @@ PRAGMA user_version=2;
                 "id INTEGER PRIMARY KEY CHECK(id=1), style TEXT NOT NULL CHECK(style IN ('studio','pixel')))"
             )
             self._relocate_project_paths()
+        from workspace.app.plugin_catalog import PluginCatalog
+
+        self.plugins = PluginCatalog(self)
 
     def _relocate_project_paths(self):
         """Resolve Workspace-owned folders when the profile moves to another drive."""
@@ -233,6 +250,7 @@ PRAGMA user_version=2;
                 self.connection.backup(target)
             finally:
                 target.close()
+            self.plugins.backup(destination)
             (destination / "manifest.json").write_text(
                 json.dumps(
                     {

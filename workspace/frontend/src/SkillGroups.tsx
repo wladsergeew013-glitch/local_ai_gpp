@@ -24,23 +24,24 @@ export function skillEntries(skills: MarkdownSkill[]): Entry[] {
   return entries;
 }
 
-function GroupRow({ entry, visible, selected, searching, toggle, render }: {
+function GroupRow({ entry, visible, selected, searching, toggle, render, renderPackage }: {
   entry: Entry;
   visible: MarkdownSkill[];
   selected: string[];
   searching: boolean;
   toggle?: (ids: string[]) => void;
   render: (skill: MarkdownSkill) => ReactNode;
+  renderPackage?: (skill: MarkdownSkill) => ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const listId = useId();
   const name = entry.group!.name;
-  const ids = entry.items.map(s => s.id);
+  const ids = entry.items.filter(s => s.enabled !== false).map(s => s.id);
   const count = ids.filter(id => selected.includes(id)).length;
   const open = expanded || searching;
   return <li className="skill-bundle">
     <div className="skill-bundle-heading">
-      {toggle && <input type="checkbox" aria-label={"Весь комплект «" + name + "»"}
+      {toggle && !!ids.length && <input type="checkbox" aria-label={"Весь комплект «" + name + "»"}
         checked={count === ids.length}
         ref={el => { if (el) el.indeterminate = count > 0 && count < ids.length; }}
         onChange={() => toggle(ids)} />}
@@ -53,28 +54,30 @@ function GroupRow({ entry, visible, selected, searching, toggle, render }: {
       </button>
     </div>
     <ul id={listId} hidden={!open} className="skill-bundle-children">
+      {renderPackage && entry.items[0].product && <li>{renderPackage(entry.items[0])}</li>}
       {visible.map(s => <li key={s.id}>{render(s)}</li>)}
     </ul>
   </li>;
 }
 
-export function SkillGroups({ entries, selected, toggle, query = "", render, className }: {
+export function SkillGroups({ entries, selected, toggle, query = "", render, className, renderPackage }: {
   entries: Entry[];
   selected: string[];
   toggle?: (ids: string[]) => void;
   query?: string;
   render: (skill: MarkdownSkill) => ReactNode;
   className: string;
+  renderPackage?: (skill: MarkdownSkill) => ReactNode;
 }) {
   const term = query.trim().toLocaleLowerCase();
   const rows = entries.flatMap(entry => {
     const groupMatch = entry.group?.name.toLocaleLowerCase().includes(term);
     const visible = entry.items.filter(s => groupMatch ||
-      (s.name + " " + s.description).toLocaleLowerCase().includes(term));
+      ([s.name, s.title, s.description].join(" ")).toLocaleLowerCase().includes(term));
     if (!visible.length) return [];
     if (!entry.group) return [<li key={visible[0].id}>{render(visible[0])}</li>];
     return [<GroupRow key={entry.group.key} entry={entry} visible={visible} selected={selected}
-      searching={!!term} toggle={toggle} render={render} />];
+      searching={!!term} toggle={toggle} render={render} renderPackage={renderPackage} />];
   });
   return rows.length ? <ul className={className}>{rows}</ul> :
     <p>{term ? "Совпадений нет." : "Добавьте первый навык в библиотеке."}</p>;

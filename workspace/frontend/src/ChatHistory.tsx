@@ -31,6 +31,14 @@ function SkillReport({
       </summary>
       <pre>{JSON.stringify(result.report, null, 2)}</pre>
     </details>
+    {result.status && result.status !== "ok" && <p className="message-error">
+      {result.status === "error" ? "Ошибка инструмента" : "Частичный результат"}
+    </p>}
+    {!!result.errors?.length && <ul>{result.errors.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
+    {!!result.warnings?.length && <ul>{result.warnings.map((warning, index) => (
+      <li key={index}>{typeof warning === "string" ? warning :
+        (warning.page ? "Страница " + warning.page + " · " : "") + warning.message}</li>
+    ))}</ul>}
     {result.artifacts?.map((file) => (
       <button type="button" className="skill-download" key={file.id} onClick={async () => {
         setError("");
@@ -46,7 +54,7 @@ function SkillReport({
 
 type NamedReport = { seq: number; name?: string; result: SkillReportData };
 
-function reportsByTurn(events: ChatEvent[], current: Conversation | null) {
+function reportsByTurn(events: ChatEvent[], current: Conversation | null, history: ReturnType<typeof messages>) {
   const grouped = new Map<string, NamedReport[]>();
   const details = current?.details;
   const legacy = !details?.skill_reports && details?.skill_result;
@@ -60,7 +68,8 @@ function reportsByTurn(events: ChatEvent[], current: Conversation | null) {
     if (e.kind !== "skill_tool") continue;
     const result = e.payload.result ?? (lastLegacy === e.seq ? legacy : null);
     if (!result) continue;
-    const key = e.payload.turn_id || turn;
+    const target = turn ? undefined : history.find(message => message.role === "assistant" && Number(message.id) > e.seq);
+    const key = turn ? e.payload.turn_id || turn : target ? "agent-" + target.id : "";
     const reports = grouped.get(key) || [];
     reports.push({ seq: e.seq, name: e.payload.skill, result });
     grouped.set(key, reports);
@@ -94,7 +103,7 @@ export function ChatHistory({
   const answered = (current?.mode || current?.details?.mode) === "chat" &&
     last?.role === "assistant" && !!last.turnId;
   const pending = !!current && active.has(current.status) && !answered;
-  const { grouped, latest } = reportsByTurn(compact ? [] : events, current);
+  const { grouped, latest } = reportsByTurn(events, current, history);
   function renderReports(turnId?: string) {
     return (grouped.get(turnId || "") || []).map((r) => (
       <SkillReport chatId={selected!} key={r.seq} result={r.result} name={r.name} />
@@ -136,7 +145,7 @@ export function ChatHistory({
           ) : (
             <div>{m.text}</div>
           )}
-          {m.role === "assistant" && m.turnId && renderReports(m.turnId)}
+          {m.role === "assistant" && renderReports(m.turnId || "agent-" + m.id)}
           {!!m.documents?.length && <ul className="message-file-list" aria-label="Файлы сообщения">{m.documents.map(doc => (
             <li key={doc.id}><button type="button" className="tool-button" onClick={async () => {
               setDownloadError("");

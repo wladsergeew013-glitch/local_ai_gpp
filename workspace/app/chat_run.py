@@ -25,10 +25,11 @@ def completed_messages(events):
 
 class ChatRun:
     def __init__(self, store, chat, provider, token, prompt, memory, on_exit, *, skill_contexts=(),
-                 automatic=False, documents=(), new_documents=()):
+                 automatic=False, documents=(), new_documents=(), plugin_gateway=None):
         self.store, self.chat, self.provider = store, chat, provider
         self.skill_contexts = skill_contexts
         self.automatic, self.documents, self.new_documents = automatic, documents, new_documents
+        self.plugin_gateway = plugin_gateway
         self.token, self.prompt, self.memory, self.on_exit = (
             token,
             prompt,
@@ -56,19 +57,38 @@ class ChatRun:
             raise RuntimeError("Conversation cancellation has not been confirmed.")
         return {"confirmed": True, "survivors": []}
 
-    def skill_prompt(self, turn_id, selection=None):
+    def skill_prompt(self, turn_id, selection=None, *, model=None, headers=None, messages=(), limit=1024, failures=None, native=False):
         from workspace.app.skills import invoke, record_report
         from workspace.app.chat_documents import for_tool
 
-        instructions, reports = [], []
+        instructions, reports, created = [], [], {}
         chosen = selection if selection is not None else [(ctx, []) for ctx in self.skill_contexts]
         for context, docs in chosen:
             if self.cancelled.is_set():
                 break
             skill = context.definition
-            instruction = f"Навык «{skill['name']}»\n{context.instructions}"
+            instruction = f"Навык «{skill.get('title', skill['name'])}»\n{context.instructions}"
             if instruction not in instructions:
                 instructions.append(instruction)
+            if "product" in skill:
+                if skill["tools"]:
+                    from workspace.app.plugin_workflow import run_workflow
+
+                    try:
+                        activity("documents" if docs else "running")
+                        inputs = list(docs or self.documents) + list(created.values())
+                        results, note = run_workflow(self.plugin_gateway, context, self.chat["id"], turn_id,
+                                                     inputs, model, headers, messages, limit, self.cancelled, native=native)
+                    finally:
+                        activity("running")
+                    reports.append({"skill": skill["title"], "operations": results, "note": note,
+                                    "executed": bool(results)})
+                    for result in results:
+                        created.update({item["id"]: item for item in result["artifacts"]})
+                    if failures is not None:
+                        failures.extend(message for result in results if result["status"] != "ok"
+                                        for message in (result["errors"] or result["text"] or ["Ошибка инструмента MCP."]))
+                continue
             result = context.cached
             ids = [d["id"] for d in docs]
             if ids and self.memory and not self.new_documents:
@@ -117,6 +137,7 @@ class ChatRun:
 
         chat_id, turn_id = self.chat["id"], identifier()
         text, reason, error, done = "", None, "", False
+        failures = []
         try:
             history = self.store.rows(
                 "SELECT payload FROM events WHERE task_id=? AND kind='chat_message' ORDER BY seq",
@@ -140,9 +161,10 @@ class ChatRun:
             # Loading belongs to the owned inference request, so stop can cancel
             # both a cold load and token generation through the same owner token.
             caps = client.capabilities()
+            native = (caps.get("tools") or {}).get("supported") is True
             if self.cancelled.is_set():
                 return
-            headers = {
+            headers = {} if client.remote else {
                 "X-Local-AI-Owner-ID": chat_id,
                 "X-Local-AI-Owner-Token": self.token,
             }
@@ -150,17 +172,24 @@ class ChatRun:
                 headers["Authorization"] = "Bearer " + self.provider["api_key"]
             chosen = None
             plain = []
-            if (self.skill_contexts or self.documents) and self.automatic:
+            forced = [ctx for ctx in self.skill_contexts if ctx.forced]
+            if forced:
+                chosen = [(ctx, list(self.documents)) for ctx in forced]
+                self.store.event(chat_id, "skill_choice", {"turn_id": turn_id, "manual": True,
+                                 "selected": [{"id": ctx.definition["id"], "name": ctx.definition["name"],
+                                               "files": [d["id"] for d in docs]} for ctx, docs in chosen]})
+            elif (self.skill_contexts or self.documents) and self.automatic:
                 from workspace.app.skill_routing import choose
                 chosen, plain = choose(client, headers, messages, self.skill_contexts, self.documents,
-                                       self.cancelled, int(caps["max_output_tokens"]), bool(self.new_documents))
+                                       self.cancelled, int(caps["max_output_tokens"]), bool(self.new_documents), native=native)
                 if not self.cancelled.is_set():
                     self.store.event(chat_id, "skill_choice", {"turn_id": turn_id, "reading": [d["id"] for d in plain], "selected": [
                         {"id": ctx.definition["id"], "name": ctx.definition["name"], "files": [d["id"] for d in batch]}
                         for ctx, batch in chosen]})
             if self.cancelled.is_set():
                 return
-            context = self.skill_prompt(turn_id, chosen) if self.skill_contexts else ""
+            context = self.skill_prompt(turn_id, chosen, model=client, headers=headers, messages=messages,
+                                        limit=int(caps["max_output_tokens"]), failures=failures, native=native) if self.skill_contexts else ""
             if self.cancelled.is_set():
                 return
             selected = self.skill_contexts if chosen is None else [ctx for ctx, _ in chosen]
@@ -208,7 +237,7 @@ class ChatRun:
                     "POST",
                     client.base_url + "/chat/completions",
                     headers=headers,
-                    json=payload,
+                    json=client.chat_payload(payload),
                 ) as response:
                     response.raise_for_status()
                     for line in response.iter_lines():
@@ -250,7 +279,9 @@ class ChatRun:
         except Exception as exc:
             error = str(exc)
         finally:
-            successful = done and reason == "stop" and not self.cancelled.is_set()
+            if failures and not error:
+                error = "\n".join(dict.fromkeys(failures))[:2000]
+            successful = done and reason == "stop" and not failures and not self.cancelled.is_set()
             phase = (
                 "done"
                 if successful

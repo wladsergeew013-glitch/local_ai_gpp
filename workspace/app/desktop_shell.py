@@ -71,6 +71,7 @@ class WorkspaceShell:
             show_main=self.show_main,
             show_avatar=self.show_avatar,
             choose_folder=self.choose_folder,
+            choose_skill_manifest=self.choose_skill_manifest,
             show_mini=self.show_mini,
             hide_mini=self.hide_mini,
             exit=self.request_exit,
@@ -114,6 +115,12 @@ class WorkspaceShell:
 
     def choose_folder(self, payload=None):
         chosen = self.main.create_file_dialog(webview.FileDialog.FOLDER)
+        return {"path": chosen[0] if chosen else ""}
+
+    def choose_skill_manifest(self, payload=None):
+        chosen = self.main.create_file_dialog(
+            webview.FileDialog.OPEN, allow_multiple=False, file_types=("Манифест пакета (*.json)",)
+        )
         return {"path": chosen[0] if chosen else ""}
 
     def hide_mini(self, payload=None):

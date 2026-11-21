@@ -19,6 +19,7 @@ export type RuntimeProbe = {
   ready?: { ready_model_ids?: string[] };
   model_available: boolean | null;
   model_loaded: boolean;
+  remote?: boolean;
 };
 export type Approval = {
   id: string;
@@ -56,22 +57,46 @@ export type Connector = {
 export type MarkdownSkill = {
   id: string;
   name: string;
+  title?: string;
   description: string;
   has_mcp: boolean;
   accepts_attachment: boolean;
   accepts_multiple?: boolean;
   formats?: string[];
-  group?: { id: string; name: string; key: string } | null;
+  group?: { id: string; name: string; key: string; enabled?: boolean } | null;
   sections?: { id: string; title: string }[];
+  key?: string;
+  product?: string;
+  package_version?: string | null;
+  endpoint?: string;
+  enabled?: boolean;
+  skill_enabled?: boolean;
+  status?: {
+    connection: string;
+    message: string;
+    compatibility: { state: string; message?: string };
+    paused: boolean;
+    running: boolean;
+  };
 };
 export type SkillUse = {
   id: string;
+  force?: boolean;
   disabled_sections?: string[];
   attachment?: { filename: string; base64: string };
   attachments?: { filename: string; base64: string }[];
 };
 export type SkillArtifact = { id: string; name: string; size: number; mime_type: string };
-export type SkillReport = { filename?: string; tool: string; report: unknown; artifacts?: SkillArtifact[] };
+export type SkillReport = {
+  filename?: string;
+  tool: string;
+  report: unknown;
+  artifacts?: SkillArtifact[];
+  status?: "ok" | "partial" | "error";
+  warnings?: (string | { message: string; page?: number })[];
+  errors?: string[];
+  text?: string[];
+};
 
 export async function downloadArtifact(chat: string, file: Pick<SkillArtifact, "id" | "name">) {
   const token = await operatorToken;

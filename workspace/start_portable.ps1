@@ -1,8 +1,13 @@
-param([string]$McpLauncher, [string]$SkillManifest, [string]$BundleRoot)
+param(
+    [string]$McpLauncher, [string]$SkillManifest, [string]$BundleRoot,
+    [string]$InstallRoot, [string]$WorkspaceExe, [string]$ProfileDirectory
+)
 $ErrorActionPreference = 'Stop'
-$repo = Split-Path -Parent $PSScriptRoot
+$repo = if ($InstallRoot) { (Get-Item -LiteralPath $InstallRoot).FullName } else { Split-Path -Parent $PSScriptRoot }
 $runtime = Join-Path $repo 'dist\runtime\LocalAIGPP.exe'
-$workspace = Join-Path $repo 'dist\worker\LocalAIWorkspace.exe'
+$workspace = if ($WorkspaceExe) { (Get-Item -LiteralPath $WorkspaceExe).FullName } else { Join-Path $repo 'dist\worker\LocalAIWorkspace.exe' }
+$profile = if ($ProfileDirectory) { [System.IO.Path]::GetFullPath($ProfileDirectory) } else { Join-Path $repo 'workspace-profile' }
+$workspaceArgs = if ($ProfileDirectory) { '--data-dir "{0}"' -f $profile } else { '--portable' }
 
 function Get-LocalOwner([int]$Port, [string]$ExpectedExe) {
     $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
@@ -32,7 +37,7 @@ foreach ($file in @($runtime, $workspace)) {
 if ($BundleRoot -and -not $SkillManifest) { throw '-BundleRoot requires -SkillManifest.' }
 if ($SkillManifest) {
     $manifest = (Get-Item -LiteralPath $SkillManifest -ErrorAction Stop).FullName
-    $importArgs = '--portable --import-skills "{0}"' -f $manifest
+    $importArgs = '{0} --import-skills "{1}"' -f $workspaceArgs, $manifest
     if ($BundleRoot) {
         $bundle = (Get-Item -LiteralPath $BundleRoot -ErrorAction Stop).FullName
         if ($bundle.EndsWith('\')) { $bundle += '.' }
@@ -47,7 +52,7 @@ if ($McpLauncher) {
 if ($SkillManifest) {
     $import = Start-Process -FilePath $workspace -ArgumentList $importArgs -WorkingDirectory $repo -WindowStyle Hidden -Wait -PassThru
     if ($import.ExitCode -ne 0) {
-        throw "Skill import failed (exit $($import.ExitCode)). Check $repo\workspace-profile\logs\desktop.log."
+        throw "Skill import failed (exit $($import.ExitCode)). Check $profile\logs\desktop.log."
     }
 }
 if (-not (Get-LocalOwner 8765 $runtime)) {
@@ -60,6 +65,6 @@ if ($process) {
         $null = (New-Object -ComObject WScript.Shell).AppActivate($process.Id)
     }
 } else {
-    Start-Process -FilePath $workspace -ArgumentList '--portable' -WorkingDirectory (Split-Path -Parent $workspace)
+    Start-Process -FilePath $workspace -ArgumentList $workspaceArgs -WorkingDirectory (Split-Path -Parent $workspace)
     $null = Wait-ForOwner 8776 $workspace
 }

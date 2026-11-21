@@ -26,11 +26,22 @@ def manifest_group(config, endpoint):
 
 
 def import_manifest(profile, manifest_path, bundle_root=None, *, skills_directory=None):
+    from workspace.app.plugin_manifest import parse_json, read_package
+
     manifest = Path(manifest_path).resolve(strict=True)
     root = Path(bundle_root).resolve(strict=True) if bundle_root else manifest.parent
     if not manifest.is_relative_to(root) or manifest.stat().st_size > 256_000:
         raise ValueError("Проверьте корневую папку и размер манифеста.")
-    config = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    config = parse_json(manifest.read_text(encoding="utf-8-sig"))
+    if isinstance(config, dict) and "schemaVersion" in config:
+        package = read_package(manifest_path)
+        store = Store(Path(profile), skills_directory=skills_directory)
+        try:
+            with store.transaction() as db:
+                restore_skill_copies(store, db)
+            return store.plugins.install(package)
+        finally:
+            store.close()
     endpoint = local_mcp_url(config["url"])
     group = manifest_group(config, endpoint)
     def local_file(relative, limit):
@@ -65,6 +76,10 @@ def import_manifest(profile, manifest_path, bundle_root=None, *, skills_director
         raise ValueError("В манифесте повторяются навыки.")
     db_store = Store(Path(profile), skills_directory=skills_directory)
     try:
+        from workspace.app.plugin_catalog import TDMS_PRODUCT, legacy_tdms_name
+
+        installed = {skill["name"] for skill in db_store.plugins.definitions().values()
+                     if skill and skill["product"] == TDMS_PRODUCT}
         counts = {"added": 0, "updated": 0, "retained": 0}
         with db_store.transaction() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -74,6 +89,10 @@ def import_manifest(profile, manifest_path, bundle_root=None, *, skills_director
                 original = json.loads(row[0])
                 existing.setdefault(identity(original), []).append(original)
             for item in items:
+                probe = {**item, "bundle_source": endpoint, "group": group}
+                if legacy_tdms_name(probe) in installed:
+                    counts["retained"] += 1
+                    continue
                 old = existing.get(identity(item), [])
                 if len(old) > 1:
                     raise ValueError(f"В библиотеке несколько навыков с именем «{item['name']}» для одного инструмента.")
