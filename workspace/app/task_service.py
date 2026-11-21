@@ -133,6 +133,8 @@ class TaskService:
         new_prompt=None,
         workspace_url=None,
         memory=None,
+        skills=None,
+        attachments=(),
     ):
         with self.lock:
             if self.processes:
@@ -166,7 +168,9 @@ class TaskService:
                         "restored",
                         {"partial": "", "error": "", "replayed": False},
                     )
-                return self._start_chat(task, prompt, memory)
+                return self._start_chat(task, prompt, memory, skills, attachments)
+            if skills or attachments:
+                raise ValueError("Навыки доступны в обычном диалоге.")
             session = history.reconcile(self.store, task)
             resume = session["session_exists"]
             if initial and resume and not restore_only:
@@ -331,16 +335,32 @@ class TaskService:
             for row in rows
         )
 
-    def _start_chat(self, task, prompt, memory):
+    def _start_chat(self, task, prompt, memory, skills=None, attachments=()):
         from workspace.app.chat_run import ChatRun
         from workspace.app.desktop_host import activity
+        from workspace.app.skills import SkillUse, prepare_skills
+        from workspace.app.chat_documents import active_documents, resolve
 
         task_id = task["id"]
+        remember = task["details"].get("memory", True) if memory is None else memory
+        if skills is None:
+            ids = task["details"].get("skill_ids")
+            if ids is None:
+                old = task["details"].get("skill_id")
+                ids = [old] if old else [r["id"] for r in self.store.rows("SELECT id FROM markdown_skills ORDER BY rowid")]
+            sections = task["details"].get("skill_disabled_sections", {})
+            skills = [SkillUse(id=key, disabled_sections=sections.get(key, [])) for key in ids]
+        automatic = not any(s.attachment or s.attachments for s in skills)
+        if not automatic and attachments:
+            raise ValueError("Передайте файлы в сообщении или в явном вызове навыка.")
+        new_documents = resolve(self.store, task_id, attachments)
+        documents = active_documents(self.store, task_id, new_documents, prompt, remember) if automatic else []
+        contexts, selection = prepare_skills(self.store, task, skills, automatic=automatic,
+                                             reuse=not automatic or (remember and not documents))
         token = secrets.token_urlsafe(32)
         self.runtime_tokens[task_id] = token
-        remember = task["details"].get("memory", True) if memory is None else memory
         self.store.update_task(
-            task_id, "running", {"partial": "", "error": "", "memory": remember}
+            task_id, "running", {"partial": "", "error": "", "memory": remember, **selection}
         )
 
         def finished(status, error):
@@ -358,6 +378,8 @@ class TaskService:
             prompt,
             remember,
             finished,
+            skill_contexts=contexts,
+            automatic=automatic, documents=documents, new_documents=new_documents,
         )
         self.processes[task_id] = run
         activity("running")

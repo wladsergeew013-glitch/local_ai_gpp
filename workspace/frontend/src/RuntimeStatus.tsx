@@ -9,11 +9,25 @@ const labels: Record<string, string> = {
   checking: "Проверяю Runtime…",
   offline: "Runtime недоступен",
 };
+export type RuntimeObservation = {
+  id: string;
+  base_url: string;
+  model: string;
+  status: string;
+  time: number;
+};
+export function probeStatus(result: RuntimeProbe) {
+  if (result.model_available === false) return "missing";
+  if (result.model_available === null) return "choose";
+  return result.model_loaded ? "ready" : "unloaded";
+}
 export function RuntimeStatus({
   provider,
+  observation,
   open,
 }: {
   provider?: Provider;
+  observation?: RuntimeObservation;
   open: () => void;
 }) {
   const [status, setStatus] = useState("checking");
@@ -26,24 +40,31 @@ export function RuntimeStatus({
         model: provider.model,
       })
         .then((outcome) => {
-          if (valid) {
-            if (outcome.model_available === false) setStatus("missing");
-            else if (outcome.model_available === null) setStatus("choose");
-            else setStatus(outcome.model_loaded ? "ready" : "unloaded");
-          }
+          if (valid) setStatus(probeStatus(outcome));
         })
         .catch(() => {
           if (valid) setStatus("offline");
         });
     };
-    setStatus("checking");
-    check();
+    if (
+      observation &&
+      provider &&
+      observation.id === provider.id &&
+      observation.base_url === provider.base_url &&
+      observation.model === provider.model &&
+      Date.now() - observation.time < 15000
+    ) {
+      setStatus(observation.status);
+    } else {
+      setStatus("checking");
+      check();
+    }
     const timer = setInterval(check, 15000);
     return () => {
       valid = false;
       clearInterval(timer);
     };
-  }, [provider?.id, provider?.base_url, provider?.model]);
+  }, [provider?.id, provider?.base_url, provider?.model, observation]);
   return (
     <button className={"runtime-status " + status} onClick={open}>
       <span

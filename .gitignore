@@ -67,3 +67,6 @@ tools/assets/
 tools/overlay_assistant_payload_*/
 tools/mini_assistant_payload_*/
 tools/native_assistant_payload_*/
+
+# Local chats, model connections and private MCP credentials
+/workspace-profile/

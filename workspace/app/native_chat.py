@@ -12,7 +12,10 @@ import threading
 import time
 import uuid
 import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog
 import httpx
+from workspace.app.companion_layout import AVATAR_SIZE, FACE_ANCHORS, attached_layout
 from workspace.app.control_access import UI_TOKEN_HEADER
 
 BG = "#fbfdff"
@@ -35,6 +38,9 @@ class NativeChatBubble:
         hidden=False,
         transport=None,
         ui_token=None,
+        stage=None,
+        place_avatar=None,
+        face_anchor=lambda: FACE_ANCHORS["pixel"],
     ):
         self.root, self.base_url = root, base_url.rstrip("/")
         self.avatar_position, self.on_main, self.save = avatar_position, on_main, save
@@ -53,6 +59,16 @@ class NativeChatBubble:
         self.height = max(260, min(900, int(prefs.get("height", 304))))
         self.hidden_test, self.transport = hidden, transport
         self.ui_token = ui_token
+        self.file_drafts = {}
+        self.stage = stage if stage is not None else tk.Canvas(
+            root, bg=TRANSPARENT, highlightthickness=0, borderwidth=0
+        )
+        if stage is None:
+            self.stage.pack(fill="both", expand=True)
+        self.place_avatar = place_avatar
+        self.face_anchor = face_anchor
+        self.surface_size = None
+        self.panel_layout = None
         self.visible = self.sidebar_open = self.polling = self.sending = self.closed = (
             False
         )
@@ -88,36 +104,16 @@ class NativeChatBubble:
             return response.json()
 
     def _build(self):
-        self.window = tk.Toplevel(self.root)
-        self.window.title("Диалог Local AI")
-        self.window.transient(self.root)
-        self.window.withdraw()
-        self.window.overrideredirect(True)
-        self.window.attributes("-topmost", True)
-        self.window.configure(bg=BORDER)
-        self.window.geometry(f"{self.width}x{self.height}")
-        self.window.bind("<Escape>", lambda _: self.hide())
-        self.tail = tk.Toplevel(self.root)
-        self.tail.withdraw()
-        self.tail.overrideredirect(True)
-        self.tail.attributes("-topmost", True)
-        self.tail.configure(bg=TRANSPARENT)
-        import os
-
-        if os.name == "nt":
-            self.tail.wm_attributes("-transparentcolor", TRANSPARENT)
-        self.tail.geometry("34x46")
-        self.tail_canvas = tk.Canvas(
-            self.tail,
-            width=34,
-            height=46,
-            bg=TRANSPARENT,
-            highlightthickness=0,
-            borderwidth=0,
+        self.window = tk.Frame(self.root, bg=BORDER)
+        self.root.bind("<Escape>", lambda _: self.hide() if self.visible else None)
+        self.tail_canvas = self.stage
+        self.tail_outline = self.stage.create_polygon(
+            0, 0, 0, 0, 0, 0, fill=BORDER, outline=BORDER, state="hidden", tags="pointer"
         )
-        self.tail_canvas.pack(fill="both", expand=True)
-        for sequence in ("<ButtonPress-1>", "<B1-Motion>", "<ButtonRelease-1>"):
-            self.tail_canvas.bind(sequence, lambda _: "break")
+        self.tail_fill = self.stage.create_polygon(
+            0, 0, 0, 0, 0, 0, fill=BG, outline=BG, state="hidden", tags="pointer"
+        )
+        self.stage.tag_lower("pointer")
         header = tk.Frame(self.window, bg=HEADER, height=56)
         header.pack(fill="x")
         header.pack_propagate(False)
@@ -157,7 +153,7 @@ class NativeChatBubble:
             font=("Segoe UI", 18, "bold"),
             cursor="hand2",
         )
-        self.close_button.place(x=self.width - 46, y=11, width=34, height=34)
+        self.close_button.place(relx=1, x=-46, y=11, width=34, height=34)
         self.close_button.bind("<Button-1>", lambda _: self.hide())
         self.open_button = tk.Label(
             header,
@@ -167,7 +163,7 @@ class NativeChatBubble:
             font=("Segoe UI", 14),
             cursor="hand2",
         )
-        self.open_button.place(x=self.width - 83, y=11, width=30, height=34)
+        self.open_button.place(relx=1, x=-83, y=11, width=30, height=34)
         self.open_button.bind("<Button-1>", lambda _: self.open_main())
         self.content = tk.Frame(self.window, bg=BG)
         self.content.pack(fill="both", expand=True, padx=4, pady=(0, 4))
@@ -249,6 +245,9 @@ class NativeChatBubble:
         controls = tk.Frame(self.body, bg=BG)
         controls.pack(side="bottom", fill="x", pady=(8, 0))
         self.memory_var = tk.BooleanVar(self.window, value=True)
+        self.file_button = tk.Button(controls, text="+ Файлы", command=self.choose_documents,
+                                     bg="#edf4fb", fg="#155eb9", relief="flat", font=("Segoe UI", 9))
+        self.file_button.pack(side="left", padx=(0, 5))
         tk.Checkbutton(
             controls,
             text="Память диалога",
@@ -330,6 +329,10 @@ class NativeChatBubble:
 
     def _refresh_button(self):
         working = bool(self.current and self.current.get("status") in ACTIVE)
+        count = len(self.file_drafts.get(self.selected, ()))
+        agent = bool(self.current and self.current.get("details", {}).get("mode") == "agent")
+        self.file_button.configure(text=f"Файлы · {count}" if count else "+ Файлы",
+                                   state="disabled" if working or self.sending or agent else "normal")
         available = working or (
             bool(self.input_var.get().strip())
             and bool(self.boot.get("providers"))
@@ -338,6 +341,38 @@ class NativeChatBubble:
         self.send_button.configure(
             text="■" if working else "↵", bg="#1d5fa8" if available else "#b5cbe2"
         )
+
+    def choose_documents(self):
+        selected = self.selected
+        paths = self.file_drafts.setdefault(selected, [])
+        def add():
+            chosen = filedialog.askopenfilenames(parent=self.root, title="Прикрепить файлы к сообщению")
+            paths.extend(Path(p) for p in chosen)
+            self._refresh_button()
+        if not paths:
+            add()
+            return
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="Добавить файлы…", command=add)
+        menu.add_separator()
+        for i, path in enumerate(paths):
+            menu.add_command(label="Убрать " + path.name, command=lambda i=i: paths.pop(i))
+        try:
+            menu.tk_popup(self.file_button.winfo_rootx(), self.file_button.winfo_rooty())
+        finally:
+            menu.grab_release()
+
+    def upload_documents(self, chat_id, paths):
+        result = []
+        with httpx.Client(base_url=self.base_url + "/api", trust_env=False, timeout=60,
+                          headers={UI_TOKEN_HEADER: self.ui_token}) as client:
+            for path in paths:
+                with path.open("rb") as file:
+                    r = client.post(f"/chats/{chat_id}/documents", params={"filename": path.name}, content=file)
+                if not r.is_success:
+                    raise ValueError(r.json().get("detail", "Не удалось прикрепить файл."))
+                result.append(r.json()["id"])
+        return result
 
     def toggle_sidebar(self):
         self.sidebar_open = not self.sidebar_open
@@ -376,60 +411,64 @@ class NativeChatBubble:
     def open_main(self, settings=False):
         payload = {"task_id": self.selected}
         if settings:
-            payload["panel"] = "provider"
+            payload["panel"] = "assistant"
         threading.Thread(target=lambda: self.on_main(payload), daemon=True).start()
 
     def show(self):
         self.visible = True
         self.reposition()
         if not self.hidden_test:
-            self.window.deiconify()
-            self.tail.deiconify()
-            self.window.lift()
-            self.tail.lift()
+            self.root.lift()
             self.entry.focus_set()
         self.next_poll = 0
 
     def hide(self):
         self.drafts[self.selected] = self.input_var.get()
         self.visible = False
-        self.window.withdraw()
-        self.tail.withdraw()
+        self.panel_layout = None
+        self.window.place_forget()
+        self.stage.itemconfigure("pointer", state="hidden")
+        self.reposition()
         self.save()
         return "break"
 
     def toggle(self):
         self.hide() if self.visible else self.show()
 
-    def reposition(self):
-        if not self.visible:
-            return
+    def reposition(self, *, bounds=None):
         from workspace.app.mini_avatar import position_window, work_area
 
         ax, ay = self.avatar_position()
-        left, top, right, bottom = work_area(ax, ay)
-        gap = 24
-        if ax - self.width - gap >= left + 12:
-            x = ax - self.width - gap
-            side = "left"
-        elif ax + 154 + gap + self.width <= right - 12:
-            x = ax + 154 + gap
-            side = "right"
+        aw, ah = AVATAR_SIZE
+        layout_changed = False
+        if self.visible:
+            if bounds is None:
+                bounds = work_area(ax + aw // 2, ay + ah // 2)
+            layout = attached_layout((ax, ay), (self.width, self.height), bounds, self.face_anchor())
+            (gx, gy), size, offset = layout.origin, layout.size, layout.avatar
+            x, y, w, h = layout.panel
+            p = layout.pointer
+            if self.panel_layout != (layout.panel, p):
+                layout_changed = True
+                self.panel_layout = (layout.panel, p)
+                self.window.place(x=x, y=y, width=w, height=h)
+                self.window.lift()
+                self.stage.coords(self.tail_outline, *p)
+                center = ((p[0] + p[4]) / 2, (p[1] + p[5]) / 2)
+                inner = [center[i % 2] + (v - center[i % 2]) * .73 for i, v in enumerate(p)]
+                self.stage.coords(self.tail_fill, *inner)
+                self.stage.itemconfigure("pointer", state="normal")
+            self.anchor = {"x": gx + x, "y": gy + y, "side": layout.side,
+                           "tail_x": gx + p[0], "tip": (gx + p[2], gy + p[3])}
         else:
-            x = max(left + 12, min(ax - self.width - gap, right - self.width - 12))
-            side = "left"
-        y = max(top + 12, min(ay + 8, bottom - self.height - 12))
-        self.window.geometry(f"{self.width}x{self.height}")
-        position_window(self.window, x, y)
-        ty = max(y + 58, min(y + self.height - 74, ay + 105 - 23))
-        tx = x + self.width - 2 if side == "left" else x - 32
-        position_window(self.tail, tx, ty)
-        self.tail_canvas.delete("all")
-        outer = [0, 7, 34, 23, 0, 39] if side == "left" else [34, 7, 0, 23, 34, 39]
-        inner = [0, 12, 27, 23, 0, 34] if side == "left" else [34, 12, 7, 23, 34, 34]
-        self.tail_canvas.create_polygon(outer, fill=BORDER, outline=BORDER)
-        self.tail_canvas.create_polygon(inner, fill=BG, outline=BG)
-        self.anchor = {"x": x, "y": y, "side": side, "tail_x": tx}
+            gx, gy, size, offset = ax, ay, AVATAR_SIZE, (0, 0)
+        if self.place_avatar:
+            self.place_avatar(*offset)
+        if size != self.surface_size:
+            layout_changed = True
+            self.surface_size = size
+            self.root.geometry(f"{size[0]}x{size[1]}")
+        position_window(self.root, gx, gy, flush_layout=layout_changed)
 
     def _poll(self, selected, version):
         try:
@@ -484,6 +523,8 @@ class NativeChatBubble:
             elif kind == "created":
                 _, chat_id, raw = item
                 self.drafts[chat_id] = self.drafts.get("", raw)
+                if "" in self.file_drafts:
+                    self.file_drafts[chat_id] = self.file_drafts.pop("")
                 if not self.selected:
                     self.select(chat_id)
                 self.drafts.pop("", None)
@@ -491,6 +532,7 @@ class NativeChatBubble:
             elif kind == "sent":
                 _, chat_id, raw = item
                 self.sending = False
+                self.file_drafts.pop(chat_id, None)
                 if self.drafts.get(chat_id) == raw:
                     self.drafts[chat_id] = ""
                     if self.selected == chat_id:
@@ -610,6 +652,7 @@ class NativeChatBubble:
             return
         selected = self.selected
         raw = self.input_var.get()
+        paths = tuple(self.file_drafts.get(selected, ()))
         memory = self.memory_var.get()
         working = bool(self.current and self.current.get("status") in ACTIVE)
         if not working and (not raw.strip() or not self.boot.get("providers")):
@@ -640,14 +683,18 @@ class NativeChatBubble:
                         if current["status"] in {"queued", "retryable"}
                         else "/continue"
                     )
-                    self._request(
-                        "/chats/" + selected + action,
-                        {
-                            "revision": current["revision"],
-                            "prompt": raw.strip(),
-                            "memory": memory,
-                        },
-                    )
+                    details = current.get("details", {})
+                    single = details.get("skill_id")
+                    skill_ids = details.get("skill_ids", [single] if single else [])
+                    payload = {"revision": current["revision"], "prompt": raw.strip(), "memory": memory}
+                    if paths:
+                        payload["attachments"] = self.upload_documents(chat_id, paths)
+                    if skill_ids:
+                        sections = details.get("skill_disabled_sections", {})
+                        payload["skills"] = [
+                            {"id": key, "disabled_sections": sections.get(key, [])} for key in skill_ids
+                        ]
+                    self._request("/chats/" + selected + action, payload)
                 else:
                     chat = self._request(
                         "/chats",
@@ -661,12 +708,14 @@ class NativeChatBubble:
                     )
                     chat_id = chat["id"]
                     self.outputs.put(("created", chat_id, raw))
+                    ids = self.upload_documents(chat_id, paths) if paths else []
                     self._request(
                         "/chats/" + chat_id + "/start",
                         {
                             "revision": chat["revision"],
                             "prompt": raw.strip(),
                             "memory": memory,
+                            "attachments": ids,
                         },
                     )
                 self.outputs.put(("sent", chat_id, raw))
@@ -682,7 +731,8 @@ class NativeChatBubble:
         with contextlib.suppress(tk.TclError):
             self.root.after_cancel(self.timer)
         self.window.destroy()
-        self.tail.destroy()
+        self.stage.delete("pointer")
+        self.place_avatar = None
         # Tk handles and variables must be released on their creating thread.
         for name, value in list(vars(self).items()):
             if isinstance(value, (tk.Misc, tk.Variable)):

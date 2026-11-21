@@ -2,12 +2,15 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import { MiniApp } from "./MiniApp";
-import { WorkspaceSettings } from "./WorkspaceSettings";
+import { Icon } from "./Icon";
+import { MessageFiles } from "./MessageFiles";
+import { SkillControls } from "./SkillControls";
+import { WorkspaceSettings, type SettingsPage } from "./WorkspaceSettings";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import { ProjectDialog } from "./ProjectDialog";
 import { ChatHistory } from "./ChatHistory";
 import { AgentPanel } from "./AgentPanel";
-import { RuntimeStatus } from "./RuntimeStatus";
+import { RuntimeStatus, type RuntimeObservation } from "./RuntimeStatus";
 import { operatorToken } from "./access";
 import {
   api,
@@ -15,6 +18,9 @@ import {
   agentTrustNotice,
   emptyBoot,
   submitMessage,
+  chatSkillIds,
+  disabledSkillSections,
+  type SkillUse,
   transferDraft,
   pendingPrompt,
   clearSentDraft,
@@ -33,7 +39,7 @@ function App() {
       sessionStorage.getItem("workspace-task") ||
       "",
   );
-  const [settings, setSettings] = useState(false),
+  const [settings, setSettings] = useState<SettingsPage | null>(null),
     [addProject, setAddProject] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -43,6 +49,18 @@ function App() {
     [memory, setMemory] = useState(true),
     [tools, setTools] = useState(false),
     [connectorIds, setConnectorIds] = useState<string[]>([]);
+  const [runtimeObservation, setRuntimeObservation] =
+    useState<RuntimeObservation>();
+  const [fileDrafts, setFileDrafts] = useState<Record<string, File[]>>({});
+  const [skillDrafts, setSkillDrafts] = useState<
+    Record<
+      string,
+      {
+        ids: string[];
+        sections: Record<string, string[]>;
+      }
+    >
+  >({});
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     try {
       return JSON.parse(sessionStorage.getItem("workspace-drafts") || "{}");
@@ -55,8 +73,55 @@ function App() {
     draft =
       drafts[draftKey] ??
       pendingPrompt(current?.id === selected ? current : null);
-  const working = !!current && active.has(current.status);
-  const agent = !!current && current.details?.mode !== "chat";
+  const liveChat = current?.id === selected ? current : null;
+  const selectedChat =
+    liveChat || boot.tasks.find((chat) => chat.id === selected);
+  const working = !!selectedChat && active.has(selectedChat.status);
+  const agent = selected
+    ? (selectedChat?.mode || selectedChat?.details?.mode) === "agent"
+    : files;
+  const editedSelection = skillDrafts[draftKey];
+  const savedIds = selectedChat ? chatSkillIds(selectedChat) : (boot.skills || []).map(s => s.id);
+  const selectedIds = editedSelection?.ids ?? savedIds;
+  const attachments = fileDrafts[draftKey] ?? [];
+  const sections =
+    editedSelection?.sections ?? disabledSkillSections(selectedChat);
+  function toggleSkill(target: string[]) {
+    setError("");
+    setSkillDrafts((old) => {
+      const ids = old[draftKey]?.ids ?? savedIds;
+      const enabled = target.every(id => ids.includes(id));
+      const sections = {
+        ...(old[draftKey]?.sections ?? disabledSkillSections(selectedChat)),
+      };
+      if (enabled) {
+        for (const id of target) delete sections[id];
+      }
+      return {
+        ...old,
+        [draftKey]: {
+          ids: enabled ? ids.filter(id => !target.includes(id)) : [...new Set([...ids, ...target])],
+          sections,
+        },
+      };
+    });
+  }
+  function toggleSection(id: string, key: string) {
+    setSkillDrafts((old) => {
+      const draft = old[draftKey] ?? {
+        ids: savedIds,
+        sections: disabledSkillSections(selectedChat),
+      };
+      const hidden = draft.sections[id] || [];
+      const next = hidden.includes(key)
+        ? hidden.filter((s) => s !== key)
+        : [...hidden, key];
+      return {
+        ...old,
+        [draftKey]: { ...draft, sections: { ...draft.sections, [id]: next } },
+      };
+    });
+  }
   const reload = () => api<Bootstrap>("/bootstrap").then(setBoot);
   useEffect(() => {
     let valid = true;
@@ -97,7 +162,8 @@ function App() {
       if (d.task_id) setSelected(d.task_id);
       if (d.project_id) setProject(d.project_id);
       if (d.panel === "project") setAddProject(true);
-      else if (d.panel) setSettings(true);
+      else if (d.panel === "assistant") setSettings("assistant");
+      else if (d.panel) setSettings("runtime");
     };
     window.addEventListener("local-ai-select-task", receive);
     return () => window.removeEventListener("local-ai-select-task", receive);
@@ -117,6 +183,7 @@ function App() {
   function newChat(projectId = "") {
     setProject(projectId);
     setSelected("");
+
     setFiles(false);
     setTools(false);
     setError("");
@@ -141,16 +208,33 @@ function App() {
           action_id: crypto.randomUUID(),
         });
         setDrafts((old) => transferDraft(old, key, row.id, raw));
+        setFileDrafts(old => {
+          if (!old[key]) return old;
+          const next = {...old, [row.id]: old[key]};
+          delete next[key];
+          return next;
+        });
+        setSkillDrafts((old) => {
+          if (!old[key]) return old;
+          const next = { ...old, [row.id]: old[key] };
+          delete next[key];
+          return next;
+        });
         setSelected(row.id);
       } else {
         row = await api<Conversation>("/chats/" + selected);
       }
-      await submitMessage(row, raw, memory);
+      const uses: SkillUse[] = agent ? [] : selectedIds.map(id => ({id, disabled_sections: sections[id]}));
+      await submitMessage(row, raw, memory, uses, agent ? [] : attachments);
+      setFileDrafts(old => {
+        if (old[row.id] !== attachments) return old;
+        const next = {...old};
+        delete next[row.id];
+        return next;
+      });
       setDrafts((old) => clearSentDraft(old, row.id, raw));
     });
   }
-  const liveChat = current?.id === selected ? current : null;
-  const selectedChat = liveChat || boot.tasks.find((chat) => chat.id === selected);
   const projectName = boot.projects.find(
     (entry) => entry.id === (selectedChat ? selectedChat.project_id : project),
   )?.name;
@@ -160,7 +244,7 @@ function App() {
       <textarea
         aria-label={selected ? "Сообщение" : "Новое сообщение"}
         placeholder="Напишите сообщение…"
-        rows={selected ? 2 : 4}
+        rows={selected ? 2 : 3}
         value={draft}
         onChange={(e) =>
           setDrafts((old) => ({ ...old, [draftKey]: e.target.value }))
@@ -176,77 +260,98 @@ function App() {
           }
         }}
       />
-      <div className="compose-options">
-        {!selected && (
+      {!selected && (
+        <div className="compose-context">
+          <label className="inline-option">
+            Проект
+            <select
+              aria-label="Проект диалога"
+              value={project}
+              onChange={(e) => {
+                setProject(e.target.value);
+                setFiles(false);
+              }}
+            >
+              <option value="">Без проекта</option>
+              {boot.projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline-option">
+            Модель
+            <select
+              aria-label="Модель диалога"
+              value={provider || boot.providers[0]?.id || ""}
+              onChange={(e) => setProvider(e.target.value)}
+            >
+              {!boot.providers.length && (
+                <option value="">Не подключена</option>
+              )}
+              {boot.providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.model.split(":")[0]}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!selected && project && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={files}
+                onChange={(e) => setFiles(e.target.checked)}
+              />
+              Файлы и команды
+            </label>
+          )}
+          {!selected && files && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={write}
+                onChange={(e) => setWrite(e.target.checked)}
+              />
+              Разрешить запись в проект
+            </label>
+          )}
+        </div>
+      )}
+      <div className="composer-toolbar">
+        {!agent && (
           <>
-            <label className="inline-option">
-              Проект
-              <select
-                aria-label="Проект диалога"
-                value={project}
-                onChange={(e) => {
-                  setProject(e.target.value);
-                  setFiles(false);
-                }}
-              >
-                <option value="">Без проекта</option>
-                {boot.projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="inline-option">
-              Модель
-              <select
-                aria-label="Модель диалога"
-                value={provider || boot.providers[0]?.id || ""}
-                onChange={(e) => setProvider(e.target.value)}
-              >
-                {!boot.providers.length && (
-                  <option value="">Не подключена</option>
-                )}
-                {boot.providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.model.split(":")[0]}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <MessageFiles files={attachments} disabled={busy || working} error={setError}
+              change={batch => setFileDrafts(old => ({...old, [draftKey]: batch}))} />
+            <SkillControls
+              key={draftKey}
+              skills={boot.skills || []}
+              selectedIds={selectedIds}
+              sections={sections}
+              toggleSection={toggleSection}
+              disabled={busy || working}
+              toggle={toggleSkill}
+              library={() => setSettings("skills")}
+            />
+            <button
+              type="button"
+              className="tool-button memory-toggle"
+              aria-pressed={memory}
+              aria-label="Память диалога"
+              title={
+                memory
+                  ? "Память включена · учитывать предыдущие сообщения"
+                  : "Память выключена · ответ только на это сообщение"
+              }
+              onClick={() => setMemory(!memory)}
+            >
+              <Icon name="memory" size={16} />
+              Память
+              <span className="switch-track" aria-hidden="true" />
+            </button>
           </>
         )}
-        {(!selected || !agent) && (
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={memory}
-              onChange={(e) => setMemory(e.target.checked)}
-            />
-            Память диалога
-          </label>
-        )}
-        {!selected && project && (
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={files}
-              onChange={(e) => setFiles(e.target.checked)}
-            />
-            Файлы и команды
-          </label>
-        )}
-        {!selected && files && (
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={write}
-              onChange={(e) => setWrite(e.target.checked)}
-            />
-            Разрешить запись в проект
-          </label>
-        )}
-        <span className="compose-spacer" />
         {working ? (
           <button
             className="stop"
@@ -260,7 +365,7 @@ function App() {
               })
             }
           >
-            ■ Остановить
+            Остановить
           </button>
         ) : (
           <button
@@ -272,9 +377,12 @@ function App() {
               (!!current &&
                 ["interrupted", "uncertain"].includes(current.status))
             }
+            aria-label="Отправить"
+            title="Отправить · Ctrl+Enter"
             onClick={send}
           >
-            Отправить ↗
+            <Icon name="send" size={16} />
+            <span>Отправить</span>
           </button>
         )}
       </div>
@@ -317,7 +425,7 @@ function App() {
         }}
         addProject={() => setAddProject(true)}
         showAssistant={() => act(() => api("/host/show-avatar", {}))}
-        openSettings={() => setSettings(true)}
+        openSettings={() => setSettings("runtime")}
       />
       <main>
         <header className={selected ? "topbar chat-topbar" : "topbar"}>
@@ -328,7 +436,9 @@ function App() {
                 <span className="workspace-project-name" title={projectName}>
                   {projectName || "Без проекта"}
                 </span>
-                <span className="workspace-heading-divider" aria-hidden="true">/</span>
+                <span className="workspace-heading-divider" aria-hidden="true">
+                  /
+                </span>
                 <h1 title={chatTitle}>{chatTitle}</h1>
               </div>
             ) : (
@@ -345,28 +455,30 @@ function App() {
                 Действия и файлы
               </button>
             )}
-            {liveChat && ["interrupted", "uncertain"].includes(liveChat.status) && (
-              <button
-                className="workspace-header-action"
-                disabled={busy}
-                onClick={() =>
-                  act(() =>
-                    api("/chats/" + liveChat.id + "/restore", {
-                      revision: liveChat.revision,
-                    }),
-                  )
-                }
-              >
-                Восстановить историю
-              </button>
-            )}
+            {liveChat &&
+              ["interrupted", "uncertain"].includes(liveChat.status) && (
+                <button
+                  className="workspace-header-action"
+                  disabled={busy}
+                  onClick={() =>
+                    act(() =>
+                      api("/chats/" + liveChat.id + "/restore", {
+                        revision: liveChat.revision,
+                      }),
+                    )
+                  }
+                >
+                  Восстановить историю
+                </button>
+              )}
             <RuntimeStatus
+              observation={runtimeObservation}
               provider={
                 boot.providers.find(
                   (p) => p.id === (selectedChat?.provider_id || provider),
                 ) || boot.providers[0]
               }
-              open={() => setSettings(true)}
+              open={() => setSettings("runtime")}
             />
           </div>
         </header>
@@ -380,14 +492,10 @@ function App() {
         )}
         {!selected ? (
           <section className="welcome-chat">
-            <span className="eyebrow">LOCAL AI</span>
             <h2>Новый диалог</h2>
-            <p className="muted">
-              Общайтесь с моделью и сохраняйте историю переписки.
-            </p>
             {compose}
             {!boot.providers.length && (
-              <button className="link" onClick={() => setSettings(true)}>
+              <button className="link" onClick={() => setSettings("runtime")}>
                 Подключить модель
               </button>
             )}
@@ -400,7 +508,7 @@ function App() {
                   "Запуск не дошёл до сессии. Повторите отправку."}
               </p>
             )}
-            <ChatHistory events={events} current={current} />
+            <ChatHistory events={liveChat ? events : []} current={liveChat} />
             {current && agent && tools && (
               <AgentPanel current={current} events={events} act={act} />
             )}
@@ -410,7 +518,14 @@ function App() {
         {settings && (
           <WorkspaceSettings
             boot={boot}
-            close={() => setSettings(false)}
+            close={() => setSettings(null)}
+            initialPage={settings}
+            onObservation={setRuntimeObservation}
+            providerId={selectedChat?.provider_id || provider}
+            selectedSkills={selectedIds}
+            sections={sections}
+            toggleSection={toggleSection}
+            chooseSkill={!agent && !working && !busy ? toggleSkill : undefined}
             reload={reload}
           />
         )}

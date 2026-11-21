@@ -49,6 +49,61 @@ class WorkspaceReviewTests(unittest.TestCase):
             },
         ).json()
 
+    def test_skill_set_validation_precedes_start_and_old_single_is_accepted(self):
+        task = self.seed("chat")
+        registered = self.post("/skills/import", [
+            {"filename": "writer.md", "markdown": "Write briefly."},
+            {"filename": "reader.md", "markdown": "Read.\n```workspace-mcp\n"
+             '{"url":"http://127.0.0.1:9092/mcp","tool":"read","file":{"filename":"n","base64":"b"}}\n```'},
+        ]).json()
+        writer, reader = [row["id"] for row in registered]
+        url = f"/chats/{task['id']}/start"
+        revision = {"revision": task["revision"]}
+        for invalid in (
+            {"skills": [{"id": writer}, {"id": writer}]},
+            {"skills": [{"id": writer}, {"id": reader}], "attachments": ["missing-document"]},
+            {"skills": [{"id": writer, "disabled_sections": ["missing"]}]},
+            {"skills": [], "skill": {"id": writer}},
+        ):
+            response = self.post(url, {**revision, **invalid})
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(self.store.one("tasks", task["id"])["revision"], task["revision"])
+        with patch.object(self.service, "_start_chat", return_value=task) as run:
+            response = self.post(url, {**revision, "skill": {"id": writer}})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual([use.id for use in run.call_args.args[3]], [writer])
+
+    def test_per_skill_files_and_legacy_report_survive_selection_changes(self):
+        from workspace.app import skills
+        task = self.seed("chat")
+        def reader(name):
+            doc = ('Read the file.\n```workspace-mcp\n{"url":"http://127.0.0.1:9092/mcp",'
+                   '"tool":"read","file":{"filename":"n","base64":"b"}}\n```')
+            return skills.register(self.store, skills.SkillInput(filename=name, markdown=doc))["id"]
+        first, second = reader("first.md"), reader("second.md")
+        old = {"tool": "read", "filename": "old.txt", "report": "Only first"}
+        self.store.update_task(task["id"], "completed", {"skill_id": first, "skill_result": old})
+        def state():
+            return self.store.one("tasks", task["id"])
+        def use(key, name=None):
+            return skills.SkillUse(id=key, attachment={"filename": name, "base64": "QQ=="} if name else None)
+        uses, selection = skills.prepare_skills(self.store, state(), [use(second, "second.txt"), use(first)])
+        self.assertEqual(uses[0].attachment.filename, "second.txt")
+        self.assertIsNone(uses[0].cached)
+        self.assertEqual(uses[1].cached, old)
+        self.assertEqual(selection["skill_ids"], [second, first])
+        self.store.update_task(task["id"], "completed", selection)
+        new = {"tool": "read", "filename": "second.txt", "report": "Only second"}
+        skills.record_report(self.store, task["id"], "turn-two", uses[0].definition, new, single=False)
+        again, _ = skills.prepare_skills(self.store, state(), [use(first, "replacement.txt"), use(second)])
+        self.assertIsNone(again[0].cached)
+        self.assertEqual(again[1].cached, new)
+        _, cleared = skills.prepare_skills(self.store, state(), [])
+        self.store.update_task(task["id"], "completed", cleared)
+        self.assertEqual(state()["details"]["skill_reports"], {})
+        history = self.store.rows("SELECT payload FROM events WHERE task_id=? AND kind='skill_tool' ORDER BY seq", (task["id"],))
+        self.assertEqual([json.loads(e["payload"])["result"] for e in history], [old, new])
+
     def test_operator_api_and_task_bridge_use_separate_credentials(self):
         self.assertEqual(self.client.get("/api/health").status_code, 200)
         for path in ("/api/bootstrap", "/api/host/status"):
@@ -180,7 +235,7 @@ class WorkspaceReviewTests(unittest.TestCase):
             )
             self.assertEqual(result.status_code, 200)
         self.assertEqual(run.call_args.args[0]["id"], task["id"])
-        self.assertEqual(run.call_args.args[1:], ("Edited message", False))
+        self.assertEqual(run.call_args.args[1:], ("Edited message", False, None, []))
 
     def test_first_agent_start_validates_profile_before_admission_and_can_retry(self):
         task = self.seed("agent")

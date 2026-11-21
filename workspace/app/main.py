@@ -8,12 +8,14 @@ import sys
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from workspace.app.store import Store, data_root, identifier, now, SCHEMA_VERSION
 from workspace.app.task_service import TaskService
+from workspace.app.skills import SkillInput, SkillUse, list_skills, register, register_many
 from workspace.app.runtime_client import RuntimeClient, local_url
 from workspace.app.history import reconcile
 from workspace.app.instance import Instance
@@ -26,6 +28,10 @@ from workspace.app.management import CONTROL_ROUTES, router as management_router
 from workspace.local_ai_control import CONTROL_TOKEN_HEADER, publish_control
 
 from workspace.app.version import VERSION
+
+
+class CompanionPreference(BaseModel):
+    style: Literal["studio", "pixel"]
 
 
 def create_app(root=None, *, ui_token=None, control_port=None):
@@ -157,24 +163,50 @@ def create_app(root=None, *, ui_token=None, control_port=None):
             "sdk_version": "0.2.2rc2",
         }
 
+    @app.post("/api/preferences/mini-helper")
+    def companion_preference(payload: CompanionPreference, request: Request):
+        from workspace.app import desktop_host
+
+        store(request).set_companion_appearance(payload.style)
+        desktop_host.refresh_appearance()
+        return {"style": payload.style}
+
     @app.get("/api/bootstrap")
     def bootstrap(request: Request):
         db = store(request)
+        rows = db.rows(
+            "SELECT id,CASE WHEN project_id='__direct_chats__' THEN NULL ELSE project_id END AS project_id,"
+            "provider_id,title,status,revision,updated_at,COALESCE(json_extract(details,'$.mode'),'agent') AS mode,"
+            "json_extract(details,'$.skill_id') AS skill_id,json_extract(details,'$.skill_ids') AS skill_ids,"
+            "json_extract(details,'$.skill_disabled_sections') AS skill_disabled_sections FROM tasks ORDER BY created_at DESC"
+        )
+        for row in rows:
+            row["skill_disabled_sections"] = json.loads(row["skill_disabled_sections"] or "{}")
+            row["skill_ids"] = (json.loads(row["skill_ids"]) if row["skill_ids"] is not None
+                                else [row["skill_id"]] if row["skill_id"] else [])
         return {
             "version": VERSION,
+            "mini_helper_appearance": db.companion_appearance(),
             "projects": db.rows(
                 "SELECT p.*, COALESCE(s.source, 'folder') AS source, COALESCE(s.url, '') AS github_url FROM projects p LEFT JOIN project_sources s ON p.id=s.project_id WHERE p.id!='__direct_chats__' ORDER BY p.created_at DESC"
             ),
             "providers": db.rows(
                 "SELECT id,name,base_url,model,(api_key!='') AS api_key_configured FROM providers"
             ),
-            "tasks": db.rows(
-                "SELECT id,CASE WHEN project_id='__direct_chats__' THEN NULL ELSE project_id END AS project_id,provider_id,title,status,revision,updated_at,COALESCE(json_extract(details,'$.mode'),'agent') AS mode FROM tasks ORDER BY created_at DESC"
-            ),
+            "skills": list_skills(db),
+            "tasks": rows,
             "connectors": db.rows(
                 "SELECT id,name,base_url,allow_write,(api_key!='') AS api_key_configured FROM connectors"
             ),
         }
+
+    @app.post("/api/skills")
+    def register_skill(payload: SkillInput, request: Request):
+        return register(store(request), payload)
+
+    @app.post("/api/skills/import")
+    def import_skills(payload: list[SkillInput], request: Request):
+        return register_many(store(request), payload)
 
     @app.post("/api/projects")
     def project(payload: ProjectInput, request: Request):
@@ -299,6 +331,16 @@ def create_app(root=None, *, ui_token=None, control_port=None):
             "cursor": rows[-1]["seq"] if rows else after,
         }
 
+    @app.get("/api/chats/{task_id}/artifacts/{artifact_id}")
+    def chat_artifact(task_id: str, artifact_id: str, request: Request):
+        from workspace.app.skill_resources import download
+        return download(store(request), task_id, artifact_id)
+
+    @app.post("/api/chats/{task_id}/documents")
+    async def add_document(task_id: str, filename: str, request: Request):
+        from workspace.app.chat_documents import upload
+        return await upload(store(request), task_id, filename, request)
+
     @app.get("/api/chats/{task_id}/messages")
     def chat_messages(task_id: str, request: Request, version: int = -1):
         from workspace.app.conversation_messages import MESSAGE_FILTER, project_messages
@@ -328,6 +370,8 @@ def create_app(root=None, *, ui_token=None, control_port=None):
             payload.revision,
             new_prompt=payload.prompt,
             memory=payload.memory,
+            skills=payload.selected_skills(),
+            attachments=payload.attachments,
             workspace_url=str(request.base_url),
         )
 
@@ -359,6 +403,8 @@ def create_app(root=None, *, ui_token=None, control_port=None):
             payload.revision,
             new_prompt=payload.prompt,
             memory=payload.memory,
+            skills=payload.selected_skills(),
+            attachments=payload.attachments,
             workspace_url=str(request.base_url),
         )
 
@@ -476,13 +522,23 @@ class TaskAction(BaseModel):
     revision: int = Field(ge=1)
 
 
-class StartAction(TaskAction):
+class ChatSkillAction(TaskAction):
+    memory: bool | None = None
+    skill: SkillUse | None = None
+    skills: list[SkillUse] | None = None
+    attachments: list[str] = Field(default_factory=list)
+
+    def selected_skills(self):
+        if self.skills is not None and self.skill is not None:
+            raise ValueError("Передайте список skills или одиночное поле skill.")
+        return [self.skill] if self.skill is not None else self.skills
+
+
+class StartAction(ChatSkillAction):
     prompt: str | None = Field(default=None, min_length=1, max_length=100000)
-    memory: bool | None = None
 
 
-class Followup(TaskAction):
-    memory: bool | None = None
+class Followup(ChatSkillAction):
     prompt: str = Field(min_length=1, max_length=100000)
 
 

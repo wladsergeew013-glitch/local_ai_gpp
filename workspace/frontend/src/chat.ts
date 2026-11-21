@@ -35,6 +35,9 @@ export type Conversation = {
   revision: number;
   updated_at: string;
   mode?: string;
+  skill_id?: string | null;
+  skill_ids?: string[];
+  skill_disabled_sections?: Record<string, string[]>;
   details?: Record<string, any>;
   approvals?: Approval[];
 };
@@ -50,12 +53,64 @@ export type Connector = {
   base_url: string;
   allow_write: boolean;
 };
+export type MarkdownSkill = {
+  id: string;
+  name: string;
+  description: string;
+  has_mcp: boolean;
+  accepts_attachment: boolean;
+  accepts_multiple?: boolean;
+  formats?: string[];
+  group?: { id: string; name: string; key: string } | null;
+  sections?: { id: string; title: string }[];
+};
+export type SkillUse = {
+  id: string;
+  disabled_sections?: string[];
+  attachment?: { filename: string; base64: string };
+  attachments?: { filename: string; base64: string }[];
+};
+export type SkillArtifact = { id: string; name: string; size: number; mime_type: string };
+export type SkillReport = { filename?: string; tool: string; report: unknown; artifacts?: SkillArtifact[] };
+
+export async function downloadArtifact(chat: string, file: Pick<SkillArtifact, "id" | "name">) {
+  const token = await operatorToken;
+  if (!token) throw new Error("Откройте Workspace из приложения.");
+  const path = `/api/chats/${encodeURIComponent(chat)}/artifacts/${encodeURIComponent(file.id)}`;
+  const response = await fetch(path, { headers: { "X-Workspace-UI-Token": token }, redirect: "error" });
+  if (!response.ok) throw new Error("Не удалось получить файл из диалога.");
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = file.name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+}
+
+export function chatSkillIds(row?: Conversation | null): string[] {
+  const ids = row?.details?.skill_ids ?? row?.skill_ids;
+  const single = row?.details?.skill_id ?? row?.skill_id;
+  return Array.isArray(ids) ? ids : single ? [single] : [];
+}
+
+export function disabledSkillSections(
+  row?: Conversation | null,
+): Record<string, string[]> {
+  return (
+    row?.details?.skill_disabled_sections ?? row?.skill_disabled_sections ?? {}
+  );
+}
+
 export type Bootstrap = {
   version: string;
+  mini_helper_appearance?: "studio" | "pixel";
   projects: Project[];
   providers: Provider[];
   tasks: Conversation[];
   connectors: Connector[];
+  skills?: MarkdownSkill[];
 };
 export const emptyBoot: Bootstrap = {
   version: "",
@@ -111,7 +166,28 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
   return data;
 }
 
-export function submitMessage(row: Conversation, raw: string, memory: boolean) {
+async function uploadDocuments(chat: string, files: File[]): Promise<string[]> {
+  const token = await operatorToken;
+  if (!token) throw new Error("Откройте Workspace из приложения.");
+  const ids: string[] = [];
+  for (const file of files) {
+    const url = `/api/chats/${encodeURIComponent(chat)}/documents?filename=${encodeURIComponent(file.name)}`;
+    const response = await fetch(url, { method: "POST", headers: { "X-Workspace-UI-Token": token },
+      redirect: "error", body: file });
+    const item = await response.json();
+    if (!response.ok) throw new Error(item.detail || `Не удалось приложить ${file.name}`);
+    ids.push(item.id);
+  }
+  return ids;
+}
+
+export async function submitMessage(
+  row: Conversation,
+  raw: string,
+  memory: boolean,
+  skills?: SkillUse[],
+  files: File[] = [],
+) {
   const action = ["queued", "retryable"].includes(row.status)
     ? "start"
     : "continue";
@@ -119,6 +195,8 @@ export function submitMessage(row: Conversation, raw: string, memory: boolean) {
     revision: row.revision,
     prompt: raw.trim(),
     memory,
+    skills,
+    attachments: files.length ? await uploadDocuments(row.id, files) : [],
   });
 }
 
@@ -162,9 +240,11 @@ function text(value: any): string {
 export type Message = {
   id: number;
   role: string;
+  turnId?: string;
   text: string;
   time: string;
   error?: string;
+  documents?: Pick<SkillArtifact, "id" | "name">[];
 };
 export function messages(events: ChatEvent[]): Message[] {
   const out: Message[] = [];
@@ -209,7 +289,15 @@ export function messages(events: ChatEvent[]): Message[] {
     if (!(value || error)) continue;
     if (!hasPlain && out.at(-1)?.role === role && out.at(-1)?.text === value)
       continue;
-    out.push({ id: e.seq, role, text: value, error, time: e.created_at });
+    out.push({
+      id: e.seq,
+      role,
+      turnId: p.turn_id,
+      documents: p.documents,
+      text: value,
+      error,
+      time: e.created_at,
+    });
   }
   return out;
 }

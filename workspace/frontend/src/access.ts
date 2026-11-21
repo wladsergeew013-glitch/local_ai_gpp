@@ -1,5 +1,5 @@
 type DesktopWindow = Window & {
-  pywebview?: { api?: { workspace_token?: () => Promise<string | null> } };
+  pywebview?: { api?: { workspace_token?: () => Promise<string | null>; workspace_titlebar?: () => Promise<boolean> } };
 };
 
 export const operatorToken = new Promise<string | null>((resolve) => {
@@ -15,7 +15,10 @@ export const operatorToken = new Promise<string | null>((resolve) => {
     window.removeEventListener("pywebviewready", connectDesktop);
     bridge
       .workspace_token()
-      .then(resolve, () => resolve(null))
+      .then(async (token) => {
+        if (token && await bridge?.workspace_titlebar?.().catch(() => false)) document.documentElement.classList.add("workspace-desktop");
+        resolve(token);
+      }, () => resolve(null))
       .finally(() => window.clearTimeout(timeout));
   }
   const timeout = window.setTimeout(() => {

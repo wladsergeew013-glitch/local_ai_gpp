@@ -15,7 +15,7 @@ export function ProjectDialog({
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   return (
-    <SettingsDialog onClose={close} error={error}>
+    <SettingsDialog onClose={close} error={error} label="Новый проект">
       <section className="settings-panel">
         <header>
           <h2>Новый проект</h2>

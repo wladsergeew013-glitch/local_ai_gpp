@@ -18,7 +18,11 @@ def main():
         help="Read the headless operator token from stdin.",
     )
     parser.add_argument("--port", type=int, default=8776)
-    parser.add_argument("--data-dir")
+    profile = parser.add_mutually_exclusive_group()
+    profile.add_argument("--data-dir")
+    profile.add_argument("--portable", action="store_true", help="Use the workspace-profile folder on this drive.")
+    parser.add_argument("--import-skills", metavar="MANIFEST", help="Import a local MCP skill manifest and exit.")
+    parser.add_argument("--bundle-root", help="Directory for relative paths in a skill manifest.")
     parser.add_argument("--smoke-seconds", type=float, help=argparse.SUPPRESS)
     parser.add_argument(
         "--self-test-avatar", action="store_true", help=argparse.SUPPRESS
@@ -29,6 +33,9 @@ def main():
     args = parser.parse_args()
     if args.ui_token_stdin and (not args.headless or sys.stdin is None):
         parser.error("--ui-token-stdin requires --headless and an input stream")
+    if args.portable:
+        from workspace.local_ai_control import portable_profile
+        os.environ["LOCAL_AI_WORKSPACE_DATA_DIR"] = str(portable_profile())
     if args.data_dir:
         os.environ["LOCAL_AI_WORKSPACE_DATA_DIR"] = str(Path(args.data_dir).resolve())
     if sys.stdout is None or sys.stderr is None:
@@ -41,6 +48,18 @@ def main():
             sys.stdout = stream
         if sys.stderr is None:
             sys.stderr = stream
+    if args.bundle_root and not args.import_skills:
+        parser.error("--bundle-root requires --import-skills")
+    if args.import_skills:
+        import json
+        from workspace.app.skill_import import import_manifest
+        from workspace.app.store import data_root
+        try:
+            result = import_manifest(data_root(), args.import_skills, args.bundle_root)
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            parser.exit(1, f"Skill import failed: {exc}\n")
+        print(json.dumps(result), flush=True)
+        return 0
     import uvicorn
     from workspace.app.main import create_app
 

@@ -14,6 +14,7 @@ import {
   type Bootstrap,
   type Conversation,
 } from "./chat";
+import { MessageFiles } from "./MessageFiles";
 import { ChatHistory } from "./ChatHistory";
 import { operatorToken } from "./access";
 
@@ -30,6 +31,7 @@ export function MiniApp() {
     [provider, setProvider] = useState(""),
     [error, setError] = useState(""),
     [sending, setSending] = useState(false);
+  const [fileDrafts, setFileDrafts] = useState<Record<string, File[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     try {
       return JSON.parse(
@@ -112,12 +114,17 @@ export function MiniApp() {
           action_id: crypto.randomUUID(),
         });
         setDrafts((old) => transferDraft(old, key, row.id, raw));
+        setFileDrafts(old => {
+          if (!old[key]) return old;
+          const next = {...old, [row.id]: old[key]}; delete next[key]; return next;
+        });
         setSelected(row.id);
         setMenu(false);
       } else {
         row = await api<Conversation>("/chats/" + selected);
       }
-      await submitMessage(row, raw, memory);
+      await submitMessage(row, raw, memory, undefined, fileDrafts[key] || []);
+      setFileDrafts(old => { const next = {...old}; delete next[row.id]; return next; });
       setDrafts((old) => clearSentDraft(old, row.id, raw));
     } catch (e) {
       setError((e as Error).message);
@@ -255,6 +262,8 @@ export function MiniApp() {
                 }
               }}
             />
+            {(!current || current.details?.mode === "chat") && <MessageFiles files={fileDrafts[draftKey] || []}
+              disabled={sending || working} error={setError} change={batch => setFileDrafts(old => ({...old, [draftKey]: batch}))} />}
             <div className="mini-controls">
               {(!current || current.details?.mode === "chat") && (
                 <label className="check">

@@ -35,6 +35,7 @@ class RuntimeClient:
 
     def request(self, method, path, **kwargs):
         headers = {"Authorization": "Bearer " + self.key} if self.key else {}
+        headers.update(kwargs.pop("headers", {}))
         with httpx.Client(
             base_url=self.base_url + "/",
             headers=headers,

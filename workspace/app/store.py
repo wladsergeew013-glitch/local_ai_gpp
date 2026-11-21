@@ -23,13 +23,8 @@ def identifier():
 
 
 def data_root():
-    return Path(
-        os.environ.get("LOCAL_AI_WORKSPACE_DATA_DIR")
-        or (
-            Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local/share"))
-            / "LocalAIWorkspace"
-        )
-    ).resolve()
+    from workspace.local_ai_control import workspace_root
+    return workspace_root()
 
 
 class Store:
@@ -71,6 +66,53 @@ CREATE TABLE IF NOT EXISTS project_sources(project_id TEXT PRIMARY KEY REFERENCE
 PRAGMA user_version=2;
 """
                 )
+
+        with self.connection:
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS skill_artifacts(id TEXT PRIMARY KEY, task_id TEXT NOT NULL "
+                "REFERENCES tasks(id) ON DELETE CASCADE, name TEXT NOT NULL, mime TEXT NOT NULL, data BLOB NOT NULL)"
+            )
+            self.connection.execute("CREATE TABLE IF NOT EXISTS markdown_skills(id TEXT PRIMARY KEY, definition TEXT NOT NULL)")
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS chat_uploads(id TEXT PRIMARY KEY REFERENCES skill_artifacts(id) ON DELETE CASCADE,"
+                "task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,name TEXT NOT NULL,sha256 TEXT NOT NULL,"
+                "UNIQUE(task_id,name,sha256))"
+            )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS mini_appearance("
+                "id INTEGER PRIMARY KEY CHECK(id=1), style TEXT NOT NULL CHECK(style IN ('studio','pixel')))"
+            )
+            self._relocate_project_paths()
+
+    def _relocate_project_paths(self):
+        """Resolve Workspace-owned folders when the profile moves to another drive."""
+        projects = self.connection.execute(
+            "SELECT p.id, p.path, s.source FROM projects p "
+            "LEFT JOIN project_sources s ON s.project_id=p.id "
+            "WHERE p.id='__direct_chats__' OR s.source IN ('virtual','github')"
+        )
+        for project in projects.fetchall():
+            key = project["id"]
+            previous = Path(project["path"])
+            if key == "__direct_chats__":
+                target = self.root / "chat-files"
+            else:
+                if previous.name != key or previous.parent.name != "projects":
+                    continue
+                target = self.root / "projects" / key
+                if project["source"] == "github" and not target.is_dir():
+                    continue
+            if previous != target:
+                self.connection.execute("UPDATE projects SET path=? WHERE id=?", (str(target), key))
+
+    def companion_appearance(self):
+        rows = self.rows("SELECT style FROM mini_appearance WHERE id=1")
+        return rows[0]["style"] if rows else "studio"
+
+    def set_companion_appearance(self, style):
+        with self.transaction() as db:
+            db.execute("INSERT INTO mini_appearance(id,style) VALUES(1,?) "
+                       "ON CONFLICT(id) DO UPDATE SET style=excluded.style", (style,))
 
     @contextmanager
     def transaction(self):

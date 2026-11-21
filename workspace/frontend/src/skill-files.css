@@ -1,0 +1,41 @@
+.skill-file-row:has(.skill-file-list) { flex-wrap: wrap; }
+.skill-file-list { flex: 1 0 100%; min-width: 0; padding: 0; margin: 0; list-style: none; }
+.skill-file-list li { display: flex; align-items: center; gap: 6px; }
+.skill-file-list li > span, .skill-download > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-file-list li > span { flex: 1; }
+.skill-download { display: inline-flex; align-items: center; max-width: 100%; gap: 7px; margin: 5px 5px 0 0; color: var(--accent); font-size: var(--font-ui); }
+.message-files, .message-file-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+.message-file-list {
+  margin: 0;
+  padding: 0;
+  max-height: 88px;
+  overflow: auto;
+  list-style: none;
+}
+.message-file-list .file-chip { max-width: 230px; }
+.message-file-list .file-chip > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+.skill-pick-list, .skill-bundle-children { list-style: none; padding: 0; margin: 0; }
+.skill-library > li + li { border-top: 1px solid var(--rule); }
+.skill-bundle-heading { display: flex; align-items: center; gap: 8px; padding: 3px 8px; }
+.skill-library .skill-bundle-heading { padding: 8px 0; }
+.skill-bundle-heading input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.skill-bundle-heading button {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
+  border: 0; border-radius: 6px; padding: 7px 4px; background: transparent;
+  text-align: left; color: inherit; font: inherit; cursor: pointer;
+}
+.skill-bundle-heading button:hover { background: #edf3ff; }
+.skill-bundle-heading button strong { flex: 1; overflow-wrap: anywhere; font-size: var(--font-body); }
+.skill-bundle-heading button small { color: var(--secondary); font-size: var(--font-meta); white-space: nowrap; }
+.group-chevron { display: inline-flex; transform: rotate(-90deg); }
+.skill-bundle-heading button[aria-expanded="true"] .group-chevron { transform: none; }
+.skill-bundle-children { margin: 0 0 7px 15px; padding-left: 9px; border-left: 1px solid var(--rule); }
+.skill-bundle-children[hidden] { display: none; }
+.skill-library .skill-bundle-children .library-row { padding: 9px 0; }

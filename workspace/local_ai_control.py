@@ -145,9 +145,24 @@ def check_summary(model: str, result: dict) -> dict:
     }
 
 
+def portable_profile(package_dir: Path | None = None) -> Path:
+    if package_dir is None:
+        package_dir = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+    if package_dir.name.lower() == "worker" and package_dir.parent.name.lower() == "dist":
+        return package_dir.parent.parent / "workspace-profile"
+    if package_dir.name == "workspace" and (package_dir / "launcher.py").is_file():
+        return package_dir.parent / "workspace-profile"
+    return package_dir / "workspace-profile"
+
+
 def workspace_root() -> Path:
     configured = os.getenv("LOCAL_AI_WORKSPACE_DATA_DIR")
-    return Path(configured or Path(os.getenv("LOCALAPPDATA", Path.home() / ".local/share")) / "LocalAIWorkspace").resolve()
+    if configured:
+        return Path(configured).resolve()
+    portable = portable_profile()
+    if (portable / "workspace.sqlite3").is_file():
+        return portable
+    return Path(os.getenv("LOCALAPPDATA", Path.home() / ".local/share")) / "LocalAIWorkspace"
 
 
 def run(args) -> dict:

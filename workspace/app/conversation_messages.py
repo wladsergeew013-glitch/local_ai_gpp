@@ -34,6 +34,8 @@ def project_messages(rows):
         if row["kind"] == "chat_message":
             role = p["role"]
             value = p.get("text", "")
+            if files := p.get("documents"):
+                value += "\n" + " · ".join(d["name"] for d in files)
             error = p.get("error") or (
                 "Ответ остановлен." if p.get("phase") == "cancelled" else ""
             )

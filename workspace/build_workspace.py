@@ -93,6 +93,8 @@ def main():
         "--add-data",
         str(ROOT / "frontend/public/assistant") + ";workspace_assistant",
         "--add-data",
+        str(WORKSPACE / "assets/assistant-3d") + ";workspace_assistant_3d",
+        "--add-data",
         str(ROOT / "models_storage/branding/icons") + ";workspace_icons",
         "--collect-submodules",
         "workspace",

@@ -11,13 +11,51 @@ import os
 import queue
 import sys
 import threading
+import time
+from collections import deque
+from functools import cache
 from pathlib import Path
+from workspace.app.companion_layout import AVATAR_SIZE, FACE_ANCHORS
 
 
 def assets():
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "workspace_assistant"
     return Path(__file__).resolve().parents[2] / "frontend/public/assistant"
+
+
+def rendered_assets():
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "workspace_assistant_3d"
+    return Path(__file__).resolve().parents[1] / "assets/assistant-3d"
+
+
+def load_portraits(root, *, native=False):
+    from PIL import Image, ImageSequence, ImageTk
+
+    def photo(frame):
+        picture = frame.convert("RGBA")
+        picture.thumbnail(AVATAR_SIZE, Image.Resampling.LANCZOS)
+        return picture if native else ImageTk.PhotoImage(picture, master=root)
+
+    pixel, studio = {}, {}
+    for state, prefix in (("ready", "ready"), ("thinking", "thinking"), ("speaking", "answered")):
+        frames = []
+        for path in sorted((assets() / "frames").glob(f"{prefix}_*.png")):
+            with Image.open(path) as frame:
+                frames.append(photo(frame))
+            if state == "ready":
+                break
+        pixel[state] = frames
+        with Image.open(rendered_assets() / f"{state}.webp") as animation:
+            studio[state] = [photo(frame) for frame in ImageSequence.Iterator(animation)]
+    with Image.open(rendered_assets() / "documents.webp") as animation:
+        studio["documents"] = [photo(frame) for frame in ImageSequence.Iterator(animation)]
+    pixel["documents"] = pixel["thinking"]
+    if not pixel["ready"]:
+        with Image.open(icon_path().with_suffix(".png")) as fallback:
+            pixel["ready"] = [photo(fallback)]
+    return {"pixel": pixel, "studio": studio}
 
 
 def icon_path():
@@ -58,30 +96,61 @@ def work_area(x=None, y=None):
     return work_area()
 
 
-def clamp_position(x, y, width, height, bounds):
+def desktop_work_areas():
+    if os.name != "nt":
+        return (work_area(),)
+    import ctypes
+    from ctypes import wintypes
+
+    areas = []
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                                  ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    @callback
+    def visit(handle, dc, rect, data):
+        box = rect.contents
+        areas.append(work_area((box.left + box.right) // 2, (box.top + box.bottom) // 2))
+        return True
+
+    api = ctypes.WinDLL("user32", use_last_error=True)
+    api.EnumDisplayMonitors.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.RECT), callback, wintypes.LPARAM]
+    api.EnumDisplayMonitors(None, None, visit, 0)
+    return tuple(dict.fromkeys(areas))
+
+
+def clamp_position(x, y, width, height, bounds, screens=()):
     left, top, right, bottom = bounds
-    return max(left, min(x, right - width)), max(top, min(y, bottom - height))
+    cx, cy = max(left, min(x, right - width)), max(top, min(y, bottom - height))
+    if (cx, cy) == (x, y) or len(screens) < 2:
+        return cx, cy
+    # An extended desktop can contain gaps. Allow straddling a seam only
+    # when the entire portrait is covered by adjacent monitor work areas.
+    for px, py in ((x, y), (x, cy), (cx, y)):
+        covered = sum(max(0, min(px + width, r) - max(px, l)) * max(0, min(py + height, b) - max(py, t))
+                      for l, t, r, b in screens)
+        if covered == width * height:
+            return px, py
+    return cx, cy
 
 
-def position_window(root, x, y):
+@cache
+def _position_api():
+    import ctypes
+
+    api = ctypes.WinDLL("user32", use_last_error=True)
+    api.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    api.GetAncestor.restype = ctypes.c_void_p
+    api.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    return api
+
+
+def position_window(root, x, y, *, flush_layout=True):
     if os.name == "nt":
-        # Tk treats a negative geometry offset as distance from the right edge.
-        # Windows desktop coordinates can be negative on a secondary monitor.
         import ctypes
-
-        api = ctypes.WinDLL("user32", use_last_error=True)
-        api.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-        api.GetAncestor.restype = ctypes.c_void_p
-        api.SetWindowPos.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_uint,
-        ]
-        root.update_idletasks()
+        # Native desktop coordinates also support monitors left of the origin.
+        api = _position_api()
+        if flush_layout:
+            root.update_idletasks()
         handle = api.GetAncestor(root.winfo_id(), 2)
         if not api.SetWindowPos(handle, None, x, y, 0, 0, 0x0015):
             raise ctypes.WinError()
@@ -100,17 +169,18 @@ class MiniAvatar:
         start_hidden=False,
         api_base=None,
         ui_token=None,
+        appearance=None,
     ):
         self.data = root
         self.api_base = api_base
         self.ui_token = ui_token
+        self.read_appearance = appearance or (lambda: "studio")
         self.chat = None
         self.on_bubble = on_bubble
         self.on_main = on_main
         self.on_exit = on_exit
         self.commands = queue.SimpleQueue()
-        self.width = 154
-        self.height = 210
+        self.width, self.height = AVATAR_SIZE
         self.state = "ready"
         self.visible = True
         self.initialized = threading.Event()
@@ -144,6 +214,9 @@ class MiniAvatar:
 
     def set_state(self, state):
         self._submit("state", state)
+
+    def refresh_appearance(self):
+        self._submit("appearance")
 
     def close(self):
         self._submit("close")
@@ -179,9 +252,9 @@ class MiniAvatar:
 
     def _tk_loop(self):
         root = None
+        layer = None
         try:
             import tkinter as tk
-            from PIL import Image, ImageTk
 
             root = tk.Tk()
             if self.start_hidden:
@@ -205,56 +278,31 @@ class MiniAvatar:
                 x, y = int(saved["x"]), int(saved["y"])
             except (OSError, ValueError, KeyError, TypeError):
                 pass
-            x, y = clamp_position(x, y, self.width, self.height, work_area(x, y))
+            x, y = clamp_position(x, y, self.width, self.height, work_area(x, y), desktop_work_areas())
             self.position = (x, y)
             root.geometry(f"{self.width}x{self.height}")
             position_window(root, x, y)
-            pictures = {}
-            for state, prefix in [
-                ("ready", "ready"),
-                ("thinking", "thinking"),
-                ("speaking", "answered"),
-            ]:
-                frames = []
-                for index in range(1 if state == "ready" else 4):
-                    path = assets() / "frames" / f"{prefix}_{index}.png"
-                    if not path.is_file():
-                        continue
-                    with Image.open(path) as original:
-                        picture = original.convert("RGBA")
-                        picture.thumbnail(
-                            (self.width, self.height), Image.Resampling.LANCZOS
-                        )
-                    frames.append(ImageTk.PhotoImage(picture, master=root))
-                pictures[state] = frames
-            avatar = tk.Label(root, bg=transparent, borderwidth=0)
-            avatar.pack(fill="both", expand=True)
-            if not pictures["ready"]:
-                fallback = icon_path().with_suffix(".png")
-                if fallback.is_file():
-                    with Image.open(fallback) as original:
-                        picture = original.convert("RGBA")
-                        picture.thumbnail(
-                            (self.width, self.height), Image.Resampling.LANCZOS
-                        )
-                    pictures["ready"] = [ImageTk.PhotoImage(picture, master=root)]
-                else:
-                    avatar.configure(
-                        text="✓", fg="#25a957", font=("Segoe UI", 60, "bold")
-                    )
-            badge = tk.Label(
-                root,
-                text="✓",
-                font=("Segoe UI", 17, "bold"),
-                fg="white",
-                bg="#25a957",
-                padx=5,
-                pady=2,
-                borderwidth=2,
-                relief="solid",
-            )
-            size = max(30, min(42, int(self.width * 0.22)))
-            badge.place(x=self.width - size - 12, y=14, width=size, height=size)
+            native = os.name == "nt"
+            portraits = load_portraits(root, native=native)
+            style = self.read_appearance()
+            stage = tk.Canvas(root, bg=transparent, borderwidth=0, highlightthickness=0)
+            stage.pack(fill="both", expand=True)
+            if not native:
+                avatar = stage.create_image(0, 0, tags="avatar")
+                badge = stage.create_oval(0, 0, 0, 0, outline="#f5faff", width=2, tags="avatar")
+                symbol = stage.create_text(0, 0, font=("Segoe UI", 13, "bold"), fill="white", tags="avatar")
+
+            def place_avatar(x, y):
+                if native:
+                    if layer:
+                        layer.sync(self.position, root.winfo_ismapped())
+                    return
+                stage.coords(avatar, x + self.width // 2, y + self.height // 2)
+                bx, by = x + self.width - 26, y + 29
+                stage.coords(badge, bx - 13, by - 13, bx + 13, by + 13)
+                stage.coords(symbol, bx, by)
+
+            place_avatar(0, 0)
             if self.api_base:
                 from workspace.app.native_chat import NativeChatBubble
 
@@ -267,36 +315,44 @@ class MiniAvatar:
                     prefs=saved.get("chat"),
                     hidden=self.start_hidden,
                     ui_token=self.ui_token,
+                    stage=stage,
+                    place_avatar=place_avatar,
+                    face_anchor=lambda: FACE_ANCHORS[style],
                 )
-            drag = {"origin": None, "moved": False}
+                root.bind("<Map>", lambda e: root.after_idle(self.chat.reposition)
+                          if e.widget is root and self.chat else None, add="+")
+            drag = {"origin": None, "moved": False, "bounds": None, "screens": ()}
 
-            def begin(event):
-                drag.update(
-                    origin=(event.x_root, event.y_root, *self.position), moved=False
-                )
-                if os.name == "nt":
-                    root.after(12, poll_drag)
+            def begin(px, py):
+                drag.update(origin=(px, py, *self.position), moved=False, bounds=work_area(px, py),
+                            screens=desktop_work_areas())
 
-            def move(event):
+            def move(pointer_x, pointer_y):
                 if not drag["origin"]:
                     return
                 px, py, ox, oy = drag["origin"]
-                dx, dy = event.x_root - px, event.y_root - py
+                dx, dy = pointer_x - px, pointer_y - py
                 if abs(dx) + abs(dy) > 4:
                     drag["moved"] = True
+                left, top, right, bottom = drag["bounds"]
+                if not (left <= pointer_x < right and top <= pointer_y < bottom):
+                    drag["bounds"] = work_area(pointer_x, pointer_y)
                 x, y = clamp_position(
                     ox + dx,
                     oy + dy,
                     self.width,
                     self.height,
-                    work_area(event.x_root, event.y_root),
+                    drag["bounds"],
+                    drag["screens"],
                 )
-                self.position = (x, y)
-                position_window(root, x, y)
-                if self.chat:
-                    self.chat.reposition()
+                if (x, y) != self.position:
+                    self.position = (x, y)
+                    if self.chat:
+                        self.chat.reposition(bounds=drag["bounds"])
+                    else:
+                        position_window(root, x, y, flush_layout=False)
 
-            def end(event):
+            def end():
                 if not drag["origin"]:
                     return
                 if drag["moved"]:
@@ -309,22 +365,6 @@ class MiniAvatar:
                             target=lambda: self.on_bubble(self.position), daemon=True
                         ).start()
                 drag["origin"] = None
-
-            def poll_drag():
-                if not drag["origin"]:
-                    return
-                import ctypes
-                from ctypes import wintypes
-                from types import SimpleNamespace
-
-                api = ctypes.WinDLL("user32", use_last_error=True)
-                point = wintypes.POINT()
-                if api.GetCursorPos(ctypes.byref(point)):
-                    move(SimpleNamespace(x_root=point.x, y_root=point.y))
-                if not (api.GetAsyncKeyState(1) & 0x8000):
-                    end(None)
-                else:
-                    root.after(12, poll_drag)
 
             menu = tk.Menu(root, tearoff=False)
             menu.add_command(
@@ -348,21 +388,56 @@ class MiniAvatar:
                 ).start(),
             )
 
-            def context(event):
+            def open_menu(x, y):
                 try:
-                    menu.tk_popup(event.x_root, event.y_root)
+                    menu.tk_popup(x, y)
                 finally:
                     menu.grab_release()
 
-            for widget in (avatar, badge):
-                widget.bind("<ButtonPress-1>", begin)
-                if os.name != "nt":
-                    widget.bind("<B1-Motion>", move)
-                    widget.bind("<ButtonRelease-1>", end)
-                widget.bind("<Button-3>", context)
-            frame = [0]
+            if native:
+                from workspace.app.windows_portrait import PortraitWindow
+
+                # The native callback and Tk run on the same thread. Keep only
+                # the latest motion between button events, preserving their order.
+                pointer_events = deque()
+                def enqueue_pointer(name, point):
+                    event = (name, point)
+                    if name == "portrait_move" and pointer_events and pointer_events[-1][0] == name:
+                        pointer_events[-1] = event
+                    else:
+                        pointer_events.append(event)
+
+                def handle_pointer():
+                    nonlocal pointer_timer
+                    while pointer_events:
+                        name, point = pointer_events.popleft()
+                        if name == "portrait_press":
+                            begin(*point)
+                        elif name == "portrait_move":
+                            move(*point)
+                        elif name == "portrait_release":
+                            move(*point)
+                            end()
+                        elif name == "portrait_cancel":
+                            drag["origin"] = None
+                        elif name == "portrait_menu":
+                            open_menu(*point)
+                    interval = 4 if drag["origin"] else (16 if self.visible else 100)
+                    pointer_timer = root.after(interval, handle_pointer)
+
+                layer = PortraitWindow(root, AVATAR_SIZE, enqueue_pointer)
+                pointer_timer = root.after(8, handle_pointer)
+            else:
+                stage.tag_bind("avatar", "<ButtonPress-1>", lambda e: begin(e.x_root, e.y_root))
+                stage.bind("<B1-Motion>", lambda e: move(e.x_root, e.y_root))
+                stage.bind("<ButtonRelease-1>", lambda e: end())
+                stage.tag_bind("avatar", "<Button-3>", lambda e: open_menu(e.x_root, e.y_root))
+            epoch = time.monotonic()
+            last_image = None
+            last_badge = None
 
             def tick():
+                nonlocal style, epoch, last_image, last_badge
                 while not self.commands.empty():
                     name, value = self.commands.get_nowait()
                     if name == "close":
@@ -370,39 +445,70 @@ class MiniAvatar:
                         if self.chat:
                             self.chat.close()
                             self.chat = None
+                        if layer:
+                            root.after_cancel(pointer_timer)
+                            layer.close()
+                        else:
+                            stage.itemconfigure(avatar, image="")
+                        last_image = None
+                        portraits.clear()
                         root.destroy()
                         return
                     if name == "show":
                         root.deiconify()
                         root.lift()
+                        self.visible = True
                     if name == "hide":
                         if self.chat:
                             self.chat.hide()
                         root.withdraw()
+                        self.visible = False
                     if name == "show_chat" and self.chat:
                         self.chat.show()
                     if name == "hide_chat" and self.chat:
                         self.chat.hide()
                     if name == "toggle_chat" and self.chat:
                         self.chat.toggle()
-                    if name == "state":
+                    if name == "appearance":
+                        style = self.read_appearance()
+                        self.frame_counts = {name: len(frames) for name, frames in portraits[style].items()}
+                        epoch = time.monotonic()
+                        if self.chat and self.chat.visible:
+                            self.chat.reposition()
+                    if name == "state" and value != self.state:
                         self.state = value
-                        frame[0] = 0
+                        epoch = time.monotonic()
+                pictures = portraits[style]
                 frames = pictures.get(self.state) or pictures["ready"]
-                if frames:
-                    avatar.configure(image=frames[frame[0] % len(frames)])
-                    frame[0] += 1
-                glyph, color = {
+                delay = 1 / 14 if style == "studio" else (.35 if self.state in {"thinking", "documents"} else .65)
+                current = int((time.monotonic() - epoch) / delay) % len(frames)
+                image = frames[current]
+                badge_style = {
                     "ready": ("✓", "#25a957"),
                     "thinking": ("?", "#1e67cd"),
+                    "documents": ("?", "#1e67cd"),
                     "speaking": ("…", "#e3a51d"),
                     "error": ("!", "#c5453c"),
                     "awaiting_permission": ("!", "#e3a51d"),
-                }.get(self.state, ("✓", "#25a957"))
-                badge.configure(text=glyph, bg=color)
-                root.after(350 if self.state == "thinking" else 650, tick)
+                }.get(self.state, ("✓", "#25a957")) if style == "pixel" else None
+                if last_image is not image or last_badge != badge_style:
+                    if layer:
+                        layer.paint(image, badge_style)
+                    else:
+                        stage.itemconfigure(avatar, image=image)
+                        if badge_style:
+                            glyph, color = badge_style
+                            stage.itemconfigure(symbol, text=glyph, state="normal")
+                            stage.itemconfigure(badge, fill=color, state="normal")
+                        else:
+                            stage.itemconfigure(symbol, state="hidden")
+                            stage.itemconfigure(badge, state="hidden")
+                    last_image, last_badge = image, badge_style
+                if layer:
+                    layer.sync(self.position, root.winfo_ismapped())
+                root.after(35 if self.visible else 100, tick)
 
-            self.frame_counts = {name: len(frames) for name, frames in pictures.items()}
+            self.frame_counts = {name: len(frames) for name, frames in portraits[style].items()}
             self.initialized.set()
             tick()
             root.mainloop()
@@ -413,6 +519,8 @@ class MiniAvatar:
 
             traceback.print_exc()
         finally:
+            if layer:
+                layer.close()
             if self.chat:
                 with contextlib.suppress(Exception):
                     self.chat.close()

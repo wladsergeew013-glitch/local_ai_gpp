@@ -1,5 +1,7 @@
+import { Icon } from "./Icon";
 import { useMemo, useState } from "react";
 import { states, type Bootstrap, type Conversation } from "./chat";
+import "./sidebar-version.css";
 
 const collapsedProjectsKey = "workspace-collapsed-projects";
 
@@ -151,9 +153,11 @@ export function WorkspaceSidebar({
         </nav>
       </div>
       <div className="side-footer">
-        <button type="button" onClick={showAssistant}>◉ Мини-помощник</button>
-        <button type="button" onClick={openSettings}>⚙ Настройки</button>
-        <small>Workspace {boot.version}</small>
+        <button type="button" onClick={showAssistant}><Icon name="assistant" />Мини-помощник</button>
+        <div className="sidebar-settings-line">
+          <button type="button" onClick={openSettings}><Icon name="settings" />Настройки</button>
+          {boot.version && <span className="sidebar-version" title={`Версия Workspace ${boot.version}`}>v{boot.version}</span>}
+        </div>
       </div>
     </aside>
   );
